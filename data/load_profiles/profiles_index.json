@@ -1,0 +1,75 @@
+{
+  "profiles": [
+    {
+      "id": "escola_school_day_synthetic_for_testing",
+      "setor": "escola",
+      "path": "escola/escola_school_day_synthetic_for_testing.json",
+      "tipo_perfil": "synthetic_for_testing",
+      "nome": "Perfil sintético escola"
+    },
+    {
+      "id": "supermercado_market_extended_synthetic_for_testing",
+      "setor": "supermercado",
+      "path": "supermercado/supermercado_market_extended_synthetic_for_testing.json",
+      "tipo_perfil": "synthetic_for_testing",
+      "nome": "Perfil sintético supermercado"
+    },
+    {
+      "id": "frigorifico_cold_storage_flat_synthetic_for_testing",
+      "setor": "frigorifico",
+      "path": "frigorifico/frigorifico_cold_storage_flat_synthetic_for_testing.json",
+      "tipo_perfil": "synthetic_for_testing",
+      "nome": "Perfil sintético frigorifico"
+    },
+    {
+      "id": "industria_light_industry_synthetic_for_testing",
+      "setor": "industria",
+      "path": "industria/industria_light_industry_synthetic_for_testing.json",
+      "tipo_perfil": "synthetic_for_testing",
+      "nome": "Perfil sintético industria"
+    },
+    {
+      "id": "escritorio_office_commercial_synthetic_for_testing",
+      "setor": "escritorio",
+      "path": "escritorio/escritorio_office_commercial_synthetic_for_testing.json",
+      "tipo_perfil": "synthetic_for_testing",
+      "nome": "Perfil sintético escritorio"
+    },
+    {
+      "id": "varejo_retail_store_synthetic_for_testing",
+      "setor": "varejo",
+      "path": "varejo/varejo_retail_store_synthetic_for_testing.json",
+      "tipo_perfil": "synthetic_for_testing",
+      "nome": "Perfil sintético varejo"
+    },
+    {
+      "id": "restaurante_restaurant_night_synthetic_for_testing",
+      "setor": "restaurante",
+      "path": "restaurante/restaurante_restaurant_night_synthetic_for_testing.json",
+      "tipo_perfil": "synthetic_for_testing",
+      "nome": "Perfil sintético restaurante"
+    },
+    {
+      "id": "hotel_hotel_24h_synthetic_for_testing",
+      "setor": "hotel",
+      "path": "hotel/hotel_hotel_24h_synthetic_for_testing.json",
+      "tipo_perfil": "synthetic_for_testing",
+      "nome": "Perfil sintético hotel"
+    },
+    {
+      "id": "hospital_hospital_24h_synthetic_for_testing",
+      "setor": "hospital",
+      "path": "hospital/hospital_hospital_24h_synthetic_for_testing.json",
+      "tipo_perfil": "synthetic_for_testing",
+      "nome": "Perfil sintético hospital"
+    },
+    {
+      "id": "custom_custom_import_template_synthetic_for_testing",
+      "setor": "custom",
+      "path": "custom/custom_custom_import_template_synthetic_for_testing.json",
+      "tipo_perfil": "synthetic_for_testing",
+      "nome": "Perfil sintético custom"
+    }
+  ],
+  "warning": "Perfis synthetic_for_testing. Não usar para proposta real sem validação."
+}

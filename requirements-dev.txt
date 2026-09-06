@@ -1,0 +1,6 @@
+# Dependências de desenvolvimento — não vão para o deploy.
+-r requirements.txt
+
+pytest>=8.0
+# Leitura de datasheet em PDF, usada para alimentar o catálogo.
+pypdf>=5.0

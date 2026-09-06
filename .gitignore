@@ -1,0 +1,19 @@
+.venv/
+__pycache__/
+# Os dois repositórios de origem têm .git próprio: o git os registraria como
+# submódulo vazio, e o deploy subiria sem o conteúdo. Eles já vivem no GitHub
+# da PACE em separado.
+_legacy/
+*.bak
+*.py[cod]
+.pytest_cache/
+.cache/
+outputs/
+propostas/
+leads/
+.streamlit/secrets.toml
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz

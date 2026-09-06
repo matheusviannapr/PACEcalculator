@@ -1,0 +1,13 @@
+# Preto e âmbar da PACE. O âmbar é a cor primária porque é a de destaque da
+# marca; o fundo é o preto do letreiro, levemente quente, e não um cinza
+# neutro — a diferença aparece lado a lado com a logo.
+[theme]
+base = "dark"
+primaryColor = "#F8C112"
+backgroundColor = "#161615"
+secondaryBackgroundColor = "#242422"
+textColor = "#FAFAF8"
+
+[server]
+headless = true
+fileWatcherType = "poll"

@@ -1,0 +1,19 @@
+# Núcleo — cálculo e geometria
+numpy>=1.26
+pandas>=2.0
+shapely>=2.0
+pyproj>=3.6
+requests>=2.31
+
+# Planilha de equipamentos
+openpyxl>=3.1
+XlsxWriter>=3.2
+
+# Estudo de baterias — gráficos e tabelas do relatório
+matplotlib>=3.8
+tabulate>=0.9
+
+# Interface
+streamlit>=1.35
+folium>=0.15
+streamlit-folium>=0.20
