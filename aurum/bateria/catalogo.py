@@ -264,6 +264,106 @@ class InversorHibrido:
 # ----------------------------------------------------------------------------
 # Conjunto: inversor + banco
 # ----------------------------------------------------------------------------
+#: O bloco de bateria do varejo residencial: 5 kWh e 5 kW.
+#:
+#: É a unidade em que o produto é vendido e em que o preço é cotado — a tabela
+#: do distribuidor cobra por bloco, e a diferença entre a coluna split-phase e
+#: a coluna com bateria é exatamente um deles. Dimensionar em blocos, e não em
+#: kWh contínuos, é o que faz o número do estudo coincidir com o número do
+#: orçamento.
+#:
+#: Sem fabricante e sem modelo de propósito: o estudo especifica característica
+#: nominal, e a referência comercial vai no anexo.
+BLOCO_KWH = 5.0
+BLOCO_KW = 5.0
+
+#: Quantos blocos cabem num banco residencial. Acima disso o caso deixa de ser
+#: residencial e o catálogo de produtos reais volta a fazer mais sentido.
+MAX_BLOCOS = 12
+
+
+def bloco_padrao(
+    capacidade_kwh: float = BLOCO_KWH,
+    potencia_kw: float = BLOCO_KW,
+) -> "Bateria":
+    """
+    O módulo padrão de bateria, sem marca.
+
+    Profundidade de descarga de 95% e rendimento de ida e volta de 95% são os
+    valores típicos de LFP com BMS integrado, e são os mesmos que os módulos
+    reais do catálogo declaram — o bloco não é otimista em relação ao que
+    existe, é apenas genérico.
+    """
+    return Bateria(
+        modelo=f"Bloco de {capacidade_kwh:g} kWh",
+        fabricante="",
+        quimica="LFP",
+        capacidade_nominal_kwh=float(capacidade_kwh),
+        tensao_nominal_v=51.2,
+        profundidade_descarga_percent=95.0,
+        eficiencia_roundtrip_percent=95.0,
+        potencia_carga_max_kw=float(potencia_kw),
+        potencia_descarga_max_kw=float(potencia_kw),
+        ciclos_vida=6000,
+        retencao_fim_vida_percent=80.0,
+        max_modulos_paralelo=MAX_BLOCOS,
+        preco_brl=None,
+        fonte_dado="bloco padrão de dimensionamento",
+    )
+
+
+def candidatos_em_blocos(
+    base: "BaseBaterias",
+    tensao_rede_v: float | None = None,
+    max_blocos: int = MAX_BLOCOS,
+    capacidade_kwh: float = BLOCO_KWH,
+    potencia_kw: float = BLOCO_KW,
+) -> list["ConjuntoArmazenamento"]:
+    """
+    Um candidato por combinação de inversor e número de blocos.
+
+    Substitui a varredura do catálogo inteiro quando o caso é residencial. A
+    varredura devolvia 296 combinações com capacidades de 2,2 a 94,7 kWh e
+    respondia "qual produto existe"; o cliente pergunta "quantos blocos eu
+    levo", e essas são perguntas diferentes.
+
+    O filtro de rede vem antes de tudo: um inversor de 380 V não vira 220 V
+    com corte de carga nem com boa vontade, e deixá-lo na lista só adia a
+    descoberta.
+    """
+    bloco = bloco_padrao(capacidade_kwh, potencia_kw)
+    inversores = [
+        i for i in base.inversores
+        if tensao_rede_v is None or i.atende_rede(float(tensao_rede_v))
+    ] or list(base.inversores)
+    if not inversores:
+        return []
+
+    # Dois inversores por número de blocos, e não o produto cruzado inteiro.
+    # Cruzar dava 72 candidatos numa rede de 220 V, e a varredura de apagões
+    # roda uma vez por candidato.
+    #
+    # Quais dois: o menor que atende a rede, que é a escolha residencial
+    # comum, e o menor que entrega a potência **do banco**, para o caso em que
+    # o gargalo precisa ser a bateria e não o inversor. Casar sempre com o
+    # segundo seria errado — daria um inversor de 50 kW para três blocos numa
+    # casa, porque o catálogo de 220 V salta de 10 para 50 kW. Quem dimensiona
+    # o inversor é a carga, e não o máximo teórico do banco; o par de opções
+    # deixa a varredura decidir com o pico real na mão.
+    por_potencia = sorted(inversores, key=lambda i: i.potencia_ca_nominal_kw)
+    candidatos: list[ConjuntoArmazenamento] = []
+    for n in range(1, min(max_blocos, bloco.max_modulos_paralelo) + 1):
+        exigido = n * float(potencia_kw)
+        escolhidos = [por_potencia[0]]
+        acima = next(
+            (i for i in por_potencia if i.potencia_ca_nominal_kw >= exigido), None)
+        if acima is not None and acima.modelo != por_potencia[0].modelo:
+            escolhidos.append(acima)
+        for inversor in escolhidos:
+            candidatos.append(ConjuntoArmazenamento(inversor, bloco, n))
+    return candidatos
+
+
 @dataclass(frozen=True)
 class ConjuntoArmazenamento:
     """

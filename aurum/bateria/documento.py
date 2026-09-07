@@ -1297,18 +1297,34 @@ def _secao_escopos(estudo: ResultadoEstudo, figuras: dict[str, Path]) -> str:
         ))
 
     if marginal:
-        partes.append(caixa(
-            "O preço de promover os preferíveis",
+        acrescimo = (
             f"Levar o desejável junto acrescenta "
             f"{_n(marginal['energia_diaria_kwh'], 1, 'kWh/dia')} de consumo e "
-            f"{_n(marginal['pico_kw'], 2, 'kW')} de pico ao quadro de backup. Em "
-            f"equipamento, são {_n(marginal['energia_util_kwh'], 1, 'kWh')} de banco "
-            f"a mais e {_brl(marginal['capex_brl'])} de investimento — "
-            f"{_brl(marginal['capex_por_kwh_dia'])} por kWh/dia de carga promovida. "
-            "É esse o número que decide, e não o total: o quadro essencial já foi "
-            "aprovado quando esta pergunta é feita.",
-            cor="amarelopace",
-        ))
+            f"{_n(marginal['pico_kw'], 2, 'kW')} de pico ao quadro de backup. "
+        )
+        if marginal["capex_brl"] > 0:
+            corpo = acrescimo + (
+                f"Em equipamento, são {_n(marginal['energia_util_kwh'], 1, 'kWh')} de "
+                f"banco a mais e {_brl(marginal['capex_brl'])} de investimento — "
+                f"{_brl(marginal['capex_por_kwh_dia'])} por kWh/dia de carga "
+                "promovida. É esse o número que decide, e não o total: o quadro "
+                "essencial já foi aprovado quando esta pergunta é feita."
+            )
+        else:
+            # Um "R$ 0 a mais" sem explicação parece erro de cálculo. O que ele
+            # diz é que o degrau do produto é maior que a diferença entre os
+            # dois quadros — informação comercial, e das boas.
+            corpo = acrescimo + (
+                "Em equipamento, nada: os dois quadros cabem no mesmo banco. "
+                "A bateria é vendida em bloco, e o bloco que o quadro essencial já "
+                "exige tem folga de energia e de potência para carregar também os "
+                "preferíveis. Levar o desejável, aqui, não é uma decisão de preço — "
+                "é só marcar mais circuitos no quadro de backup na hora da "
+                "instalação, e essa é uma escolha que fica bem mais cara de refazer "
+                "depois."
+            )
+        partes.append(caixa("O preço de promover os preferíveis", corpo,
+                            cor="amarelopace"))
 
     if ociosidade:
         limitante = escopos.limitante

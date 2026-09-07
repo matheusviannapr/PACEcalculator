@@ -277,7 +277,12 @@ def comparar_cenarios_de_uso(
         if ensemble_backup is not None:
             energia_alvo = float(
                 np.mean(ensemble_backup.perfis())) / 1000.0 * autonomia_alvo_h
-            candidatos = _candidatos_do_escopo(catalogo, energia_alvo)
+            from .catalogo import candidatos_em_blocos
+
+            candidatos = (
+                candidatos_em_blocos(catalogo)
+                or _candidatos_do_escopo(catalogo, energia_alvo)
+            )
             if candidatos:
                 conjunto, _, autonomia, _ = _mais_barato_que_cumpre(
                     candidatos, ensemble_backup, serie, malha,

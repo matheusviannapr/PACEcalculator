@@ -135,9 +135,14 @@ def test_o_banco_escolhido_e_o_mais_barato_que_cumpre(comparacao):
     for medida in comparacao.medidas:
         assert medida.conjunto is not None, medida.escopo.nome
         assert medida.capex_brl > 0
-    # O ampliado é maior, mas não é uma ordem de grandeza maior.
+    # O ampliado nunca é mais barato, e não é uma ordem de grandeza maior.
+    # **Igual é o caso comum**: com o banco contado em blocos de 5 kWh e 5 kW,
+    # os dois quadros de uma residência costumam caber no mesmo bloco, e aí
+    # levar os preferíveis não custa nada. Antes, com o banco saindo da
+    # varredura do catálogo, o essencial cabia num módulo de 2,2 kWh com
+    # 1,28 kW e o ampliado exigia outro equipamento.
     base, ampliado = comparacao.base, comparacao.ampliado
-    assert ampliado.capex_brl > base.capex_brl
+    assert ampliado.capex_brl >= base.capex_brl
     assert ampliado.capex_brl < base.capex_brl * 10
 
 
@@ -165,9 +170,33 @@ def test_o_marginal_e_o_numero_que_decide(comparacao):
     """
     marginal = comparacao.marginal()
     assert marginal["energia_diaria_kwh"] > 0
-    assert marginal["capex_brl"] > 0
+    # Zero é resposta legítima, e é a mais interessante: significa que o bloco
+    # que o quadro essencial já exige carrega também os preferíveis.
+    assert marginal["capex_brl"] >= 0
     assert marginal["capex_por_kwh_dia"] == pytest.approx(
         marginal["capex_brl"] / marginal["energia_diaria_kwh"])
+
+
+def test_o_bloco_padrao_costuma_zerar_o_custo_de_levar_o_desejavel(comparacao):
+    """
+    O achado que o bloco de 5 kWh / 5 kW trouxe.
+
+    Enquanto o banco saía da varredura do catálogo, o quadro essencial de uma
+    residência cabia num módulo de 2,2 kWh com 1,28 kW de descarga, e o
+    ampliado — com pico de 1,75 kW — falhava por potência e exigia outro
+    equipamento. Com o bloco padrão, a descarga é 5 kW e a restrição some: os
+    dois quadros cabem no mesmo bloco.
+
+    Isso muda a conversa comercial. Não se está pedindo ao cliente que pague
+    mais para levar o desejável; está-se pedindo que ele decida agora quais
+    circuitos entram no quadro de backup, porque refazer isso depois custa.
+    """
+    base, ampliado = comparacao.base, comparacao.ampliado
+    if base.conjunto is None or ampliado.conjunto is None:
+        pytest.skip("sem banco dimensionado nos dois escopos")
+    if base.conjunto.modulos != ampliado.conjunto.modulos:
+        pytest.skip("os quadros exigiram números de blocos diferentes")
+    assert comparacao.marginal()["capex_brl"] == pytest.approx(0.0)
 
 
 def test_a_ociosidade_diz_o_que_ja_esta_pago(comparacao):

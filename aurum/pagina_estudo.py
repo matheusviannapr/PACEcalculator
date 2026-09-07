@@ -3260,6 +3260,14 @@ def _mostrar_escopos(estudo, figuras: dict) -> None:
                 f"{marginal['energia_util_kwh']:.1f} kWh")
         _cartao(colunas[3], "Investimento a mais", _reais(marginal["capex_brl"]))
 
+    if marginal and marginal.get("capex_brl", 0) <= 0:
+        st.success(
+            "Levar os preferíveis junto **não custa nada**: os dois quadros cabem no "
+            "mesmo bloco de bateria. É só marcar mais circuitos no quadro de backup "
+            "na instalação — escolha que fica bem mais cara de refazer depois."
+        )
+        return
+
     limitante = escopos.limitante
     if limitante == "potencia":
         st.warning(

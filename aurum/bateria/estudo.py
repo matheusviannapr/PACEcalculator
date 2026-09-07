@@ -120,6 +120,13 @@ class ConfiguracaoEstudo:
     #: Comparar os três cenários de uso da residência, cada um com o seu
     #: sistema. Ver :mod:`aurum.bateria.uso`.
     comparar_uso: bool = False
+    #: Dimensionar o banco em blocos padrão de 5 kWh / 5 kW.
+    #:
+    #: É como o produto é vendido no varejo residencial e como o preço é
+    #: cotado. A varredura do catálogo inteiro continua disponível — basta
+    #: desligar isto — e faz mais sentido acima da faixa residencial, onde o
+    #: banco deixa de ser modular e passa a ser projeto.
+    banco_em_blocos: bool = True
     #: As tabelas do cenário, por cômodo, como o usuário as editou. O núcleo
     #: do D² converte intervalo e duração em minutos e descarta o resto; o
     #: anexo precisa do original para dizer por quanto tempo cada equipamento
@@ -458,6 +465,30 @@ def _selecionar_candidatos(
     """Combinações do catálogo, filtradas pela triagem de potência."""
     if cfg.candidatos:
         return list(cfg.candidatos), []
+
+    if cfg.banco_em_blocos:
+        from .catalogo import candidatos_em_blocos
+
+        blocos = candidatos_em_blocos(base, cfg.tensao_rede_v)
+        if blocos:
+            aprovados_blocos = set(
+                diagnostico.loc[diagnostico["aprovado"], "modelo"].str.lower())
+            filtrados = [
+                c for c in blocos
+                if not aprovados_blocos or c.inversor.modelo.lower() in aprovados_blocos
+            ] or blocos
+            # O teto de candidatos vale aqui também: é controle da tela, e um
+            # caminho que o ignora transforma o controle em enfeite — além de
+            # rodar a varredura de apagões mais vezes do que se pediu.
+            filtrados.sort(key=lambda c: (c.modulos, c.potencia_descarga_kw))
+            if len(filtrados) > cfg.max_candidatos > 0:
+                # Amostra ao longo da faixa, guardando as pontas: o menor banco
+                # é o que costuma bastar, e o maior é o que prova que aumentar
+                # deixou de resolver.
+                passo = (len(filtrados) - 1) / (cfg.max_candidatos - 1) if cfg.max_candidatos > 1 else 1
+                indices = sorted({int(round(i * passo)) for i in range(cfg.max_candidatos)})
+                filtrados = [filtrados[i] for i in indices]
+            return filtrados, []
 
     aprovados = set(diagnostico.loc[diagnostico["aprovado"], "modelo"].str.lower())
     avisos: list[str] = []

@@ -314,7 +314,12 @@ def _candidatos_do_escopo(
     dela: abaixo, porque o sol pode encurtar o banco; acima, porque a potência
     pode obrigar a subir.
     """
-    todos = list(catalogo.combinacoes(modulos=modulos))
+    from .catalogo import candidatos_em_blocos
+
+    # Blocos, e não a varredura do catálogo: é a mesma unidade em que o preço
+    # é cotado e em que o cliente decide. A lista fica curta o bastante para
+    # dispensar amostragem — doze blocos, e não trezentas combinações.
+    todos = candidatos_em_blocos(catalogo) or list(catalogo.combinacoes(modulos=modulos))
     if not todos:
         return []
     if energia_alvo_kwh <= 0 or len(todos) <= quantos:
