@@ -148,6 +148,9 @@ _PADROES: dict[str, Any] = {
     "e_exigir_pvgis": False,
     #: Coluna da tabela de kit; vazio volta para a curva de R$/kWp.
     "e_topologia_kit": "",
+    #: O bloco de expansão de bateria: quanto de energia e quanto custa.
+    "e_bateria_bloco_kwh": None,
+    "e_bateria_bloco_brl": None,
     #: As duas parcelas que a obra soma ao kit, em R$/kWp.
     "e_mao_de_obra": None,
     "e_material_ca": None,
@@ -2617,6 +2620,9 @@ def _controles_do_kit() -> tuple[str | None, float, float]:
     equipamento é mais caro.
     """
     from .pv.kits import (
+        BATERIA_BLOCO_BRL,
+        BATERIA_BLOCO_KWH,
+        DESCRICAO_TOPOLOGIA,
         MAO_DE_OBRA_BRL_KWP,
         MATERIAL_CA_BRL_KWP,
         POTENCIA_MAXIMA_KWP,
@@ -2674,6 +2680,30 @@ def _controles_do_kit() -> tuple[str | None, float, float]:
             help="Cabo CA até o quadro, disjuntores, DPS, eletroduto e aterramento. "
                  "Inversor longe do padrão de entrada sobe este número.",
         )
+        if topologia:
+            st.caption(DESCRICAO_TOPOLOGIA.get(topologia, ""))
+
+        # A bateria entra em bloco, e não em R$/kWh contínuo: é assim que se
+        # compra, e é o que a própria tabela mostra — a coluna "Split + 5kWh"
+        # é o kit split-phase mais um bloco.
+        bloco = st.columns([1, 1, 2])
+        st.session_state["e_bateria_bloco_kwh"] = bloco[0].number_input(
+            "Bloco de bateria (kWh)", 1.0, 50.0, step=0.5,
+            key="e_bateria_bloco_kwh_w",
+            value=float(st.session_state.get("e_bateria_bloco_kwh") or BATERIA_BLOCO_KWH),
+        )
+        st.session_state["e_bateria_bloco_brl"] = bloco[1].number_input(
+            "Preço do bloco (R$)", 0.0, 200_000.0, step=500.0,
+            key="e_bateria_bloco_brl_w",
+            value=float(st.session_state.get("e_bateria_bloco_brl") or BATERIA_BLOCO_BRL),
+        )
+        bloco[2].caption(
+            "A cada bloco, mais autonomia e mais conforto. O inversor híbrido já "
+            "vem no kit split-phase e **não** é cobrado de novo aqui — é por isso "
+            "que o preço do armazenamento é o do bloco, e não o de um sistema "
+            "inteiro."
+        )
+
         _mostrar_composicao_do_kit(topologia, kwp, mao_de_obra, material_ca)
 
     return (topologia or None), float(mao_de_obra), float(material_ca)
@@ -2692,7 +2722,12 @@ def _mostrar_composicao_do_kit(
 
     if not topologia or kwp <= 0:
         return
-    partes = composicao_de_kit(kwp, topologia, mao_de_obra, material_ca)
+    partes = composicao_de_kit(
+        kwp, topologia, mao_de_obra, material_ca,
+        bateria_kwh=float(st.session_state.get("e_energia_util_kwh") or 0.0),
+        bloco_kwh=float(st.session_state.get("e_bateria_bloco_kwh") or 5.0),
+        bloco_brl=float(st.session_state.get("e_bateria_bloco_brl") or 10_000.0),
+    )
     if partes is None:
         st.caption(
             f"A tabela não cobre {kwp:.1f} kWp em {TOPOLOGIAS.get(topologia, topologia)} "
@@ -2702,11 +2737,12 @@ def _mostrar_composicao_do_kit(
         return
 
     total = sum(partes.values())
-    colunas = st.columns(4)
-    _cartao(colunas[0], "Kit (equipamento)", _reais(partes["kit"]))
-    _cartao(colunas[1], "Mão de obra", _reais(partes["mao_de_obra"]))
-    _cartao(colunas[2], "Material CA", _reais(partes["material_ca"]))
-    _cartao(colunas[3], "Investimento", f"{_reais(total)} · {_reais(total / kwp)}/kWp")
+    rotulos = {"kit": "Kit (equipamento)", "mao_de_obra": "Mão de obra",
+               "material_ca": "Material CA", "bateria": "Banco (blocos)"}
+    colunas = st.columns(len(partes) + 1)
+    for i, (chave, valor) in enumerate(partes.items()):
+        _cartao(colunas[i], rotulos.get(chave, chave), _reais(valor))
+    _cartao(colunas[-1], "Investimento", f"{_reais(total)} · {_reais(total / kwp)}/kWp")
 
     com_bateria = preco_kit_com_bateria(kwp)
     if com_bateria:

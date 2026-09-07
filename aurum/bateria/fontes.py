@@ -701,7 +701,14 @@ def comparar_fontes(
             material_ca_brl_kwp=material_ca_brl_kwp,
         )
     )
-    capex_bat, capex_baterias = _capex_do_conjunto(conjunto, premissas)
+    # Duas contas para o mesmo banco, porque o inversor pertence a uma ou a
+    # outra conforme o arranjo. Num sistema com solar, o híbrido veio no kit e
+    # o banco custa só os blocos de expansão; num sistema **só** de bateria,
+    # não há kit nenhum, e o inversor é compra à parte. Uma conta só erraria
+    # um dos dois cenários, e os dois aparecem lado a lado no quadro final.
+    capex_bat_com_kit, capex_baterias = _capex_do_conjunto(
+        conjunto, premissas, topologia_kit)
+    capex_bat_sozinho, _ = _capex_do_conjunto(conjunto, premissas, None)
     modelo_degradacao = (
         ModeloDegradacao.do_conjunto(conjunto) if conjunto is not None else None
     )
@@ -731,6 +738,7 @@ def comparar_fontes(
         balanco = {k: v * fator for k, v in balanco.items()}
         conta = fatura.conta_anual_brl(balanco["compra"], balanco["injecao"])
 
+        capex_bat = capex_bat_com_kit if composicao.solar else capex_bat_sozinho
         capex = (
             (capex_fv if composicao.solar else 0.0)
             + (capex_bat if composicao.bateria else 0.0)
@@ -854,13 +862,32 @@ def comparar_fontes(
 
 
 def _capex_do_conjunto(
-    conjunto: ConjuntoArmazenamento | None, premissas: PremissasBateria
+    conjunto: ConjuntoArmazenamento | None,
+    premissas: PremissasBateria,
+    topologia_kit: str | None = None,
 ) -> tuple[float, float]:
-    """(CAPEX instalado, custo só das baterias) — o segundo é o que se troca."""
+    """
+    (CAPEX instalado, custo só das baterias) — o segundo é o que se troca.
+
+    Com o kit split-phase escolhido, o banco é contado em **blocos de
+    expansão** e o inversor **não** entra: ele já veio no kit fotovoltaico, e
+    cobrá-lo outra vez dobrava o preço do armazenamento num sistema que tem as
+    duas coisas. A própria tabela de preço confirma o modelo — a diferença
+    entre a coluna split-phase e a coluna com 5 kWh é o bloco, e nada mais.
+
+    Fora desse caminho vale a conta de sempre: bateria por R$/kWh mais
+    inversor, porque aí o inversor é mesmo uma compra à parte.
+    """
     if conjunto is None:
         return 0.0, 0.0
+    from ..pv.kits import TOPOLOGIA_COM_BATERIA, preco_da_bateria
     from .economia import _capex
 
+    if topologia_kit == TOPOLOGIA_COM_BATERIA:
+        baterias = preco_da_bateria(conjunto.energia_util_kwh)
+        if baterias > 0:
+            instalado = baterias * (1.0 + premissas.instalacao_percent_do_equipamento)
+            return instalado, baterias
     return _capex(conjunto, premissas)
 
 

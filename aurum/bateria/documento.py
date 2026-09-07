@@ -1333,11 +1333,11 @@ def _secao_armazenamento(estudo: ResultadoEstudo, figuras: dict[str, Path]) -> s
             "a autonomia garantida agora e depois de dez anos de degradação"
         ),
     ))
-    partes.append(_figura(
-        figuras.get("fronteira"),
-        "Fronteira de dimensionamento: a partir de certo ponto, mais energia deixa de "
-        "aumentar a autonomia porque o limite passa a ser a potência do inversor.",
-    ))
+    # A fronteira de dimensionamento saiu do documento a pedido: o que ela
+    # mostra — que a partir de certo ponto mais energia não aumenta a
+    # autonomia, porque o limite passa a ser a potência do inversor — já está
+    # dito em texto na tabela acima, e a figura exigia do leitor um esforço
+    # que o argumento não exige. Continua desenhada para a tela.
     return "\n\n".join(p for p in partes if p)
 
 
@@ -1548,12 +1548,21 @@ def _premissa_de_capex(estudo: ResultadoEstudo, comparacao) -> str:
             composicao_de_kit,
         )
 
+        # A bateria entra pelo bloco de expansão, e não pelo R$/kWh genérico: a
+        # própria tabela mostra que a coluna "Split + 5kWh" é o kit split-phase
+        # mais um bloco, e é assim que o produto é vendido. O inversor não é
+        # cobrado de novo — ele já veio no kit.
+        banco_kwh = (
+            float(estudo.recomendado.conjunto.energia_util_kwh)
+            if estudo.recomendado is not None and estudo.recomendado.conjunto else 0.0
+        )
         partes_do_kit = composicao_de_kit(
             kwp, cfg.topologia_kit,
             MAO_DE_OBRA_BRL_KWP if cfg.mao_de_obra_brl_kwp is None
             else cfg.mao_de_obra_brl_kwp,
             MATERIAL_CA_BRL_KWP if cfg.material_ca_brl_kwp is None
             else cfg.material_ca_brl_kwp,
+            bateria_kwh=banco_kwh,
         )
 
     if cfg.capex_fv_brl is not None:
@@ -1604,27 +1613,52 @@ def _premissa_de_capex(estudo: ResultadoEstudo, comparacao) -> str:
         )
     blocos = [caixa("De onde vem o investimento", origem, cor="pretopace")]
     if partes_do_kit is not None:
+        rotulos_das_parcelas = {
+            "kit": "Kit fotovoltaico (módulos, inversor e estrutura)",
+            "bateria": "Banco de baterias (blocos de expansão)",
+            "mao_de_obra": "Mão de obra, projeto, ART e homologação",
+            "material_ca": "Material do lado CA (cabo, disjuntores, DPS, quadro)",
+        }
+        total_do_kit = sum(partes_do_kit.values())
         blocos.append(tabela(
             ["Parcela", "Valor", "R$/kWp", "Do total"],
             [
-                (rotulo, _brl(valor), _brl(valor / kwp), _pct(valor / sum(partes_do_kit.values())))
-                for rotulo, valor in (
-                    ("Kit fotovoltaico (equipamento)", partes_do_kit["kit"]),
-                    ("Mão de obra e projeto", partes_do_kit["mao_de_obra"]),
-                    ("Material do lado CA", partes_do_kit["material_ca"]),
-                )
+                (rotulos_das_parcelas[chave], _brl(valor), _brl(valor / kwp),
+                 _pct(valor / total_do_kit))
+                for chave, valor in partes_do_kit.items()
             ],
             alinhamento="p{6.4cm}rrr",
-            legenda="Composição do investimento no sistema fotovoltaico",
+            legenda="Composição do investimento, parcela a parcela",
         ))
-        blocos.append(nota(
-            "O preço do kit é cotação de distribuidor, com data. As outras duas "
-            "parcelas são premissas do instalador, em R$/kWp — somadas e não "
-            "aplicadas como percentual, porque a equipe leva o mesmo tempo para "
-            "montar um kit caro e um barato de mesma potência. São elas que mudam "
-            "de uma empresa para outra, e é nelas que uma cotação de verdade deve "
-            "entrar primeiro."
-        ))
+        from ..pv.kits import (
+            BATERIA_BLOCO_BRL,
+            BATERIA_BLOCO_KWH,
+            DESCRICAO_TOPOLOGIA,
+            blocos_de_bateria,
+        )
+
+        detalhe = (
+            "O preço do kit e o do bloco de bateria são cotação de distribuidor, com "
+            "data. A mão de obra e o material CA são premissas do instalador, em "
+            "R$/kWp — somadas e não aplicadas como percentual, porque a equipe leva o "
+            "mesmo tempo para montar um kit caro e um barato de mesma potência. São "
+            "elas que mudam de uma empresa para outra, e é nelas que uma cotação de "
+            "verdade deve entrar primeiro."
+        )
+        if partes_do_kit.get("bateria"):
+            quantos = blocos_de_bateria(banco_kwh)
+            detalhe += (
+                f" O banco entra em {quantos} bloco(s) de "
+                f"{_n(BATERIA_BLOCO_KWH, 0, 'kWh')} a {_brl(BATERIA_BLOCO_BRL)} cada — "
+                "é assim que se compra, em módulo, e meio módulo não existe. O "
+                "inversor não é cobrado de novo aqui: ele já veio no kit."
+            )
+        blocos.append(nota(detalhe))
+
+        descricao = DESCRICAO_TOPOLOGIA.get(cfg.topologia_kit)
+        if descricao:
+            blocos.append(caixa(
+                "Por que esta topologia", descricao, cor="amarelopace"))
     return "\n\n".join(blocos)
 
 

@@ -365,25 +365,28 @@ def _grafico_excedencia(estudo: ResultadoEstudo, destino: Path) -> Path:
                       edgecolor="#cccccc"),
         )
 
-    # Vários modelos compartilham a mesma potência nominal: uma linha por
-    # potência, com os modelos empilhados, em vez de cinco rótulos sobrepostos.
-    por_potencia: dict[float, list[str]] = {}
+    # Uma linha por potência nominal, e **sem nome de equipamento**: o estudo
+    # discute a característica nominal, não a marca. Vários modelos do
+    # catálogo compartilham a mesma potência, e é a potência que decide se o
+    # inversor aguenta — o nome de quem a fabrica não muda a curva. As
+    # referências comerciais vão no anexo, no fim do documento.
+    por_potencia: dict[float, int] = {}
     for linha in estudo.diagnostico_inversores.itertuples():
-        por_potencia.setdefault(round(float(linha.nominal_kw), 1), []).append(str(linha.modelo))
+        chave = round(float(linha.nominal_kw), 1)
+        por_potencia[chave] = por_potencia.get(chave, 0) + 1
 
     fora_da_faixa: list[str] = []
-    for i, (potencia, modelos) in enumerate(sorted(por_potencia.items())):
+    for i, (potencia, quantos) in enumerate(sorted(por_potencia.items())):
         if potencia > limite_x:
             fora_da_faixa.append(f"{potencia:g} kW")
             continue
         cor = _CORES[i % len(_CORES)]
-        # O nome vai para a legenda, não para uma anotação junto da linha:
-        # com cinco inversores de mesma faixa, anotações se sobrepõem umas às
-        # outras e à curva, e a legenda resolve o empilhamento sozinha.
+        # A contagem vai junto porque diz que há alternativa naquela potência:
+        # "3 opções de 5 kW" é informação de compra, e nenhuma marca aparece.
         eixo.axvline(
             potencia, color=cor, ls="--", lw=1.0, alpha=0.85,
-            label=f"{potencia:g} kW — {', '.join(modelos[:2])}"
-            + (f" (+{len(modelos) - 2})" if len(modelos) > 2 else ""),
+            label=f"{potencia:g} kW nominal"
+            + (f" — {quantos} opções" if quantos > 1 else ""),
         )
 
     if fora_da_faixa:
@@ -477,7 +480,8 @@ def _grafico_mapa(resultado, destino: Path) -> Path:
         eixo.set_xlabel("duração", fontsize=8)
     eixos[0].set_ylabel("hora de início do apagão", fontsize=8)
     fig.colorbar(imagem, ax=eixos, label="probabilidade de atravessar (%)", fraction=0.03)
-    fig.suptitle(resultado.conjunto.descricao(), fontsize=9)
+    # Característica nominal, não marca: a referência comercial fica no anexo.
+    fig.suptitle(resultado.conjunto.especificacao_curta(), fontsize=9)
     return _salvar(fig, destino, "mapa_atendimento")
 
 
@@ -515,7 +519,8 @@ def _grafico_soc(estudo: ResultadoEstudo, resultado, destino: Path) -> Path:
     eixo.set_xlabel(f"Horas desde o início do apagão (começando às {hora:02d}h, {estacao})")
     eixo.set_ylabel("Estado de carga (%)")
     eixo.set_ylim(0, 100)
-    eixo.set_title(f"Apagão de {duracao:g} h — {resultado.conjunto.descricao()}")
+    eixo.set_title(
+        f"Apagão de {duracao:g} h — {resultado.conjunto.especificacao_curta()}")
     eixo.legend(fontsize=8, frameon=False)
     return _salvar(fig, destino, "estado_de_carga")
 
@@ -913,7 +918,7 @@ def escrever_relatorio(
         # lê a proposta precisa da conclusão.
         tabelas["cenarios_de_fontes"] = estudo.cenarios.tabela()
     for resultado in estudo.resiliencia:
-        nome = _fatiar(resultado.conjunto.descricao())
+        nome = _fatiar(resultado.conjunto.especificacao_curta())
         tabelas[f"resiliencia_{nome}"] = resultado.tabela
     for chave, economico in estudo.economia.items():
         tabelas[f"fluxo_{_fatiar(chave)}"] = economico.fluxo

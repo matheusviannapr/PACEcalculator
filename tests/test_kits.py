@@ -191,3 +191,81 @@ def test_a_rede_sugere_a_topologia():
     assert topologia_para_rede(380.0) == "trifasico"
     assert topologia_para_rede(220.0) == "splitphase"
     assert topologia_para_rede(220.0, monofasico=True) == "mono_bifasico"
+
+
+# ----------------------------------------------------------------------------
+# O bloco de bateria
+# ----------------------------------------------------------------------------
+def test_a_coluna_com_bateria_e_o_splitphase_mais_um_bloco():
+    """
+    A hipótese que valida o modelo inteiro, conferida linha a linha.
+
+    Se "Split + 5kWh" é o kit split-phase mais um banco de 5 kWh, então o
+    preço do bloco sai da própria tabela — e a regra de campo ("a cada 5 kWh,
+    +R$ 10 mil") deixa de ser palpite e vira leitura. A diferença é de
+    R$ 9.900 até 20 kWp e cai para R$ 7.900 acima disso, que é desconto de
+    volume sobre o mesmo bloco.
+    """
+    from aurum.pv.kits import BATERIA_BLOCO_KWH, preco_da_bateria
+
+    for kwp in (5.0, 10.0, 15.0, 20.0, 30.0, 40.0):
+        reconstruido = preco_kit(kwp, "splitphase") + preco_da_bateria(BATERIA_BLOCO_KWH)
+        da_tabela = preco_kit_com_bateria(kwp)
+        assert reconstruido == pytest.approx(da_tabela, rel=0.03), (
+            f"{kwp} kWp: reconstruído {reconstruido:,.0f} contra {da_tabela:,.0f}")
+
+
+def test_a_bateria_e_cobrada_em_blocos_inteiros():
+    """
+    Meio módulo de bateria não se vende, e cobrar 1,2 bloco seria cobrar um
+    produto que não existe.
+    """
+    from aurum.pv.kits import BATERIA_BLOCO_BRL, blocos_de_bateria, preco_da_bateria
+
+    assert blocos_de_bateria(0.0) == 0
+    assert blocos_de_bateria(2.2) == 1, "quem precisa de 2,2 kWh compra um bloco de 5"
+    assert blocos_de_bateria(5.0) == 1
+    assert blocos_de_bateria(5.1) == 2
+    assert blocos_de_bateria(9.9) == 2
+    assert preco_da_bateria(9.9) == pytest.approx(2 * BATERIA_BLOCO_BRL)
+
+
+def test_o_preco_do_bloco_e_manipulavel():
+    """É cotação, e cotação muda toda semana."""
+    from aurum.pv.kits import preco_da_bateria
+
+    assert preco_da_bateria(10.0, bloco_kwh=5.0, bloco_brl=12_000.0) == pytest.approx(24_000.0)
+    assert preco_da_bateria(10.0, bloco_kwh=10.0, bloco_brl=18_000.0) == pytest.approx(18_000.0)
+
+
+def test_a_bateria_entra_na_composicao_e_no_capex():
+    """
+    O inversor não é cobrado de novo: ele veio no kit split-phase.
+
+    Somar um sistema de armazenamento inteiro sobre um kit que já traz o
+    híbrido é o erro que dobra o orçamento — e era o que acontecia antes de a
+    bateria passar a ser contada em blocos.
+    """
+    from aurum.pv.kits import preco_da_bateria
+
+    sem = capex_de_kit(10.0, "splitphase")
+    com = capex_de_kit(10.0, "splitphase", bateria_kwh=9.9)
+    assert com - sem == pytest.approx(preco_da_bateria(9.9))
+
+    partes = composicao_de_kit(10.0, "splitphase", bateria_kwh=9.9)
+    assert "bateria" in partes
+    assert sum(partes.values()) == pytest.approx(com)
+    # Sem bateria, a parcela nem aparece — uma linha de R$ 0 é ruído.
+    assert "bateria" not in composicao_de_kit(10.0, "splitphase")
+
+
+def test_toda_topologia_explica_para_que_serve():
+    """
+    A diferença de 50% entre um mono e um split-phase só faz sentido ao lado
+    do motivo. Preço sem o porquê vira discussão de desconto.
+    """
+    from aurum.pv.kits import DESCRICAO_TOPOLOGIA, TOPOLOGIA_COM_BATERIA
+
+    for chave in TOPOLOGIAS:
+        assert len(DESCRICAO_TOPOLOGIA.get(chave, "")) > 40, chave
+    assert TOPOLOGIA_COM_BATERIA in TOPOLOGIAS, "bateria exige híbrido, e híbrido é split-phase"

@@ -32,10 +32,17 @@ armazenamento do estudo está saindo caro perto do que o distribuidor cobra.
 """
 from __future__ import annotations
 
+import math
 from datetime import date
 from typing import Iterable
 
 __all__ = [
+    "BATERIA_BLOCO_BRL",
+    "BATERIA_BLOCO_KWH",
+    "DESCRICAO_TOPOLOGIA",
+    "TOPOLOGIA_COM_BATERIA",
+    "blocos_de_bateria",
+    "preco_da_bateria",
     "MAO_DE_OBRA_BRL_KWP",
     "MATERIAL_CA_BRL_KWP",
     "POTENCIA_MAXIMA_KWP",
@@ -55,6 +62,47 @@ __all__ = [
 APURADO_EM = date(2026, 9, 7)
 
 FONTE = "Tabela de kit fotovoltaico do distribuidor, faixa até 40 kWp"
+
+#: Para que serve cada topologia, na linguagem de quem vende.
+#:
+#: A escolha não é técnica no sentido de haver uma certa: as quatro funcionam.
+#: O que muda é o problema que cada uma resolve, e é isso que decide. Guardar
+#: esta descrição junto do preço é deliberado — a diferença de 50% entre um
+#: mono e um split-phase de mesma potência só faz sentido ao lado do motivo.
+DESCRICAO_TOPOLOGIA: dict[str, str] = {
+    "mono_bifasico":
+        "Cliente focado em economizar. Sistema mais simples, que cumpre o seu "
+        "papel: injeta na rede e abate a conta.",
+    "microinversor":
+        "Clientes com sombreamento severo. Cada módulo trabalha por conta "
+        "própria, então a sombra num deles não arrasta a série inteira.",
+    "splitphase":
+        "Inversor híbrido: funciona de dia mesmo sem a concessionária, e "
+        "atende 127 V e 220 V no mesmo equipamento, o que simplifica a "
+        "separação de cargas do quadro de backup.",
+    "trifasico":
+        "Entrada trifásica, a partir de 20 kWp. É o caminho de qualquer "
+        "sistema maior, e o único disponível acima de 40 kWp.",
+}
+
+#: A topologia que um sistema com bateria pede.
+#:
+#: Bateria exige inversor híbrido, e híbrido no varejo é split-phase. Escolher
+#: mono/bifásico e pedir bateria é especificar um equipamento que não existe.
+TOPOLOGIA_COM_BATERIA = "splitphase"
+
+#: O bloco de expansão de bateria: quanto de energia, e quanto custa.
+#:
+#: Vem da própria tabela. A coluna "Split + 5kWh" é o kit split-phase mais um
+#: banco de 5 kWh, e a diferença entre as duas colunas, linha a linha, é de
+#: R$ 9.900 até 20 kWp e cai para R$ 7.900 acima disso — desconto de volume
+#: sobre o mesmo bloco. R$ 10.000 é a referência de campo e o padrão aqui;
+#: quem tiver a cotação do dia deve trocá-la.
+#:
+#: Bloco, e não R$/kWh contínuo, porque é assim que se compra: bateria vem em
+#: módulo, e meio módulo não existe.
+BATERIA_BLOCO_KWH = 5.0
+BATERIA_BLOCO_BRL = 10_000.0
 
 #: As topologias da tabela, na ordem em que a fonte as apresenta.
 #:
@@ -237,15 +285,43 @@ def preco_kit(potencia_kwp: float, topologia: str = "mono_bifasico") -> float | 
 
 def preco_kit_com_bateria(potencia_kwp: float) -> float | None:
     """
-    O kit split-phase com 5 kWh de bateria embutidos, para conferência.
+    O kit split-phase com 5 kWh embutidos, exatamente como a tabela traz.
 
-    **Não entra no CAPEX do estudo.** O armazenamento é dimensionado e
-    precificado à parte, a partir do banco que a simulação de apagão exigiu;
-    somar os dois cobraria a bateria duas vezes. Serve para a conferência que
-    importa: se o solar mais o banco do estudo saem muito acima disto na mesma
-    potência, ou o banco ficou grande, ou o preço de armazenamento está velho.
+    Serve de conferência: o split-phase somado a um bloco de bateria deve dar
+    aproximadamente isto, e dá — a diferença entre as duas colunas é o próprio
+    bloco. Quando o estudo se afasta muito deste número na mesma potência, ou
+    o banco ficou grande, ou o preço do bloco está velho.
     """
     return _interpolar(float(potencia_kwp), "com_bateria")
+
+
+def blocos_de_bateria(energia_kwh: float, bloco_kwh: float = BATERIA_BLOCO_KWH) -> int:
+    """
+    Quantos blocos cobrem a energia pedida.
+
+    Arredonda para cima porque bateria vem em módulo: quem precisa de 6 kWh
+    compra dois blocos de 5, e cobrar 1,2 bloco seria cobrar um produto que
+    não se vende.
+    """
+    if energia_kwh <= 0 or bloco_kwh <= 0:
+        return 0
+    return int(math.ceil(float(energia_kwh) / float(bloco_kwh)))
+
+
+def preco_da_bateria(
+    energia_kwh: float,
+    bloco_kwh: float = BATERIA_BLOCO_KWH,
+    bloco_brl: float = BATERIA_BLOCO_BRL,
+) -> float:
+    """
+    O preço do banco, contado em blocos de expansão.
+
+    É o valor que a tabela implica e a referência de campo confirma: a cada
+    5 kWh, mais ou menos R$ 10 mil. O inversor **não** entra aqui — ele já veio
+    no kit split-phase, e cobrá-lo de novo é o erro que dobra o orçamento de um
+    sistema com bateria.
+    """
+    return blocos_de_bateria(energia_kwh, bloco_kwh) * max(0.0, float(bloco_brl))
 
 
 def capex_de_kit(
@@ -253,6 +329,9 @@ def capex_de_kit(
     topologia: str = "mono_bifasico",
     mao_de_obra_brl_kwp: float = MAO_DE_OBRA_BRL_KWP,
     material_ca_brl_kwp: float = MATERIAL_CA_BRL_KWP,
+    bateria_kwh: float = 0.0,
+    bloco_kwh: float = BATERIA_BLOCO_KWH,
+    bloco_brl: float = BATERIA_BLOCO_BRL,
 ) -> float | None:
     """
     O CAPEX instalado: o kit da tabela mais o que a obra acrescenta.
@@ -270,7 +349,8 @@ def capex_de_kit(
     if kit is None:
         return None
     adicional = max(0.0, float(mao_de_obra_brl_kwp)) + max(0.0, float(material_ca_brl_kwp))
-    return kit + adicional * float(potencia_kwp)
+    bateria = preco_da_bateria(bateria_kwh, bloco_kwh, bloco_brl)
+    return kit + adicional * float(potencia_kwp) + bateria
 
 
 def composicao_de_kit(
@@ -278,6 +358,9 @@ def composicao_de_kit(
     topologia: str = "mono_bifasico",
     mao_de_obra_brl_kwp: float = MAO_DE_OBRA_BRL_KWP,
     material_ca_brl_kwp: float = MATERIAL_CA_BRL_KWP,
+    bateria_kwh: float = 0.0,
+    bloco_kwh: float = BATERIA_BLOCO_KWH,
+    bloco_brl: float = BATERIA_BLOCO_BRL,
 ) -> dict[str, float] | None:
     """
     As três parcelas do investimento, separadas.
@@ -291,11 +374,15 @@ def composicao_de_kit(
     if kit is None:
         return None
     kwp = float(potencia_kwp)
-    return {
+    partes = {
         "kit": kit,
         "mao_de_obra": max(0.0, float(mao_de_obra_brl_kwp)) * kwp,
         "material_ca": max(0.0, float(material_ca_brl_kwp)) * kwp,
     }
+    bateria = preco_da_bateria(bateria_kwh, bloco_kwh, bloco_brl)
+    if bateria > 0:
+        partes["bateria"] = bateria
+    return partes
 
 
 def linhas_da_tabela(topologias: Iterable[str] | None = None) -> list[dict[str, object]]:
