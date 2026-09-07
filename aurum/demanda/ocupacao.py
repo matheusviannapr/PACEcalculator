@@ -108,6 +108,13 @@ class PerfilOcupacao:
     alargamento_max: float = 2.0
     #: Multiplica a probabilidade do que é usado durante o expediente.
     fator_diurno: float = 1.0
+    #: Multiplica a probabilidade das cargas de refeição, separado do resto.
+    #:
+    #: Almoço e jantar acontecem em qualquer dia — mudam de tamanho, não de
+    #: existência. Numa casa quase vazia alguém cozinha para um, e o forno roda
+    #: menos; tratar a refeição com o mesmo fator do resto da casa apagaria o
+    #: almoço do dia de semana, que é justamente onde o sol está no máximo.
+    fator_refeicao: float = 1.0
     #: A faixa considerada expediente, para efeito do fator diurno.
     janela_expediente: tuple[float, float] = (8.0, 18.0)
     probabilidade_max: float = 0.98
@@ -146,6 +153,24 @@ _ALMOCO = (11.5, 14.0)
 _JANTAR = (18.5, 22.0)
 
 PERFIS: dict[str, PerfilOcupacao] = {
+    "levantado": PerfilOcupacao(
+        id="levantado",
+        nome="Como a vistoria levantou",
+        descricao=(
+            "As janelas de uso exatamente como o vistoriador as anotou, sem "
+            "nenhuma transformação. É a leitura mais fiel ao campo e a mais "
+            "concentrada à noite, porque é de noite que o morador lembra de "
+            "usar as coisas quando responde ao formulário."
+        ),
+        # Nenhuma alavanca acionada: janela intacta, probabilidade intacta.
+        # A janela acordada existe só para a tabela do relatório ter o que
+        # mostrar na coluna; ela não é aplicada a nada.
+        janela_acordado=(6.0, 23.5),
+        espalhar=False,
+        fator_probabilidade=1.0,
+        fator_diurno=1.0,
+        dias_por_semana=7,
+    ),
     "casa_cheia": PerfilOcupacao(
         id="casa_cheia",
         nome="Casa cheia",
@@ -174,7 +199,15 @@ PERFIS: dict[str, PerfilOcupacao] = {
         janelas_refeicao=(_ALMOCO, _JANTAR),
         # As janelas levantadas já descrevem um dia de semana: não se alarga.
         espalhar=False,
+        # Mas almoça-se e janta-se em qualquer dia. A vistoria costuma anotar
+        # só o jantar, e sem o desdobramento o dia de semana sai com um vale no
+        # meio-dia que nenhuma casa tem — justamente na hora em que o sol está
+        # no máximo, que é onde o autoconsumo se decide.
+        desdobrar_refeicoes=True,
         fator_probabilidade=1.0,
+        # Alguém cozinha para um, e não para a família: a refeição acontece,
+        # menor.
+        fator_refeicao=0.55,
         # Uma pessoa em vez da família: menos da metade do uso diurno.
         fator_diurno=0.45,
         dias_por_semana=5,
@@ -187,6 +220,16 @@ PERFIL_DIMENSIONANTE = "casa_cheia"
 
 #: Os dois estudos que fazem sentido pedir, e o que cada um responde.
 ESTUDOS: dict[str, dict[str, Any]] = {
+    "levantado": {
+        "nome": "Como a vistoria levantou",
+        "perfis": {"levantado": 7},
+        "para_que": (
+            "O dado de campo sem nenhuma interpretação. Serve de piso e de "
+            "controle: se um cenário transformado sai muito acima deste, a "
+            "diferença tem de ser explicável pela transformação, e não por um "
+            "erro dela."
+        ),
+    },
     "casa_cheia": {
         "nome": "Casa cheia o ano inteiro",
         "perfis": {"casa_cheia": 7},
@@ -331,6 +374,8 @@ def aplicar(cenario: Cenario, perfil: PerfilOcupacao | str) -> Cenario:
             prob = linha.get("probabilidade")
             if pd.notna(prob):
                 fator = perfil.fator_probabilidade * max(alargamento, 1.0)
+                if de_refeicao:
+                    fator *= perfil.fator_refeicao
                 if perfil.fator_diurno != 1.0 and not de_refeicao:
                     dentro = _fracao_no_expediente(faixa, perfil)
                     fator *= 1.0 - dentro * (1.0 - perfil.fator_diurno)

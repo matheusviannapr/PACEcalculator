@@ -117,6 +117,9 @@ class ConfiguracaoEstudo:
     #: falta, e decidir se vale pagar por ele exige medir o que ele consome e
     #: quanto banco ele exige **a mais**. Ver :mod:`aurum.bateria.escopos`.
     comparar_escopos: bool = False
+    #: Comparar os três cenários de uso da residência, cada um com o seu
+    #: sistema. Ver :mod:`aurum.bateria.uso`.
+    comparar_uso: bool = False
     #: As tabelas do cenário, por cômodo, como o usuário as editou. O núcleo
     #: do D² converte intervalo e duração em minutos e descarta o resto; o
     #: anexo precisa do original para dizer por quanto tempo cada equipamento
@@ -260,6 +263,8 @@ class ResultadoEstudo:
     #: Quadro essencial contra quadro ampliado, quando a vistoria classificou
     #: equipamentos como preferíveis. ``None`` quando não há o que comparar.
     escopos: Any = None
+    #: Os três cenários de uso, cada um com solar e banco próprios.
+    uso: Any = None
     avisos: list[str] = field(default_factory=list)
 
     @property
@@ -727,6 +732,34 @@ def executar_estudo(cfg: ConfiguracaoEstudo, progresso=None) -> ResultadoEstudo:
             LOGGER.warning("comparação de escopos falhou: %s", exc)
             avisos.append(f"A comparação entre quadro essencial e ampliado falhou: {exc}")
 
+    uso = None
+    if cfg.comparar_uso and cfg.tabelas_cenario:
+        avisar("Comparando os cenários de uso da residência", 0.97)
+        try:
+            from ..demanda.cenario import Cenario
+            from .uso import comparar_cenarios_de_uso
+
+            base_uso = Cenario(
+                nome=cfg.nome, segmento="residencia",
+                comodos=dict(cfg.tabelas_cenario),
+                instancias=dict(cfg.instancias_por_comodo or {}),
+            )
+            base_uso.criticidades_essenciais = tuple(
+                (cfg.criticidade or {}).get("corte", ()) or ())
+            uso = comparar_cenarios_de_uso(
+                base_uso, serie, base, malha=cfg.malha,
+                autonomia_alvo_h=cfg.autonomia_alvo_h,
+                confiabilidade=cfg.confiabilidade_alvo,
+                simulacoes=max(60, cfg.simulacoes // 2),
+                premissas=cfg.premissas,
+                topologia_kit=cfg.topologia_kit or "splitphase",
+                semente=cfg.semente,
+            )
+            avisos.extend(uso.avisos)
+        except Exception as exc:  # noqa: BLE001 — leitura extra não derruba estudo
+            LOGGER.warning("comparação de cenários de uso falhou: %s", exc)
+            avisos.append(f"A comparação entre cenários de uso falhou: {exc}")
+
     avisar("Estudo concluído", 1.0)
     return ResultadoEstudo(
         configuracao=cfg,
@@ -745,6 +778,7 @@ def executar_estudo(cfg: ConfiguracaoEstudo, progresso=None) -> ResultadoEstudo:
         recomendado=recomendado,
         cenarios=cenarios,
         escopos=escopos,
+        uso=uso,
         avisos=avisos,
     )
 

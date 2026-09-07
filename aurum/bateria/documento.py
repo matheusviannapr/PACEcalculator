@@ -435,6 +435,90 @@ def _secao_solar(estudo: ResultadoEstudo, figuras: dict[str, Path]) -> str:
     return "\n\n".join(p for p in partes if p)
 
 
+def _secao_cenarios_de_uso(estudo: ResultadoEstudo, figuras: dict[str, Path]) -> str:
+    """
+    Os três cenários de uso, cada um com o sistema que exige.
+
+    Escolher um cenário e seguir é justamente o que não se pode fazer antes de
+    mostrar as alternativas: o sistema que atende um dia de semana de casa
+    vazia é metade do que atende uma casa cheia o ano inteiro, e a diferença é
+    dinheiro do cliente — para mais ou para menos. Os três aparecem com solar
+    e banco próprios, porque comparar um sistema só sob três consumos
+    responderia outra pergunta.
+    """
+    uso = getattr(estudo, "uso", None)
+    if uso is None or len(getattr(uso, "cenarios", ())) < 2:
+        return ""
+
+    partes = [
+        secao("Três cenários de uso, três sistemas"),
+        "Uma residência não tem uma curva de carga. Tem pelo menos três leituras "
+        "possíveis, e elas produzem sistemas diferentes: o que a vistoria levantou "
+        "em campo, a casa usada no limite todos os dias, e a rotina de quem "
+        "trabalha fora. Cada uma recebeu aqui o seu próprio dimensionamento — o "
+        "gerador fotovoltaico pela energia do ano daquele cenário, e o banco pelo "
+        "pior dia dele.",
+    ]
+
+    partes.append(tabela(
+        ["Cenário", "Consumo", "Pico P95", "Solar", "Geração", "Banco",
+         "Autonomia", "Investimento"],
+        [
+            (
+                c.nome,
+                f"{_n(c.energia_diaria_kwh, 1, 'kWh/dia')}",
+                _n(c.pico_p95_kw, 2, "kW"),
+                _n(c.potencia_fv_kwp, 1, "kWp"),
+                _n(c.geracao_anual_kwh, 0, "kWh/ano"),
+                _n(c.banco_kwh, 1, "kWh"),
+                _n(c.autonomia_h, 0, "h"),
+                _brl(c.capex_com_bateria_brl),
+            )
+            for c in uso.cenarios
+        ],
+        alinhamento="p{4.0cm}rrrrrrr",
+        tamanho_fonte="scriptsize",
+        legenda="Os três cenários de uso, cada um com o sistema que exige",
+    ))
+
+    if figuras.get("cenarios_de_uso"):
+        partes.append(_figura(
+            figuras["cenarios_de_uso"],
+            "À esquerda, a carga de cada cenário ao longo do dia — não é a mesma "
+            "casa em escala: o dia levantado em campo é quase todo noturno, e a "
+            "casa cheia enche o meio do dia. À direita, o que isso cobra em "
+            "equipamento.",
+            largura="1.0",
+        ))
+
+    amplitude = uso.amplitude()
+    if amplitude.get("consumo"):
+        meio = uso.intermediario
+        texto = (
+            f"Entre o cenário mais leve e o mais pesado, o consumo varia "
+            f"{amplitude['consumo']:.1f} vez(es) e a potência solar acompanha. O "
+            f"investimento varia menos — {amplitude.get('capex', float('nan')):.1f} "
+            "vez(es) — porque o banco quase não muda entre os cenários: o quadro "
+            "de backup é feito de refrigeração e rede, que não sabem se a casa "
+            "está cheia. É a conta de luz que muda, e não a continuidade."
+        )
+        if meio is not None:
+            texto += (
+                f" O cenário do meio — {esc(meio.nome)} — é o que a maioria das "
+                "famílias vive, e é dele que costuma sair a recomendação."
+            )
+        partes.append(caixa("O que separa os três", texto, cor="amarelopace"))
+
+    partes.append(nota(
+        "O cenário levantado em campo é o piso e serve de controle: se um cenário "
+        "transformado sai muito acima dele, a diferença tem de ser explicável pela "
+        "transformação — casa cheia usa mais, e o quanto está declarado na seção "
+        "de ocupação — e não por um erro dela. Escolher entre os três é decisão do "
+        "cliente, e é a única deste estudo que nenhum cálculo toma no lugar dele."
+    ))
+    return "\n\n".join(p for p in partes if p)
+
+
 def _secao_ocupacao(estudo: ResultadoEstudo, figuras: dict[str, Path]) -> str:
     """
     Quem está em casa, e o que isso faz com a curva.
@@ -2197,6 +2281,10 @@ def montar_documento(
         # antes de qualquer tabela, porque é a diferença entre eles que
         # justifica todo o resto do documento.
         _secao_ocupacao(estudo, figuras),
+        # Logo depois de como a casa consome: os três cenários são leituras
+        # dessa mesma casa, e só fazem sentido depois de o leitor saber o que
+        # os separa.
+        _secao_cenarios_de_uso(estudo, figuras),
         _secao_telhado(estudo, figuras) if estudo.com_solar else "",
         _secao_solar(estudo, figuras) if estudo.com_solar else "",
         _secao_demanda(estudo, figuras),

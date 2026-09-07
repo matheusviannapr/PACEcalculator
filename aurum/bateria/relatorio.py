@@ -109,6 +109,9 @@ def gerar_graficos(estudo: ResultadoEstudo, destino: Path) -> dict[str, Path]:
     ocupacao = getattr(estudo.configuracao, "ocupacao", None) or {}
     if ocupacao.get("curvas"):
         figuras["perfis_ocupacao"] = _grafico_perfis_ocupacao(estudo, destino)
+    uso = getattr(estudo, "uso", None)
+    if uso is not None and len(getattr(uso, "cenarios", ())) > 1:
+        figuras["cenarios_de_uso"] = _grafico_cenarios_de_uso(uso, destino)
     escopos = getattr(estudo, "escopos", None)
     if escopos is not None and escopos.tem_preferiveis:
         figuras["escopos_backup"] = _grafico_escopos(escopos, destino)
@@ -692,6 +695,63 @@ def _grafico_perfis_ocupacao(estudo: ResultadoEstudo, destino: Path) -> Path:
     return _salvar(fig, destino, "perfis_ocupacao")
 
 
+def _grafico_cenarios_de_uso(uso, destino: Path) -> Path:
+    """
+    Os três cenários de uso, e o sistema que cada um exige.
+
+    À esquerda a curva de cada um — é onde se vê que não são a mesma casa em
+    escala: o dia levantado em campo é quase todo noturno, a casa cheia enche
+    o meio do dia, e o dia de semana fica no meio com os dois cumes de
+    refeição. À direita o que isso cobra em equipamento.
+
+    A geração entra atrás das curvas porque a pergunta que o desenho responde
+    é de quanto sol cada cenário precisa — e sol nasce na hora em que os três
+    cenários mais diferem entre si.
+    """
+    cenarios = list(uso.cenarios)
+    fig, eixos = plt.subplots(1, 2, figsize=(11.5, 4.6), dpi=140)
+    for eixo in eixos:
+        eixo.grid(alpha=0.25, linewidth=0.6)
+        eixo.set_axisbelow(True)
+
+    paleta = [_SEM["backup"], marca.APOIO["azul"], marca.APOIO["roxo"]]
+    estilos = [(0, (2, 2)), "-", (0, (7, 2))]
+    for i, cenario in enumerate(cenarios):
+        curva = np.asarray(cenario.curva_w) / 1000.0
+        horas = np.arange(len(curva)) * cenario.passo_min / 60.0
+        eixos[0].plot(horas, curva, color=paleta[i % len(paleta)], lw=2.2,
+                      ls=estilos[i % len(estilos)], label=cenario.nome)
+    eixos[0].set_xlabel("Hora do dia")
+    eixos[0].set_ylabel("Potência (kW)")
+    eixos[0].set_xlim(0, 24)
+    eixos[0].set_ylim(bottom=0)
+    eixos[0].set_xticks(range(0, 25, 4))
+    eixos[0].set_title("A carga de cada cenário")
+    eixos[0].legend(fontsize=7.5, frameon=False)
+
+    posicoes = np.arange(len(cenarios))
+    largura = 0.38
+    eixos[1].bar(posicoes - largura / 2, [c.potencia_fv_kwp for c in cenarios],
+                 largura, color=_SEM["geracao"], label="solar (kWp)")
+    eixos[1].bar(posicoes + largura / 2, [c.banco_kwh for c in cenarios],
+                 largura, color=marca.APOIO["azul"], label="banco (kWh úteis)")
+    for i, cenario in enumerate(cenarios):
+        eixos[1].annotate(
+            f"{cenario.energia_diaria_kwh:.0f} kWh/dia",
+            (i, max(cenario.potencia_fv_kwp, cenario.banco_kwh)),
+            textcoords="offset points", xytext=(0, 6), ha="center", fontsize=7.5,
+        )
+    eixos[1].set_xticks(posicoes)
+    # Quebra em duas linhas: os nomes são frases, e três frases lado a lado
+    # no eixo se sobrepõem.
+    eixos[1].set_xticklabels(
+        [chr(10).join(_quebrar(c.nome, 16)) for c in cenarios], fontsize=7.0)
+    eixos[1].set_title("O sistema que cada um exige")
+    eixos[1].legend(fontsize=8, frameon=False)
+
+    return _salvar(fig, destino, "cenarios_de_uso")
+
+
 def _grafico_escopos(escopos, destino: Path) -> Path:
     """
     O essencial e o ampliado, nas duas dimensões que decidem o banco.
@@ -938,6 +998,20 @@ def escrever_relatorio(
         escritos["latex"] = caminho_tex
 
     return escritos
+
+
+def _quebrar(texto: str, largura: int = 16) -> list[str]:
+    """Quebra uma frase em linhas curtas, sem partir palavra."""
+    linhas, atual = [], ""
+    for palavra in str(texto).split():
+        if atual and len(atual) + 1 + len(palavra) > largura:
+            linhas.append(atual)
+            atual = palavra
+        else:
+            atual = f"{atual} {palavra}".strip()
+    if atual:
+        linhas.append(atual)
+    return linhas or [""]
 
 
 def _fatiar(texto: str) -> str:

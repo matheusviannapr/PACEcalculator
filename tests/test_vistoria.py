@@ -183,13 +183,26 @@ def test_a_casa_quase_vazia_reduz_o_dia_sem_zerar():
     assert depois == pytest.approx(antes * ocupacao.PERFIS["casa_quase_vazia"].fator_diurno)
 
 
-def test_a_noite_da_casa_quase_vazia_nao_e_tocada():
-    """Ninguém trabalha fora às 20 h: o fator diurno não pode alcançar o jantar."""
+def test_o_fator_diurno_nao_alcanca_o_jantar():
+    """
+    Ninguém trabalha fora às 20 h, então o fator diurno não pode chegar lá.
+
+    O jantar **é** reduzido na casa quase vazia — alguém cozinha para um, e
+    não para a família —, mas por um fator próprio, o de refeição. Confundir
+    os dois apagaria a refeição do dia de semana ou a deixaria do tamanho da
+    do fim de semana; nenhum dos dois é a casa.
+    """
     base = ler_backup(_backup()).cenario
+    perfil = ocupacao.PERFIS["casa_quase_vazia"]
     forno = base.comodos["Cozinha"].iloc[1]
     assert forno["intervalo"] == "18:00 as 22:00"
-    ajustado = ocupacao.aplicar(base, "casa_quase_vazia").comodos["Cozinha"].iloc[1]
-    assert float(ajustado["probabilidade"]) == pytest.approx(float(forno["probabilidade"]))
+
+    ajustado = ocupacao.aplicar(base, perfil).comodos["Cozinha"].iloc[1]
+    esperado = float(forno["probabilidade"]) * perfil.fator_refeicao
+    assert float(ajustado["probabilidade"]) == pytest.approx(esperado), (
+        "o jantar leva o fator de refeição")
+    # E não o diurno, que seria bem menor.
+    assert float(ajustado["probabilidade"]) > float(forno["probabilidade"]) * perfil.fator_diurno
 
 
 def test_a_cozinha_da_casa_cheia_ganha_o_almoco():
