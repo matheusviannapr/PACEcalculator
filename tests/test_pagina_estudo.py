@@ -545,3 +545,40 @@ def test_estudo_completo_pela_interface():
     assert any("/figuras/" in n and n.endswith(".png") for n in nomes)
     assert any("/tabelas/" in n and n.endswith(".csv") for n in nomes)
     assert "LEIA-ME.txt" in nomes
+
+
+# ----------------------------------------------------------------------------
+# A primeira tela recebe a vistoria
+# ----------------------------------------------------------------------------
+def test_a_vistoria_vem_antes_dos_campos_que_ela_preenche():
+    """
+    Ordem de desenho, e não de gosto: importar escreve `e_nome`.
+
+    O Streamlit proíbe escrever numa chave já instanciada como widget no mesmo
+    run. Com o campo de nome desenhado antes do bloco da vistoria, importar
+    derrubava a página inteira com StreamlitWidgetAlreadyInstantiatedError —
+    e o erro só aparecia depois do upload, em produção.
+    """
+    fonte = (RAIZ / "aurum" / "pagina_estudo.py").read_text(encoding="utf-8")
+    corpo = fonte[fonte.index("def _passo_cliente("):]
+    corpo = corpo[: corpo.index("\ndef ")]
+    assert corpo.index("_vistoria_na_primeira_tela()") < corpo.index('key="e_nome"'), (
+        "a vistoria preenche e_nome; desenhar o campo antes torna a escrita ilegal")
+
+
+def test_o_primeiro_passo_oferece_a_vistoria_e_abre_em_residencia():
+    """
+    As duas coisas que a primeira tela precisa oferecer de saída.
+
+    Residência é o segmento em que o estudo de bateria mais é pedido, e a
+    vistoria é a origem mais completa que o software aceita — pedir os dados à
+    mão primeiro inverte a ordem da confiança.
+    """
+    at = _abrir()
+    assert not at.exception, at.exception
+
+    rotulos = " | ".join(str(getattr(e, "label", "") or "") for e in at.expander)
+    assert "vistoria" in rotulos.lower(), f"expansor da vistoria ausente: {rotulos}"
+
+    tipo = _por_rotulo(at.selectbox, "Tipo")
+    assert tipo.value == "residencia", f"o padrão devia ser residência, veio {tipo.value}"

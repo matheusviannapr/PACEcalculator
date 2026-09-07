@@ -437,6 +437,16 @@ def _fixar_local(lugar: dict) -> None:
 
 
 def _passo_cliente() -> None:
+    # A vistoria vem **antes** de qualquer widget desta tela, e não é questão
+    # de gosto: importar preenche `e_nome`, `e_tensao_rede` e as coordenadas,
+    # e o Streamlit proíbe escrever numa chave já instanciada como widget no
+    # mesmo run. Com o campo de nome desenhado primeiro, importar derrubava a
+    # página com StreamlitWidgetAlreadyInstantiatedError.
+    #
+    # A ordem também é a que faz sentido ler: carregue o arquivo, e o resto da
+    # tela já nasce respondido.
+    _vistoria_na_primeira_tela()
+
     # `key=` em vez de atribuir o retorno: a barra lateral é desenhada antes
     # do corpo da página e leria o valor anterior, ficando um rerun atrás do
     # que o usuário acabou de digitar. Com a chave, o Streamlit guarda o valor
@@ -446,8 +456,6 @@ def _passo_cliente() -> None:
         key="e_nome",
         placeholder="Ex.: Hotel Central",
     )
-
-    _vistoria_na_primeira_tela()
 
     st.markdown("##### Que tipo de instalação é?")
     st.caption(
