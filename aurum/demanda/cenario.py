@@ -123,6 +123,11 @@ class Cenario:
     comodos: dict[str, pd.DataFrame] = field(default_factory=dict)
     instancias: dict[str, int] = field(default_factory=dict)
     essenciais: list[str] = field(default_factory=list)
+    #: Quando a origem é uma vistoria técnica, cada equipamento traz a sua
+    #: criticidade e é ela que define o quadro de backup. A lista de cômodos
+    #: essenciais continua valendo para os cenários montados a partir de um
+    #: modelo de segmento, onde criticidade por equipamento não existe.
+    criticidades_essenciais: tuple[str, ...] = ()
     ajustes_sazonais: dict[str, dict] = field(default_factory=dict)
 
     # -- construção --------------------------------------------------------
@@ -224,10 +229,73 @@ class Cenario:
     def total_de_equipamentos(self, apenas_essenciais: bool = False) -> int:
         return sum(len(t) for t in self._selecao(apenas_essenciais).values())
 
+    @property
+    def tem_criticidade(self) -> bool:
+        """Se os equipamentos carregam criticidade — só a vistoria traz."""
+        return any(
+            "criticidade" in tabela.columns and tabela["criticidade"].notna().any()
+            for tabela in self.comodos.values()
+        )
+
     def _selecao(self, apenas_essenciais: bool) -> dict[str, pd.DataFrame]:
-        if not apenas_essenciais or not self.essenciais:
+        """
+        Os cômodos que entram, e com quais equipamentos.
+
+        Duas formas de recortar o backup, e a diferença entre elas importa:
+
+        * **por criticidade**, quando a vistoria a levantou. Recorta *linhas*:
+          numa cozinha, a geladeira entra e o forno elétrico não.
+        * **por cômodo**, no cenário montado de um modelo de segmento, onde
+          criticidade por equipamento não existe. Recorta *cômodos* inteiros.
+
+        A primeira é sempre melhor quando disponível. Um quadro de backup
+        montado por cômodo leva junto tudo que estava naquele ambiente, e é
+        assim que se compra um inversor três vezes maior que o necessário.
+        """
+        if not apenas_essenciais:
+            return self.comodos
+
+        if self.criticidades_essenciais and self.tem_criticidade:
+            aceitas = {c.upper() for c in self.criticidades_essenciais}
+            selecao: dict[str, pd.DataFrame] = {}
+            for nome, tabela in self.comodos.items():
+                if "criticidade" not in tabela.columns:
+                    continue
+                recorte = tabela[
+                    tabela["criticidade"].astype(str).str.upper().isin(aceitas)
+                ]
+                if not recorte.empty:
+                    selecao[nome] = recorte.reset_index(drop=True)
+            return selecao
+
+        if not self.essenciais:
             return self.comodos
         return {n: t for n, t in self.comodos.items() if n in self.essenciais}
+
+    def por_criticidade(self) -> "pd.DataFrame":
+        """
+        Quantos equipamentos e quanta potência há em cada nível.
+
+        É a tabela que justifica o corte: ver que 62% da potência instalada
+        está em "não crítico" é o argumento de por que o quadro de backup é
+        pequeno, e ele vale mais que qualquer explicação.
+        """
+        linhas = []
+        for nome, tabela in self.comodos.items():
+            if "criticidade" not in tabela.columns:
+                continue
+            instancias = int(self.instancias.get(nome, 1))
+            for _, linha in tabela.iterrows():
+                potencia = float(linha.get("Potência") or 0) * float(
+                    linha.get("Quantidade") or 1
+                ) * instancias
+                linhas.append({
+                    "comodo": nome,
+                    "criticidade": str(linha.get("criticidade") or "NC").upper(),
+                    "equipamento": linha.get("Equipamento"),
+                    "potencia_w": potencia,
+                })
+        return pd.DataFrame(linhas)
 
     def resumo(self) -> dict[str, Any]:
         return {

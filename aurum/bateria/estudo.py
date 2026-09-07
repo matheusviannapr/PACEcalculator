@@ -45,7 +45,12 @@ from .degradacao import ModeloDegradacao, trajetoria_de_vida
 from .economia import PremissasBateria, ResultadoEconomicoBateria, avaliar_economia
 from .excedencia import avaliar_inversores, potencia_para_excedencia, tabela_por_faixa_horaria
 from .fontes import ComparacaoFontes, Composicao, Fatura, Gerador, comparar_fontes
-from .geracao import SerieGeracao, obter_serie_horaria, serie_sintetica
+from .geracao import (
+    SerieGeracao,
+    combinar_series,
+    obter_serie_horaria,
+    serie_sintetica,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -86,6 +91,44 @@ class ConfiguracaoEstudo:
     #: que põe só elevador, bombas e circulação no backup pede um terço do
     #: inversor que a carga total pediria.
     comodos_essenciais: Sequence[str] | None = None
+    #: O quadro de backup montado equipamento a equipamento, quando a origem é
+    #: uma vistoria técnica com criticidade por item.
+    #:
+    #: Recortar por cômodo leva junto tudo que estava no ambiente: numa
+    #: cozinha, a geladeira crítica arrasta o forno elétrico de 4 kW. Na
+    #: residência do primeiro caso real, o recorte por equipamento deixou
+    #: 1,9 kW no backup contra 31,5 kW instalados — 6%. Por cômodo teriam
+    #: sobrado quase todos os 31,5.
+    comodos_backup: Sequence[Comodo] | None = None
+    instancias_backup: dict[str, int] | None = None
+    #: A classificação de criticidade que produziu o quadro de backup.
+    #:
+    #: Espera ``{"tabela": DataFrame, "corte": ("MC", "C"), "descricoes": {...}}``,
+    #: com a tabela longa de :meth:`Cenario.por_criticidade` — uma linha por
+    #: equipamento, com ambiente, nível e potência. O dossiê usa isso para
+    #: listar nominalmente o que a bateria segura: dizer que o backup tem
+    #: 1,9 kW não responde à pergunta que o cliente faz, que é se a geladeira
+    #: fica de pé.
+    criticidade: dict[str, Any] | None = None
+    #: As tabelas do cenário, por cômodo, como o usuário as editou. O núcleo
+    #: do D² converte intervalo e duração em minutos e descarta o resto; o
+    #: anexo precisa do original para dizer por quanto tempo cada equipamento
+    #: fica ligado, e não só em que janela ele pode ligar.
+    tabelas_cenario: dict[str, Any] | None = None
+    #: Comparação entre perfis de ocupação (:mod:`aurum.demanda.ocupacao`) e
+    #: qual deles dimensionou. Numa residência a mesma casa tem duas curvas —
+    #: dia de semana com a casa vazia e fim de semana com a casa cheia — e
+    #: dimensionar pela primeira é entregar um sistema que desarma no sábado.
+    ocupacao: Any = None
+    #: Consumo anual medido ou ponderado, em kWh. Quando informado, é ele que
+    #: dimensiona o sistema fotovoltaico — e não a energia do ensemble.
+    #:
+    #: A distinção existe porque as duas grandezas vêm de perfis diferentes:
+    #: o pico e o quadro de backup saem do pior caso (numa residência, o fim
+    #: de semana com a casa cheia), e a energia do ano sai da média ponderada
+    #: dos dias. Dimensionar o solar pelo pior dia o deixa 40% maior que o
+    #: consumo real, e um sistema que gera o que ninguém consome não se paga.
+    consumo_anual_kwh: float | None = None
 
     # -- geração -----------------------------------------------------------
     potencia_fv_kwp: float | None = None
@@ -97,6 +140,17 @@ class ConfiguracaoEstudo:
     #: de só dizer quantos kWp compensariam a conta.
     telhado: Any = None
     layout: Any = None
+    #: As águas do telhado, quando há mais de uma.
+    #:
+    #: Cada entrada é ``{"nome", "telhado", "layout"}``. Um telhado real quase
+    #: nunca é um plano só, e duas águas opostas não somam a uma água média: a
+    #: do nascente enche de manhã, a do poente à tarde, e o conjunto é mais
+    #: plano que qualquer uma. O estudo busca uma série por orientação e as
+    #: combina ponderadas pela potência — ver
+    #: :func:`aurum.bateria.geracao.combinar_series`.
+    #:
+    #: Com uma água só, ``telhado``/``layout`` bastam e este campo fica vazio.
+    aguas: Sequence[dict[str, Any]] | None = None
     #: Memória de cálculo do arranjo escolhido (:mod:`aurum.pv.memoria`).
     #: É o que permite ao relatório mostrar a conta em vez de pedir fé.
     memoria: Any = None
@@ -212,6 +266,17 @@ class ResultadoEstudo:
                 "produtividade_kwh_kwp_ano": self.serie.anual_kwh_por_kwp(),
             },
             "telhado": cfg.telhado.as_dict() if cfg.telhado is not None else None,
+            "aguas": [
+                {
+                    "nome": a.get("nome"),
+                    "azimute_deg": getattr(a.get("telhado"), "azimute_deg", None),
+                    "inclinacao_deg": getattr(a.get("telhado"), "inclinacao_deg", None),
+                    "area_m2": getattr(a.get("telhado"), "area_m2", None),
+                    "modulos": getattr(a.get("layout"), "quantidade", None),
+                    "potencia_kwp": getattr(a.get("layout"), "potencia_kwp", None),
+                }
+                for a in (cfg.aguas or [])
+            ] or None,
             "layout": cfg.layout.as_dict() if cfg.layout is not None else None,
             "memoria_de_calculo": cfg.memoria.as_dict() if cfg.memoria is not None else None,
             "analise_da_demanda": cfg.analise.resumo() if cfg.analise is not None else None,
@@ -247,8 +312,77 @@ def _carregar_cargas(cfg: ConfiguracaoEstudo) -> tuple[list[Comodo], dict[str, i
     return cenario_exemplo(cfg.cenario_demo)
 
 
+def _serie_do_telhado(cfg: ConfiguracaoEstudo) -> SerieGeracao:
+    """
+    A série de 1 kWp do sistema: uma água, ou a combinação de várias.
+
+    Águas de mesma orientação e mesma inclinação compartilham a consulta — o
+    PVGIS não tem por que ser chamado duas vezes para o mesmo par de ângulos, e
+    o cache em disco é por par.
+    """
+    if not cfg.aguas:
+        return obter_serie_horaria(
+            cfg.latitude, cfg.longitude,
+            azimute_deg=cfg.azimute_deg,
+            inclinacao_deg=cfg.inclinacao_deg,
+            anos=cfg.anos_serie,
+            permitir_fallback=cfg.permitir_serie_sintetica,
+        )
+
+    potencia_por_angulo: dict[tuple[float, float], float] = {}
+    for agua in cfg.aguas:
+        telhado = agua.get("telhado")
+        layout = agua.get("layout")
+        kwp = float(getattr(layout, "potencia_kwp", 0.0) or 0.0)
+        if kwp <= 0:
+            continue
+        chave = (
+            round(float(getattr(telhado, "azimute_deg", cfg.azimute_deg or 0.0)), 1),
+            round(float(getattr(telhado, "inclinacao_deg", cfg.inclinacao_deg or 0.0)), 1),
+        )
+        potencia_por_angulo[chave] = potencia_por_angulo.get(chave, 0.0) + kwp
+
+    if not potencia_por_angulo:
+        return obter_serie_horaria(
+            cfg.latitude, cfg.longitude,
+            azimute_deg=cfg.azimute_deg, inclinacao_deg=cfg.inclinacao_deg,
+            anos=cfg.anos_serie, permitir_fallback=cfg.permitir_serie_sintetica,
+        )
+
+    series, pesos = [], []
+    for (azimute, inclinacao), kwp in potencia_por_angulo.items():
+        series.append(obter_serie_horaria(
+            cfg.latitude, cfg.longitude,
+            azimute_deg=azimute, inclinacao_deg=inclinacao,
+            anos=cfg.anos_serie, permitir_fallback=cfg.permitir_serie_sintetica,
+        ))
+        pesos.append(kwp)
+    return combinar_series(series, pesos)
+
+
 def _dimensionar_fv(cfg: ConfiguracaoEstudo, ensemble: EnsembleCarga, serie: SerieGeracao) -> tuple[float, list[str]]:
     """Potência do sistema: a que cabe no telhado, a informada, ou a que compensa."""
+    if cfg.aguas:
+        kwp = sum(
+            float(getattr(a.get("layout"), "potencia_kwp", 0.0) or 0.0)
+            for a in cfg.aguas
+        )
+        modulos = sum(int(getattr(a.get("layout"), "quantidade", 0) or 0) for a in cfg.aguas)
+        area = sum(
+            float(getattr(a.get("telhado"), "area_m2", 0.0) or 0.0) for a in cfg.aguas
+        )
+        if kwp > 0:
+            geracao = kwp * serie.anual_kwh_por_kwp()
+            # O separador de milhar é trocado número a número: aplicar o
+            # `replace` na frase inteira comeria a vírgula do texto junto.
+            area_txt = f"{area:,.0f}".replace(",", ".")
+            geracao_txt = f"{geracao:,.0f}".replace(",", ".")
+            return kwp, [
+                f"Potência definida pelas {len(cfg.aguas)} águas marcadas: {modulos} "
+                f"módulos em {area_txt} m² de projeção, somando {kwp:.1f} kWp e "
+                f"{geracao_txt} kWh/ano."
+            ]
+
     if cfg.layout is not None and getattr(cfg.layout, "potencia_kwp", 0) > 0:
         kwp = float(cfg.layout.potencia_kwp)
         area = getattr(cfg.telhado, "area_m2", 0.0) if cfg.telhado is not None else 0.0
@@ -265,13 +399,21 @@ def _dimensionar_fv(cfg: ConfiguracaoEstudo, ensemble: EnsembleCarga, serie: Ser
         return kwp, [aviso]
     if cfg.potencia_fv_kwp is not None:
         return float(cfg.potencia_fv_kwp), []
-    consumo_anual = float(np.mean(ensemble.energia_diaria_kwh())) * 365.0
+    # O consumo informado vence o do ensemble: o ensemble é do perfil que
+    # dimensiona o equipamento, e não do ano médio.
+    do_ensemble = float(np.mean(ensemble.energia_diaria_kwh())) * 365.0
+    consumo_anual = float(cfg.consumo_anual_kwh or do_ensemble)
     rendimento = serie.anual_kwh_por_kwp()
     kwp = consumo_anual / rendimento if rendimento > 0 else 0.0
     consumo_texto = f"{consumo_anual:,.0f}".replace(",", ".")
+    origem = (
+        "consumo anual ponderado entre os perfis de ocupação"
+        if cfg.consumo_anual_kwh
+        else "consumo anual estimado"
+    )
     aviso = (
         f"Potência FV não informada: dimensionada em {kwp:.1f} kWp para compensar o "
-        f"consumo anual estimado de {consumo_texto} kWh a {rendimento:.0f} kWh/kWp. "
+        f"{origem} de {consumo_texto} kWh a {rendimento:.0f} kWh/kWp. "
         "O estudo não verifica se esse sistema cabe na cobertura — para isso, marque "
         "o telhado no mapa."
     )
@@ -344,6 +486,16 @@ def _ensemble_de_backup(
     comodos: Sequence[Comodo],
     instancias: dict[str, int],
 ) -> tuple[EnsembleCarga, list[str]]:
+    # Backup montado item a item vence o recorte por cômodo: é mais fino, e
+    # quem o montou sabia de coisa que o nome do ambiente não carrega.
+    if cfg.comodos_backup:
+        instancias_backup = cfg.instancias_backup or {
+            c.nome: instancias.get(c.nome, 1) for c in cfg.comodos_backup
+        }
+        return simular_ensemble(
+            list(cfg.comodos_backup), instancias_backup, cfg.simulacoes,
+            cfg.ajustes_sazonais, semente=cfg.semente,
+        ), []
     if not cfg.comodos_essenciais:
         return simular_ensemble(
             comodos, instancias, cfg.simulacoes, cfg.ajustes_sazonais, semente=cfg.semente
@@ -400,13 +552,7 @@ def executar_estudo(cfg: ConfiguracaoEstudo, progresso=None) -> ResultadoEstudo:
         kwp = 0.0
     else:
         avisar("Obtendo a série horária de geração", 0.25)
-        serie = obter_serie_horaria(
-            cfg.latitude, cfg.longitude,
-            azimute_deg=cfg.azimute_deg,
-            inclinacao_deg=cfg.inclinacao_deg,
-            anos=cfg.anos_serie,
-            permitir_fallback=cfg.permitir_serie_sintetica,
-        )
+        serie = _serie_do_telhado(cfg)
         if serie.aviso:
             avisos.append(serie.aviso)
         kwp, avisos_fv = _dimensionar_fv(cfg, ensemble_total, serie)

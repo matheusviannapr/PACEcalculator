@@ -106,6 +106,9 @@ def gerar_graficos(estudo: ResultadoEstudo, destino: Path) -> dict[str, Path]:
         chave = alvo.conjunto.descricao()
         if chave in estudo.degradacao:
             figuras["degradacao"] = _grafico_degradacao(estudo, chave, destino)
+    ocupacao = getattr(estudo.configuracao, "ocupacao", None) or {}
+    if ocupacao.get("curvas"):
+        figuras["perfis_ocupacao"] = _grafico_perfis_ocupacao(estudo, destino)
     if estudo.cenarios is not None and len(estudo.cenarios.cenarios) > 1:
         figuras["cenarios"] = _grafico_cenarios(estudo.cenarios, destino)
         custo_grupo = estudo_do_gerador(estudo.cenarios)
@@ -613,6 +616,74 @@ def _grafico_degradacao(estudo: ResultadoEstudo, chave: str, destino: Path) -> P
 # ----------------------------------------------------------------------------
 # Relatório
 # ----------------------------------------------------------------------------
+def _grafico_perfis_ocupacao(estudo: ResultadoEstudo, destino: Path) -> Path:
+    """
+    Os dois dias da mesma casa, com o sol por cima.
+
+    É o gráfico que resume a decisão inteira, e por isso vem no começo. Ele
+    mostra três coisas de uma vez:
+
+    * **as duas curvas não são a mesma casa em escala** — no dia de semana o
+      meio do dia é um vale, e no fim de semana é onde a carga mora;
+    * **o sol nasce no vale de um e no pico do outro** — o autoconsumo do fim
+      de semana é naturalmente maior, e é o que faz o solar render mais em
+      casa cheia;
+    * **o que sobra depois do sol** é o que a bateria tem de guardar, e a
+      diferença entre os dois dias é o tamanho do banco.
+
+    A carga de backup entra tracejada porque é a única das três curvas que o
+    sistema promete atender no apagão — e é uma fração pequena das outras.
+    """
+    ocupacao = getattr(estudo.configuracao, "ocupacao", None) or {}
+    curvas: dict[str, np.ndarray] = ocupacao.get("curvas") or {}
+    passo_min = int(ocupacao.get("passo_min") or 1)
+
+    fig, eixo = _figura(10.0, 5.4)
+
+    # A geração primeiro, ao fundo: é a área, e as curvas passam por cima.
+    if estudo.com_solar:
+        media = np.mean(
+            [estudo.serie.janela_media_por_hora(e) for e in estudo.ensemble_total.estacoes],
+            axis=0,
+        ) * estudo.potencia_fv_kwp / 1000.0
+        eixo.fill_between(
+            np.arange(24) + 0.5, 0, media, color=_SEM["geracao"], alpha=0.30,
+            label=f"geração de {estudo.potencia_fv_kwp:.1f} kWp", zorder=1,
+        )
+
+    # O âmbar é do sol e de mais ninguém neste gráfico: uma curva de carga da
+    # mesma cor da área de geração some dentro dela.
+    paleta = [_SEM["carga"], marca.APOIO["azul"], marca.APOIO["roxo"]]
+    estilos = [("-", 2.4), ((0, (7, 2)), 2.4), ((0, (2, 2)), 2.0)]
+    for i, (nome, curva) in enumerate(curvas.items()):
+        horas = np.arange(len(curva)) * passo_min / 60.0
+        traco, largura = estilos[i % len(estilos)]
+        eixo.plot(
+            horas, np.asarray(curva) / 1000.0,
+            color=paleta[i % len(paleta)], lw=largura, ls=traco, label=nome, zorder=3,
+        )
+
+    backup = estudo.ensemble_backup
+    eixo.plot(
+        np.arange(backup.passos_por_dia) * backup.passo_min / 60.0,
+        backup.perfil_medio_w() / 1000.0,
+        color=_SEM["backup"], lw=1.8, ls=(0, (4, 2, 1, 2)),
+        label="quadro de backup", zorder=4,
+    )
+
+    eixo.set_xlabel("Hora do dia")
+    eixo.set_ylabel("Potência (kW)")
+    eixo.set_xlim(0, 24)
+    eixo.set_ylim(bottom=0)
+    eixo.set_xticks(range(0, 25, 3))
+    eixo.set_title(
+        "Os dois dias da mesma casa, e o sol por cima deles" if len(curvas) > 1
+        else "O dia desta casa, e o sol por cima dele"
+    )
+    eixo.legend(fontsize=8, ncol=2, frameon=False)
+    return _salvar(fig, destino, "perfis_ocupacao")
+
+
 def _grafico_cenarios(comparacao, destino: Path) -> Path:
     """
     Os arranjos lado a lado, nas duas dimensões que decidem: conta e apagão.

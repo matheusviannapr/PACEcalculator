@@ -66,6 +66,14 @@ class DadosCapa:
     """Identificação de quem emite o estudo."""
 
     empresa: str = marca.NOME_COMPLETO
+    #: Nomear fabricante e modelo ao longo do documento.
+    #:
+    #: O padrão é **não** nomear: o corpo do estudo especifica o requisito
+    #: (potência, pico, energia útil, rede) e a seção de referências, no fim,
+    #: diz quais modelos o cumprem. Uma proposta que abre com a marca convida
+    #: o cliente a cotar a marca, e a conversa vira preço de etiqueta em vez
+    #: de desempenho — além de travar a substituição por equivalente.
+    nomear_marcas: bool = False
     responsavel: str = ""
     crea: str = ""
     telefone: str = ""
@@ -173,18 +181,31 @@ def _sumario_executivo(estudo: ResultadoEstudo) -> str:
         pior = estudo.recomendado.pior_janela(cfg.autonomia_alvo_h)
         partes.append(caixa(
             "Conjunto recomendado",
-            f"{conjunto.descricao()}. Atravessa {cfg.autonomia_alvo_h:g} h de falta de "
+            f"{_nome_conjunto(conjunto, tensao=cfg.tensao_rede_v)}. Atravessa {cfg.autonomia_alvo_h:g} h de falta de "
             f"energia em pelo menos {cfg.confiabilidade_alvo:.0%} dos casos, inclusive no "
             f"pior horário simulado ({int(pior['hora_inicio'])} h, {pior['estacao']}), onde "
             f"ainda entrega {pior['prob_atendimento']:.0%}. É o conjunto de menor "
             f"investimento, entre os avaliados, que cumpre esse critério.",
             cor="verdepace",
         ))
+        # A energia diária é o número que o cliente reconhece — ele vê kWh na
+        # conta, não kW. Sem ela, o resumo fala só de potência, e potência é a
+        # grandeza que ninguém tem intuição para conferir.
+        geral = estudo.ensemble_total.resumo()["geral"]
+        geral_backup = estudo.ensemble_backup.resumo()["geral"]
         linhas = [
+            ("Consumo diário médio da instalação",
+             _n(geral["energia_diaria_media_kwh"], 1, "kWh/dia")),
+            ("Consumo mensal equivalente",
+             _n(geral["energia_diaria_media_kwh"] * 30, 0, "kWh/mês")),
+            ("Consumo diário do quadro de backup",
+             _n(geral_backup["energia_diaria_media_kwh"], 1, "kWh/dia")),
             *([("Sistema fotovoltaico", _n(estudo.potencia_fv_kwp, 1, "kWp"))]
               if estudo.com_solar else []),
             ("Banco de baterias", _n(conjunto.energia_util_kwh, 1, "kWh úteis")),
-            ("Inversor híbrido", str(conjunto.inversor)),
+            ("Inversor híbrido",
+             str(conjunto.inversor) if _NOMEAR_MARCAS
+             else conjunto.inversor.especificacao(cfg.tensao_rede_v)),
             ("Potência contínua / de pico",
              f"{_n(conjunto.potencia_descarga_kw, 1, 'kW')} / "
              f"{_n(conjunto.potencia_pico_kw, 1, 'kW')} por "
@@ -194,8 +215,11 @@ def _sumario_executivo(estudo: ResultadoEstudo) -> str:
         ]
         if economico.payback_anos:
             linhas.append(("Retorno do investimento", _n(economico.payback_anos, 1, "anos")))
-        partes.append(tabela(["Item", "Valor"], linhas, alinhamento="lr",
-                             legenda="Resumo da solução recomendada"))
+        partes.append(tabela(
+            ["Item", "Valor"], linhas,
+            alinhamento="p{6.6cm}p{8.2cm}",
+            legenda="Resumo da solução recomendada",
+        ))
     else:
         melhor = estudo.ranking.sort_values("autonomia_garantida_h", ascending=False).iloc[0]
         partes.append(caixa_aviso(
@@ -206,6 +230,88 @@ def _sumario_executivo(estudo: ResultadoEstudo) -> str:
             "soluções opostas."
         ))
     return "\n\n".join(p for p in partes if p)
+
+
+def _tabela_das_aguas(estudo: ResultadoEstudo) -> str:
+    """
+    Uma linha por água, com a produtividade da orientação de cada uma.
+
+    Só aparece quando há mais de uma: com uma água só, a tabela de medidas
+    logo acima já diz tudo, e repetir a mesma linha noutro formato é ruído.
+
+    A coluna que importa é a produtividade. Duas águas opostas rendem
+    diferente e rendem em horas diferentes -- a do nascente de manhã, a do
+    poente à tarde -- e é essa diferença que faz o conjunto ter uma curva mais
+    plana que qualquer uma das partes. O estudo não usa a média dos ângulos:
+    busca uma série horária por orientação e as combina ponderadas pela
+    potência, que é a única forma de a geração aparecer nas horas certas.
+    """
+    aguas = getattr(estudo.configuracao, "aguas", None) or []
+    if len(aguas) < 2:
+        return ""
+
+    # A produtividade por orientação sai da própria série usada no despacho.
+    por_angulo = {
+        (round(float(a["azimute_deg"]), 1), round(float(a["inclinacao_deg"]), 1)):
+            float(a["produtividade_kwh_kwp_ano"])
+        for a in (estudo.serie.metadados or {}).get("aguas", [])
+    }
+
+    linhas = []
+    total_kwp = total_kwh = total_area = 0.0
+    for agua in aguas:
+        telhado, layout = agua.get("telhado"), agua.get("layout")
+        if telhado is None or layout is None:
+            continue
+        kwp = float(getattr(layout, "potencia_kwp", 0.0) or 0.0)
+        chave = (round(float(telhado.azimute_deg), 1),
+                 round(float(telhado.inclinacao_deg), 1))
+        produtividade = por_angulo.get(chave)
+        geracao = kwp * produtividade if produtividade else None
+        total_kwp += kwp
+        total_area += float(telhado.area_m2)
+        total_kwh += geracao or 0.0
+        linhas.append((
+            agua.get("nome") or telhado.nome,
+            _n(telhado.area_m2, 0, "m²"),
+            f"{telhado.orientacao} ({_n(telhado.azimute_deg, 0, 'graus')})",
+            _n(telhado.inclinacao_deg, 0, "graus"),
+            _n(getattr(layout, "quantidade", 0), 0),
+            _n(kwp, 1, "kWp"),
+            _n(produtividade, 0) if produtividade else "—",
+            _n(geracao, 0) if geracao else "—",
+        ))
+
+    if not linhas:
+        return ""
+
+    linhas.append((
+        Raw(r"\textbf{Total}"), _n(total_area, 0, "m²"), "—", "—",
+        _n(sum(int(getattr(a.get("layout"), "quantidade", 0) or 0) for a in aguas), 0),
+        _n(total_kwp, 1, "kWp"),
+        _n(total_kwh / total_kwp, 0) if total_kwp and total_kwh else "—",
+        _n(total_kwh, 0) if total_kwh else "—",
+    ))
+
+    return "\n\n".join([
+        tabela(
+            ["Água", "Área", "Orientação", "Incl.", "Módulos", "Potência",
+             "kWh/kWp·ano", "kWh/ano"],
+            linhas,
+            alinhamento="p{2.6cm}rp{2.6cm}rrrrr",
+            tamanho_fonte="scriptsize",
+            legenda=f"As {len(aguas)} águas do telhado e a geração de cada uma",
+        ),
+        nota(
+            "A produtividade difere de uma água para a outra porque a orientação "
+            "difere, e o estudo não usa a média dos ângulos: busca uma série horária "
+            "por orientação e as combina ponderadas pela potência de cada água. A "
+            "distinção não é preciosismo — duas águas a leste e a oeste, tratadas "
+            "como uma água média, virariam uma água ao norte, com um pico ao "
+            "meio-dia que o telhado não tem e sem a geração de manhã e de fim de "
+            "tarde que ele tem."
+        ),
+    ])
 
 
 def _secao_telhado(estudo: ResultadoEstudo, figuras: dict[str, Path]) -> str:
@@ -263,6 +369,8 @@ def _secao_telhado(estudo: ResultadoEstudo, figuras: dict[str, Path]) -> str:
         alinhamento="lr", largura_primeira_coluna="7cm",
         legenda="Medidas do telhado e do arranjo",
     ))
+    partes.append(_tabela_das_aguas(estudo))
+
     if telhado.montagem == "coplanar":
         partes.append(nota(
             "A orientação da face foi deduzida do contorno: a água é perpendicular à "
@@ -323,6 +431,122 @@ def _secao_solar(estudo: ResultadoEstudo, figuras: dict[str, Path]) -> str:
             "A série horária é sintética: a forma do dia vem de geometria solar e a "
             "energia foi ancorada em totais mensais estimados. Serve para estudo interno; "
             "substituir por consulta ao PVGIS antes de emitir proposta comercial."
+        ))
+    return "\n\n".join(p for p in partes if p)
+
+
+def _secao_ocupacao(estudo: ResultadoEstudo, figuras: dict[str, Path]) -> str:
+    """
+    Quem está em casa, e o que isso faz com a curva.
+
+    A vistoria levanta uma janela de uso por equipamento, e ela descreve um dia
+    só. Uma residência tem pelo menos dois: o dia em que a família está fora e
+    o dia em que está toda dentro. Os dois consomem de formas diferentes, e a
+    diferença não é de escala -- é de formato. Dimensionar pelo primeiro e
+    entregar o segundo é o erro que faz o sistema faltar no primeiro sábado.
+
+    A seção mostra a transformação, e não só o resultado dela: qual janela foi
+    reescrita, qual probabilidade foi mexida e por quê. Um modelo de ocupação
+    que não se deixa auditar é palpite com casas decimais.
+    """
+    dados = getattr(estudo.configuracao, "ocupacao", None)
+    if not dados:
+        return ""
+
+    tabela_perfis = dados.get("tabela")
+    dimensionante = dados.get("dimensionante", "")
+    um_perfil = tabela_perfis is not None and len(tabela_perfis) == 1
+
+    partes = [secao("Como esta casa consome")]
+
+    if dados.get("para_que"):
+        partes.append(caixa("O que este estudo assume", dados["para_que"],
+                            cor="amarelopace"))
+
+    if um_perfil:
+        partes.append(
+            "A vistoria levanta uma janela de uso por equipamento, e ela costuma "
+            "sair do formulário -- horário comercial, uma refeição por dia. Este "
+            "estudo trata a casa como ocupada todos os dias: cada equipamento "
+            "passa a poder ser usado a qualquer hora em que há gente acordada, "
+            "com exceção da cozinha, que mantém os dois horários de refeição "
+            "porque é deles que vêm os picos da curva."
+        )
+    else:
+        partes.append(
+            "A vistoria levanta uma janela de uso por equipamento, e ela descreve "
+            "um dia só. Esta casa tem dois. No dia de semana a família sai, e o "
+            "consumo do meio do dia cai -- cai, e não some: sobra gente em casa, "
+            "e a refrigeração não sabe que dia é hoje. No fim de semana ninguém "
+            "sai, qualquer equipamento pode ser usado a qualquer hora, e é aí "
+            "que o sistema é exigido. O estudo simulou os dois dias."
+        )
+
+    if tabela_perfis is not None and len(tabela_perfis):
+        partes.append(tabela(
+            ["Perfil", "Acordado", "Refeições", "Uso diurno", "Dias/sem.",
+             "Pico P95", "Consumo"],
+            [
+                (
+                    linha["perfil"],
+                    linha["acordado"],
+                    linha["refeicoes"] or "--",
+                    linha["uso_diurno"],
+                    _n(linha["dias_por_semana"], 0),
+                    _n(linha.get("pico_p95_kw", float("nan")), 2, "kW"),
+                    _n(linha.get("energia_diaria_kwh", float("nan")), 1, "kWh/dia"),
+                )
+                for _, linha in tabela_perfis.iterrows()
+            ],
+            alinhamento="p{3.1cm}p{2.0cm}p{2.6cm}p{2.0cm}rrr",
+            tamanho_fonte="scriptsize",
+            legenda="Os perfis de ocupação simulados, e o que cada um produz",
+        ))
+
+    if dados.get("diaria_ponderada_kwh"):
+        diaria = float(dados["diaria_ponderada_kwh"])
+        base = (
+            "A energia do ano sai deste consumo diário"
+            if um_perfil else
+            "A energia do ano sai da média ponderada dos sete dias"
+        )
+        partes.append(nota(
+            f"{base}: {_n(diaria, 1, 'kWh/dia')}, ou "
+            f"{_n(diaria * 30.0, 0, 'kWh/mês')}. É esse número que dimensiona o "
+            "gerador fotovoltaico e alimenta a conta de economia -- e não o pico, "
+            "que decide o inversor."
+        ))
+
+    if figuras.get("perfis_ocupacao"):
+        legenda = (
+            "O padrão de ocupação e a geração solar no mesmo eixo. O que a bateria "
+            "precisa guardar é o que sobra da carga depois do sol."
+            if um_perfil else
+            "Os dois padrões de ocupação e a geração solar no mesmo eixo. O que a "
+            "bateria precisa guardar é o que sobra da carga depois do sol -- e é aí "
+            "que os dois dias mais diferem."
+        )
+        partes.append(_figura(figuras.get("perfis_ocupacao"), legenda, largura="1.0"))
+
+    if dimensionante and not um_perfil:
+        partes.append(caixa(
+            "O perfil que dimensionou",
+            f"{dimensionante}. É o pior caso, e é ele que o sistema tem de "
+            "atender. O dia de semana entra na conta de energia, porque acontece "
+            "cinco vezes em sete, mas não é ele que decide o equipamento: solar "
+            "dimensionado pela média e bateria dimensionada pelo pior dia é a "
+            "combinação que não falha nem sobra.",
+            cor="pretopace",
+        ))
+
+    if dados.get("reencaixados"):
+        partes.append(nota(
+            f"{dados['reencaixados']} equipamento(s) tiveram a janela de uso "
+            "reescrita. Dois motivos: a janela de 08:00 às 18:00, que é horário "
+            "de escritório e não de casa; e a cozinha, em que a vistoria costuma "
+            "registrar só o jantar -- numa casa cheia almoça-se em casa, e o "
+            "forno, o micro-ondas e a lava-louças rodam duas vezes. A janela "
+            "levantada em campo é preservada como está no anexo de cargas."
         ))
     return "\n\n".join(p for p in partes if p)
 
@@ -466,7 +690,7 @@ def _analise_completa(analise, figuras: dict[str, Path]) -> list[str]:
                     )
                     for linha in principais.itertuples()
                 ],
-                alinhamento="p{5.1cm}p{3cm}rrr", tamanho_fonte="small",
+                alinhamento="p{5.4cm}p{3.4cm}rrr", tamanho_fonte="scriptsize",
                 legenda="Composição do instante de pico, por equipamento",
             ),
             nota(
@@ -503,7 +727,7 @@ def _analise_completa(analise, figuras: dict[str, Path]) -> list[str]:
                 ("Fator de carga", _n(indicadores.fator_de_carga, 2),
                  indicadores.interpretacao_fator_carga),
             ],
-            alinhamento="p{5.5cm}rp{5.5cm}",
+            alinhamento="p{4.6cm}rp{7.6cm}", tamanho_fonte="small",
             legenda="Fatores característicos da instalação",
         ),
         _figura(figuras.get("fator_carga_hora"),
@@ -705,6 +929,88 @@ def _sem_parenteses(descricao: str) -> str:
     return re.sub(r"\s*\([^)]*\)\s*$", "", str(descricao)).strip()
 
 
+#: Quem manda no documento inteiro: definido uma vez por `montar_documento`.
+#: Uma variável de módulo em vez de um parâmetro em vinte assinaturas — a
+#: alternativa era enfiar `capa` em toda função de seção, e a maioria delas
+#: não tem nada a ver com capa.
+_NOMEAR_MARCAS = False
+
+
+def _nome_conjunto(conjunto, curto: bool = False, tensao: float | None = None) -> str:
+    """
+    Como o conjunto aparece no corpo do documento.
+
+    Com marcas desligadas — o padrão — sai a especificação por desempenho:
+    potência do inversor, pico com duração e energia útil do banco. É o que um
+    memorial descritivo publica, e é o que sustenta substituição por
+    equivalente sem refazer o estudo.
+    """
+    if _NOMEAR_MARCAS:
+        return conjunto.descricao()
+    return conjunto.especificacao_curta() if curto else conjunto.especificacao(tensao)
+
+
+def _rotulo_do_ranking(chave: str, estudo: ResultadoEstudo) -> str:
+    """
+    A linha do ranking sem marca.
+
+    O ranking usa ``descricao()`` como chave — é o identificador que amarra
+    resiliência, economia e degradação. Trocar a chave quebraria os três; o
+    que se troca é o rótulo, na hora de imprimir.
+    """
+    if _NOMEAR_MARCAS:
+        return chave
+    for resultado in estudo.resiliencia:
+        if resultado.conjunto and resultado.conjunto.descricao() == chave:
+            return resultado.conjunto.especificacao_curta()
+    return chave
+
+
+def _referencias_de_equipamento(estudo: ResultadoEstudo) -> str:
+    """
+    Os modelos reais que cumprem a especificação, no fim do documento.
+
+    Existe porque especificar sem nunca dizer o que serve deixa o cliente sem
+    saber o que comprar. A ordem importa: primeiro o requisito, no corpo;
+    depois a referência, aqui. Assim a conversa começa em desempenho e só
+    então chega a marca — e trocar de marca não invalida o estudo.
+    """
+    if _NOMEAR_MARCAS or estudo.recomendado is None:
+        return ""
+    conjunto = estudo.recomendado.conjunto
+    partes = [
+        secao("Referências de equipamento"),
+        "O corpo deste estudo especifica desempenho, e não marca: o que precisa "
+        "ser cumprido é a potência contínua, a sobrecarga com a sua duração, a "
+        "energia útil do banco e a tensão da rede. Abaixo, os modelos de catálogo "
+        "que cumprem a especificação e serviram de base para os números. "
+        "Equivalente de outro fabricante que atenda os mesmos limites substitui "
+        "sem refazer o estudo.",
+        tabela(
+            ["Função", "Especificação exigida", "Referência de catálogo"],
+            [
+                (
+                    "Inversor híbrido",
+                    conjunto.inversor.especificacao(estudo.configuracao.tensao_rede_v),
+                    f"{conjunto.inversor.fabricante} {conjunto.inversor.modelo}",
+                ),
+                (
+                    "Banco de baterias",
+                    f"{_n(conjunto.energia_util_kwh, 1, 'kWh')} úteis, "
+                    f"{_n(conjunto.potencia_descarga_kw, 1, 'kW')} de descarga, "
+                    f"{_n(conjunto.bateria.tensao_nominal_v, 0, 'V')} nominais",
+                    f"{conjunto.modulos}× {conjunto.bateria.fabricante} "
+                    f"{conjunto.bateria.modelo}",
+                ),
+            ],
+            alinhamento="p{3.0cm}p{7.2cm}p{4.6cm}",
+            tamanho_fonte="small",
+            legenda="Especificação exigida e a referência de catálogo que a cumpre",
+        ),
+    ]
+    return "\n\n".join(partes)
+
+
 def _resumo_da_triagem(estudo: ResultadoEstudo) -> str:
     """
     A síntese da triagem, em vez do catálogo inteiro linha a linha.
@@ -732,13 +1038,116 @@ def _resumo_da_triagem(estudo: ResultadoEstudo) -> str:
         menor = aprovados.iloc[0]
         linhas.append((
             "Menor inversor que atende",
-            f"{menor['fabricante']} {menor['modelo']} ({_n(menor['nominal_kw'], 1, 'kW')})",
+            (f"{menor['fabricante']} {menor['modelo']} "
+             f"({_n(menor['nominal_kw'], 1, 'kW')})" if _NOMEAR_MARCAS
+             else _n(menor["nominal_kw"], 1, "kW")),
         ))
     return tabela(
         ["Triagem", "Resultado"], linhas, alinhamento="lr",
         largura_primeira_coluna="8cm",
         legenda="Síntese da triagem de inversores por potência",
     )
+
+
+def _secao_quadro_backup(estudo: ResultadoEstudo) -> str:
+    """
+    O que a bateria segura, nome por nome.
+
+    A seção do armazenamento responde "qual equipamento comprar"; esta
+    responde "para segurar o quê", que é a pergunta que vem antes e que o
+    cliente faz primeiro. São duas listas: o que entra, item a item, e o que
+    fica de fora, resumido por nível -- porque é a segunda que explica por que
+    o inversor é pequeno, e é nela que um erro de classificação aparece.
+    """
+    dados = getattr(estudo.configuracao, "criticidade", None) or {}
+    tabela_bruta = dados.get("tabela")
+    if tabela_bruta is None or not len(tabela_bruta):
+        return ""
+
+    corte = tuple(str(c).upper() for c in (dados.get("corte") or ()))
+    if not corte:
+        return ""
+    descricoes = dados.get("descricoes") or {}
+
+    dentro = tabela_bruta[tabela_bruta["criticidade"].isin(corte)]
+    fora = tabela_bruta[~tabela_bruta["criticidade"].isin(corte)]
+    total_w = float(tabela_bruta["potencia_w"].sum())
+    dentro_w = float(dentro["potencia_w"].sum())
+
+    niveis = ", ".join(
+        f"{nivel} ({descricoes.get(nivel, nivel).lower()})" for nivel in corte
+    )
+    partes = [
+        secao("O que a bateria segura"),
+        "A vistoria classificou cada equipamento da casa em um de quatro níveis "
+        "de criticidade, e o quadro de backup é o recorte dos níveis "
+        f"{niveis}. O recorte é por equipamento e não por ambiente: numa "
+        "cozinha, a geladeira é crítica e o forno elétrico não, e levar o "
+        "ambiente inteiro para o backup multiplicaria o inversor sem que "
+        "ninguém tivesse pedido isso.",
+    ]
+
+    linhas = [
+        (
+            linha["comodo"],
+            linha["equipamento"],
+            linha["criticidade"],
+            _n(float(linha["potencia_w"]), 0, "W"),
+        )
+        for _, linha in dentro.sort_values(
+            ["criticidade", "potencia_w"], ascending=[True, False]
+        ).iterrows()
+    ]
+    partes.append(tabela_longa(
+        ["Ambiente", "Equipamento", "Nível", "Potência"],
+        linhas,
+        alinhamento="p{4.2cm}p{6.0cm}cr",
+        tamanho_fonte="scriptsize",
+        legenda=(
+            f"Os {len(linhas)} equipamentos que entram no quadro de backup, "
+            f"somando {_n(dentro_w / 1000.0, 2, 'kW')}"
+        ),
+    ))
+
+    if len(fora):
+        resumo = []
+        for nivel in ("MC", "C", "P", "NC"):
+            faixa = tabela_bruta[tabela_bruta["criticidade"] == nivel]
+            if not len(faixa):
+                continue
+            potencia = float(faixa["potencia_w"].sum())
+            resumo.append((
+                nivel,
+                descricoes.get(nivel, nivel),
+                _n(len(faixa), 0),
+                _n(potencia / 1000.0, 2, "kW"),
+                _pct(potencia / total_w if total_w else 0.0),
+                "sim" if nivel in corte else "não",
+            ))
+        partes.append(tabela(
+            ["Nível", "Significado", "Equip.", "Potência", "% da casa", "No backup"],
+            resumo,
+            alinhamento="cp{5.2cm}rrrc",
+            tamanho_fonte="scriptsize",
+            legenda="A instalação inteira por nível de criticidade",
+        ))
+        partes.append(
+            f"A casa tem {_n(total_w / 1000.0, 1, 'kW')} instalados e o quadro de "
+            f"backup, {_n(dentro_w / 1000.0, 2, 'kW')} — "
+            f"{_pct(dentro_w / total_w if total_w else 0.0)} do total. É essa "
+            "razão que faz o sistema de armazenamento caber num inversor "
+            "residencial: o que fica de fora é quase toda a potência instalada, "
+            "e quase nada do que a casa precisa para continuar funcionando."
+        )
+
+    partes.append(nota(
+        "A classificação vem da vistoria em campo, e é a única premissa deste "
+        "estudo que não se verifica por cálculo. Se um equipamento desta lista "
+        "não deveria estar aqui — ou se falta um que deveria — é o momento de "
+        "dizer: cada item movido de nível muda o inversor e o banco, e mudar "
+        "depois da compra custa o equipamento inteiro."
+    ))
+    return "\n\n".join(partes)
 
 
 def _secao_armazenamento(estudo: ResultadoEstudo, figuras: dict[str, Path]) -> str:
@@ -805,7 +1214,7 @@ def _secao_armazenamento(estudo: ResultadoEstudo, figuras: dict[str, Path]) -> s
         ["Conjunto", "kWh", "kW", "Hoje", "Ano 10", "Investimento", "Meta"],
         [
             (
-                _sem_parenteses(linha.conjunto),
+                _sem_parenteses(_rotulo_do_ranking(linha.conjunto, estudo)),
                 _n(linha.energia_util_kwh, 1), _n(linha.potencia_kw, 1),
                 _n(linha.autonomia_garantida_h, 0, "h"),
                 _n(linha.autonomia_ano10_h, 0, "h"),
@@ -1316,7 +1725,7 @@ def _janela_legivel(equipamento) -> str:
 
     O núcleo do D² guarda os intervalos em minutos porque é assim que ele
     simula. Publicar "1080 a 1380" num anexo obriga o leitor a dividir por 60
-    para conferir se o horário do chuveiro faz sentido -- que é exatamente a
+    para conferir se o horário do chuveiro faz sentido — que é exatamente a
     conferência que o anexo existe para permitir.
     """
     intervalos = equipamento.intervalos
@@ -1331,6 +1740,38 @@ def _janela_legivel(equipamento) -> str:
     except (TypeError, ValueError):
         return "—"
     return ", ".join(trechos) if trechos else "—"
+
+
+def _uso_legivel(linha) -> str:
+    """
+    Quanto tempo o equipamento fica ligado dentro da janela.
+
+    A janela sozinha engana, e engana sempre no mesmo sentido: uma geladeira
+    aparece como "00:00–23:59" e o leitor entende 24 horas de consumo, quando
+    o compressor liga por 15 a 45 minutos de cada vez. Um chuveiro aparece
+    como "06:00–09:00" e o leitor entende três horas, quando são oito minutos.
+
+    Por isso a coluna de janela ganhou esta ao lado: para o intervalo dinâmico
+    ela traz a faixa de duração de cada acionamento; para o fixo, diz se o
+    equipamento ocupa a janela inteira ou um trecho sorteado dela.
+    """
+    tipo = str(linha.get("Tipo de intervalo") or "").strip().lower()
+    if tipo.startswith("din"):
+        d_min = linha.get("duracao_min")
+        d_max = linha.get("duracao_max")
+        try:
+            a, b = float(d_min), float(d_max)
+        except (TypeError, ValueError):
+            return "duração sorteada"
+        if abs(a - b) < 1e-6:
+            return f"{_n(a, 2, 'h')} por acionamento"
+        return f"{_n(a, 2)} a {_n(b, 2, 'h')} por acionamento"
+    modo = str(linha.get("modo_fixo") or "").strip().upper()
+    if modo == "FIXO_100%":
+        return "a janela inteira"
+    if modo == "FIXO_DURACAO_INTERVALAR":
+        return "trecho sorteado da janela"
+    return "a janela inteira"
 
 
 def _anexo_cargas(estudo: ResultadoEstudo) -> str:
@@ -1382,21 +1823,39 @@ def _anexo_cargas(estudo: ResultadoEstudo) -> str:
 
         titulo = comodo.nome if n == 1 else f"{comodo.nome} (×{n})"
         detalhe.append(secao(titulo, nivel=2))
+        # As linhas do cenário, quando existem, trazem duração e modo — o
+        # objeto do núcleo do D² já os converteu em intervalos e os perdeu.
+        tabelas_cenario = getattr(estudo.configuracao, "tabelas_cenario", None) or {}
+        cru = tabelas_cenario.get(comodo.nome)
+        linhas_detalhe = []
+        for i, eq in enumerate(comodo.equipamentos):
+            bruta = (
+                cru.iloc[i].to_dict()
+                if cru is not None and i < len(cru)
+                else {"Tipo de intervalo": "fixo", "modo_fixo": ""}
+            )
+            linhas_detalhe.append((
+                eq.nome,
+                _n(eq.potencia, 0, "W"),
+                _n(eq.quantidade, 0),
+                # Probabilidade e fator de demanda numa coluna só: são as duas
+                # frações da mesma linha, e separá-las custava a largura que
+                # a coluna de duração precisava.
+                f"{_pct(eq.probabilidade, 0)} · {_n(eq.fator_demanda, 2)}",
+                _janela_legivel(eq),
+                _uso_legivel(bruta),
+            ))
         detalhe.append(tabela_longa(
-            ["Equipamento", "Potência", "Qtd.", "Prob.", "F. dem.", "Janela de uso"],
-            [
-                (
-                    eq.nome,
-                    _n(eq.potencia, 0, "W"),
-                    _n(eq.quantidade, 0),
-                    _pct(eq.probabilidade, 0),
-                    _n(eq.fator_demanda, 2),
-                    _janela_legivel(eq),
-                )
-                for eq in comodo.equipamentos
-            ],
-            alinhamento="p{5.4cm}rrrrp{3.6cm}",
-            legenda=f"Equipamentos considerados em {comodo.nome}",
+            ["Equipamento", "Potência", "Qtd.", "Prob. · FD",
+             "Janela", "Quanto tempo"],
+            linhas_detalhe,
+            alinhamento="p{4.0cm}rrrp{2.4cm}p{3.0cm}",
+            tamanho_fonte="scriptsize",
+            legenda=(
+                f"Equipamentos considerados em {comodo.nome}. 'Janela' é quando o "
+                f"equipamento pode ligar; 'Quanto tempo', por quanto ele fica ligado "
+                f"dentro dela — a geladeira tem janela de 24 h e liga por minutos"
+            ),
         ))
 
     partes.append(tabela_longa(
@@ -1463,7 +1922,7 @@ def _secao_procedencia(estudo: ResultadoEstudo) -> str:
     if linhas:
         partes.append(tabela_longa(
             ["Equipamento", "Natureza do dado", "Origem"], linhas,
-            alinhamento="p{5cm}p{3.6cm}p{6.5cm}",
+            alinhamento="p{4.4cm}p{3.4cm}p{6.4cm}", tamanho_fonte="scriptsize",
             legenda="Procedência dos dados de equipamento usados neste estudo",
         ))
 
@@ -1527,21 +1986,31 @@ def montar_documento(
     """Devolve o documento LaTeX completo, do ``\\documentclass`` ao ``\\end``."""
     figuras = figuras or {}
     capa = capa or DadosCapa(referencia=estudo.configuracao.nome)
+    global _NOMEAR_MARCAS
+    _NOMEAR_MARCAS = bool(capa.nomear_marcas)
     # Sem sol no estudo, as três seções fotovoltaicas somem inteiras. Deixar a
     # curva de geração num estudo de cliente que não vai instalar painel faz
     # quem lê entender que ela faz parte da proposta.
     corpo = [
         _capa(estudo, capa),
         _sumario_executivo(estudo),
+        # Logo depois da conclusão: o leitor precisa ver os dois dias da casa
+        # antes de qualquer tabela, porque é a diferença entre eles que
+        # justifica todo o resto do documento.
+        _secao_ocupacao(estudo, figuras),
         _secao_telhado(estudo, figuras) if estudo.com_solar else "",
         _secao_solar(estudo, figuras) if estudo.com_solar else "",
         _secao_demanda(estudo, figuras),
         _secao_fotovoltaico(estudo) if estudo.com_solar else "",
+        # Antes do armazenamento: "para segurar o quê" vem antes de "qual
+        # equipamento comprar", e é a pergunta que o cliente faz primeiro.
+        _secao_quadro_backup(estudo),
         _secao_armazenamento(estudo, figuras),
         _secao_vida_util(estudo, figuras),
         _secao_cenarios(estudo, figuras),
         _secao_economia(estudo),
         _secao_procedencia(estudo),
+        _referencias_de_equipamento(estudo),
         _anexo_cargas(estudo),
     ]
     return "\n\n".join([

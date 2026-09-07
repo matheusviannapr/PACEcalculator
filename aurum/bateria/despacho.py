@@ -99,6 +99,10 @@ class Gerador:
     #: potência. Arredondar para cima até uma delas evita recomendar um grupo
     #: de 137 kW, que ninguém fabrica.
     _COMERCIAIS_KVA = (
+        # A faixa pequena existe e é a que atende residência: um quadro de
+        # backup de 2 kW não pede um grupo de 30 kVA. Sem estas linhas, o
+        # dimensionamento automático saltava para 24 kW num pico de 0,7 kW.
+        4, 6, 8, 10, 12, 15, 18, 20, 25,
         30, 40, 50, 60, 75, 90, 110, 130, 150, 180, 200, 230, 260, 300, 350,
         400, 450, 500, 600, 700, 800, 900, 1000, 1250, 1500, 1800, 2000,
     )

@@ -96,6 +96,7 @@ _PADROES: dict[str, Any] = {
     "e_endereco": "",
     "e_modo_carga": "modelo",
     "e_cenario": None,
+    "e_vistoria": None,
     "e_conta_kwh": 5000.0,
     "e_dias_operacao": 30,
     "e_ensemble_total": None,
@@ -110,11 +111,28 @@ _PADROES: dict[str, Any] = {
     "e_assinatura_carga": None,
     "e_assinatura_analise": None,
     "e_analise": None,
+    #: Qual dos estudos de ocupação foi escolhido, ou "" para usar as janelas
+    #: da vistoria como elas vieram.
+    "e_estudo_ocupacao": "",
+    #: O que a escolha produziu: tabela dos perfis, curvas, dimensionante e o
+    #: consumo diário ponderado. Vai inteiro para o dossiê.
+    "e_ocupacao": None,
+    #: O cenário reescrito pelo perfil que dimensiona. O de `e_cenario`
+    #: continua sendo o levantado em campo — é o dado, e o anexo o mostra.
+    "e_cenario_ocupacao": None,
     "e_modulo": None,
     "e_inversor": None,
     "e_memoria": None,
     "e_telhado": None,
     "e_layout": None,
+    #: As águas marcadas, na ordem em que foram desenhadas. Cada uma é um
+    #: dicionário com nome, telhado, arranjo automático, arranjo editado,
+    #: croqui e edição — tudo que a água precisa para ser editada sozinha.
+    "e_aguas": [],
+    #: Qual delas está espelhada nas chaves acima e recebe os cliques do mapa.
+    "e_agua_ativa": 0,
+    #: Produtividade e geração por água, quando calculadas.
+    "e_geracao_aguas": None,
     "e_croqui": None,
     "e_edicao": None,
     "e_layout_base": None,
@@ -465,6 +483,7 @@ def _passo_cliente() -> None:
 # Passo 2 — cargas
 # ============================================================================
 _OPCOES_CARGA = {
+    "vistoria": "Tenho uma vistoria técnica",
     "modelo": "Usar o rascunho do modelo",
     "planilha": "Tenho a planilha do D²",
     "conta": "Não tenho levantamento",
@@ -485,6 +504,8 @@ def _passo_cargas() -> None:
     if escolha == "conta":
         _cargas_pela_conta()
         return
+    if escolha == "vistoria":
+        _cargas_da_vistoria()
     if escolha == "planilha":
         _cargas_da_planilha()
     if st.session_state["e_cenario"] is None and escolha == "modelo":
@@ -496,7 +517,129 @@ def _passo_cargas() -> None:
         _rodape(pendencia="carregar a planilha de cargas")
         return
 
+    _painel_da_vistoria()
     _editor_de_cargas(cenario)
+
+
+def _cargas_da_vistoria() -> None:
+    """
+    Recebe o backup da vistoria técnica e traz tudo que ele sabe.
+
+    O backup em JSON é a fonte: as duas planilhas exportadas ao lado dele são
+    derivadas e perdem informação — a do simulador descarta cômodo e
+    criticidade, que é o que define o quadro de backup, e o inventário sai com
+    o texto corrompido pelo Excel.
+
+    Além das cargas, o backup responde três perguntas que a tela faria adiante
+    e que o vistoriador já respondeu em campo: a tensão da rede, se já existe
+    geração, e qual equipamento é crítico. Redigitá-las seria pedir duas vezes
+    o mesmo dado — e a segunda resposta é a que costuma vir errada.
+    """
+    import json
+
+    from .demanda.contrato_vistoria import Gravidade, conferir
+    from .demanda.vistoria import CRITICIDADES, DESCRICAO_CRITICIDADE, ler_backup
+
+    arquivo = st.file_uploader(
+        "Backup da vistoria técnica (.json)", type=["json"],
+        help="O arquivo que a vistoria exporta com nome terminado em '-backup.json'. "
+             "É a fonte completa: as planilhas ao lado dele perdem cômodo, "
+             "criticidade e a tensão da rede.",
+    )
+    if arquivo is None:
+        return
+
+    try:
+        dados = json.loads(arquivo.getvalue().decode("utf-8"))
+    except Exception as exc:  # noqa: BLE001 — arquivo do usuário, erro legível
+        st.error(f"Não consegui ler o JSON: {exc}")
+        return
+
+    # A conferência antes da importação: é melhor saber o que falta agora do
+    # que descobrir no relatório que uma hipótese entrou no lugar de um dado.
+    conferencia = conferir(dados)
+    if not conferencia.serve:
+        st.error(f"**{conferencia.resumo()}**")
+        for achado in conferencia.bloqueios:
+            st.markdown(f"- `{achado.campo.caminho}` — {achado.campo.sem_ele}")
+        return
+
+    importantes = conferencia.por_gravidade(Gravidade.IMPORTANTE)
+    if importantes:
+        with st.expander(f"⚠️ {len(importantes)} campo(s) importante(s) em falta — "
+                         "o estudo roda, mas com hipótese no lugar"):
+            for achado in importantes:
+                st.markdown(f"- **`{achado.campo.caminho}`** — {achado.campo.sem_ele}")
+
+    if not st.button("Importar esta vistoria", type="primary", width="stretch"):
+        return
+
+    try:
+        vistoria = ler_backup(dados)
+    except ValueError as exc:
+        st.error(f"Não consegui importar: {exc}")
+        return
+
+    cenario = vistoria.cenario
+    # O quadro de backup nasce do que a vistoria marcou como crítico.
+    cenario.criticidades_essenciais = ("MC", "C")
+    st.session_state.update({
+        "e_cenario": cenario,
+        "e_vistoria": vistoria,
+        "e_nome": vistoria.nome,
+        "e_tensao_rede": vistoria.tensao_rede_v,
+        "e_ensemble_backup": None,
+        "e_assinatura_carga": None,
+    })
+    if vistoria.uf:
+        st.session_state["e_endereco"] = vistoria.local
+    st.rerun()
+
+
+def _painel_da_vistoria() -> None:
+    """O que a vistoria trouxe, para conferência antes de seguir."""
+    from .demanda.vistoria import CRITICIDADES, DESCRICAO_CRITICIDADE
+
+    vistoria = st.session_state.get("e_vistoria")
+    if vistoria is None:
+        return
+    cenario = st.session_state["e_cenario"]
+
+    st.success(
+        f"**{vistoria.cliente}** · vistoria de {vistoria.data} por "
+        f"{vistoria.vistoriador or 'não informado'} · rede "
+        f"{vistoria.tensao_rede_v:.0f} V · {vistoria.local or 'local não informado'}"
+    )
+
+    tabela = cenario.por_criticidade()
+    if tabela.empty:
+        return
+    agregado = (
+        tabela.groupby("criticidade")
+        .agg(itens=("equipamento", "size"), potencia_w=("potencia_w", "sum"))
+        .reindex([c for c in CRITICIDADES if c in set(tabela["criticidade"])])
+    )
+    total = float(agregado["potencia_w"].sum()) or 1.0
+    st.markdown("##### O que a vistoria classificou")
+    st.dataframe(
+        pd.DataFrame({
+            "criticidade": agregado.index,
+            "o que significa": [DESCRICAO_CRITICIDADE.get(c, "") for c in agregado.index],
+            "equipamentos": agregado["itens"].values,
+            "potência (kW)": (agregado["potencia_w"] / 1000).round(2).values,
+            "fração": [f"{v/total:.0%}" for v in agregado["potencia_w"].values],
+        }),
+        width="stretch", hide_index=True,
+    )
+    st.caption(
+        "O quadro de backup é montado **equipamento a equipamento**, e não por "
+        "ambiente: numa cozinha, a geladeira crítica entra e o forno elétrico não. "
+        "Recortar por cômodo levaria os dois."
+    )
+    if vistoria.descartados:
+        with st.expander(f"{len(vistoria.descartados)} item(ns) fora da simulação"):
+            for linha in vistoria.descartados:
+                st.markdown(f"- {linha}")
 
 
 def _cargas_da_planilha() -> None:
@@ -721,6 +864,8 @@ def _passo_analise() -> None:
     cenario: Cenario | None = st.session_state["e_cenario"]
     ensemble = st.session_state.get("e_ensemble_total")
 
+    chave_ocupacao = _seletor_de_ocupacao(cenario)
+
     with st.expander("Ajustes da simulação"):
         colunas = st.columns(3)
         simulacoes = colunas[0].slider(
@@ -733,6 +878,7 @@ def _passo_analise() -> None:
         simulacoes, int(inicio_ponta), int(fim_ponta),
         cenario.total_de_equipamentos() if cenario else 0,
         round(cenario.potencia_instalada_w(), 3) if cenario else 0.0,
+        chave_ocupacao,
     )
     atual = st.session_state.get("e_assinatura_analise") == assinatura
 
@@ -743,13 +889,20 @@ def _passo_analise() -> None:
         if st.button(rotulo, type="primary", width="stretch"):
             with st.spinner("Simulando as quatro estações e decompondo o pico…"):
                 if cenario is not None:
+                    # Com um estudo de ocupação escolhido, quem é simulado é a
+                    # casa reescrita pelo perfil que dimensiona — não a casa do
+                    # formulário. O levantado em campo continua em `e_cenario`.
+                    usado = _aplicar_ocupacao(cenario, chave_ocupacao, simulacoes)
+                    st.session_state["e_cenario_ocupacao"] = (
+                        usado if usado is not cenario else None
+                    )
                     novo = simular_ensemble(
-                        cenario.para_comodos(), cenario.instancias_de(),
+                        usado.para_comodos(), usado.instancias_de(),
                         num_simulacoes=simulacoes)
                     st.session_state["e_ensemble_total"] = novo
                     st.session_state["e_analise"] = analisar(
-                        novo, cenario.para_comodos(), cenario.instancias_de(),
-                        potencia_instalada_w=cenario.potencia_instalada_w(),
+                        novo, usado.para_comodos(), usado.instancias_de(),
+                        potencia_instalada_w=usado.potencia_instalada_w(),
                         inicio_ponta_h=int(inicio_ponta), fim_ponta_h=int(fim_ponta))
                 else:
                     st.session_state["e_analise"] = analisar(
@@ -762,8 +915,131 @@ def _passo_analise() -> None:
         return
 
     analise = st.session_state["e_analise"]
+    _mostrar_ocupacao()
     _mostrar_analise(analise)
     _rodape()
+
+
+def _seletor_de_ocupacao(cenario: Cenario | None) -> str:
+    """
+    Como esta casa é usada — a pergunta que decide o tamanho de tudo.
+
+    Só aparece para residência, porque só ali a diferença entre o dia cheio e o
+    dia vazio é de formato e não de escala. Num hotel ou num galpão a curva
+    levantada já é a curva de operação.
+
+    A opção de não escolher nada continua primeira e continua legítima: se a
+    vistoria levantou janelas reais em vez das do formulário, reescrevê-las é
+    piorar o dado.
+    """
+    from .demanda import ocupacao
+
+    if cenario is None or (cenario.segmento or "").lower() != "residencia":
+        st.session_state["e_estudo_ocupacao"] = ""
+        return ""
+
+    rotulos = {"": "Usar as janelas da vistoria como vieram"}
+    rotulos.update({c: e["nome"] for c, e in ocupacao.ESTUDOS.items()})
+    chaves = list(rotulos)
+
+    escolha = st.selectbox(
+        "Como esta casa é usada?",
+        chaves,
+        index=chaves.index(st.session_state.get("e_estudo_ocupacao", "") or ""),
+        format_func=lambda c: rotulos[c],
+        key="e_estudo_ocupacao",
+        help="Uma residência não tem uma curva de carga, tem pelo menos duas. "
+             "O equipamento é dimensionado pelo dia mais cheio; a conta de "
+             "energia, pela média dos sete dias.",
+    )
+    if escolha:
+        st.caption(ocupacao.ESTUDOS[escolha]["para_que"])
+    return escolha
+
+
+def _aplicar_ocupacao(cenario: Cenario, chave: str, simulacoes: int) -> Cenario:
+    """
+    Simula cada perfil do estudo e devolve o cenário que dimensiona.
+
+    A conta de energia sai da média ponderada dos perfis, e o equipamento, do
+    perfil de maior pico. Misturar os dois — dimensionar solar pelo fim de
+    semana ou bateria pela média — é o erro que este cálculo existe para
+    evitar: no primeiro caso o gerador fica 40% grande demais, no segundo o
+    banco não atravessa o sábado.
+    """
+    from .demanda import ocupacao
+
+    st.session_state["e_ocupacao"] = None
+    if not chave or chave not in ocupacao.ESTUDOS:
+        return cenario
+
+    definicao = ocupacao.ESTUDOS[chave]
+    pesos: dict[str, int] = definicao["perfis"]
+
+    medidos: dict[str, dict[str, Any]] = {}
+    for identificador in pesos:
+        perfil = ocupacao.PERFIS[identificador]
+        ajustado = ocupacao.aplicar(cenario, perfil)
+        ajustado.criticidades_essenciais = cenario.criticidades_essenciais
+        # Menos simulações que a análise: aqui só se quer a curva média e o
+        # consumo do dia, e nenhum dos dois mora na cauda.
+        conjunto = simular_ensemble(
+            ajustado.para_comodos(), ajustado.instancias_de(),
+            num_simulacoes=max(50, simulacoes // 3),
+        )
+        suave = conjunto.reamostrar(15) if conjunto.passo_min == 1 else conjunto
+        geral = conjunto.resumo()["geral"]
+        medidos[identificador] = {
+            "perfil": perfil, "cenario": ajustado,
+            "curva": suave.perfil_medio_w(), "passo_min": suave.passo_min,
+            "pico_p95_kw": geral["pico_p95_kw"],
+            "energia_diaria_kwh": geral["energia_diaria_media_kwh"],
+        }
+
+    dimensionante = max(pesos, key=lambda i: medidos[i]["pico_p95_kw"])
+    diaria = sum(medidos[i]["energia_diaria_kwh"] * n for i, n in pesos.items())
+    diaria /= sum(pesos.values())
+
+    comparacao = ocupacao.comparar(cenario, [medidos[i]["perfil"] for i in pesos])
+    comparacao["pico_p95_kw"] = [medidos[i]["pico_p95_kw"] for i in pesos]
+    comparacao["energia_diaria_kwh"] = [medidos[i]["energia_diaria_kwh"] for i in pesos]
+
+    st.session_state["e_ocupacao"] = {
+        "estudo": chave,
+        "tabela": comparacao,
+        "dimensionante": medidos[dimensionante]["perfil"].nome,
+        "para_que": definicao["para_que"],
+        "curvas": {medidos[i]["perfil"].nome: medidos[i]["curva"] for i in pesos},
+        "passo_min": medidos[dimensionante]["passo_min"],
+        "reencaixados": int(comparacao["janelas_alteradas"].max()),
+        "diaria_ponderada_kwh": diaria,
+    }
+    return medidos[dimensionante]["cenario"]
+
+
+def _mostrar_ocupacao() -> None:
+    """A tabela dos perfis, para conferência antes de seguir."""
+    dados = st.session_state.get("e_ocupacao")
+    if not dados:
+        return
+
+    st.markdown("##### Como esta casa é usada")
+    quadro = dados["tabela"][[
+        "perfil", "acordado", "refeicoes", "uso_diurno", "dias_por_semana",
+        "pico_p95_kw", "energia_diaria_kwh",
+    ]].rename(columns={
+        "perfil": "perfil", "acordado": "acordado", "refeicoes": "refeições",
+        "uso_diurno": "uso diurno", "dias_por_semana": "dias/semana",
+        "pico_p95_kw": "pico P95 (kW)", "energia_diaria_kwh": "consumo (kWh/dia)",
+    }).round(2)
+    st.dataframe(quadro, width="stretch", hide_index=True)
+
+    diaria = float(dados["diaria_ponderada_kwh"])
+    st.caption(
+        f"O equipamento é dimensionado por **{dados['dimensionante']}**, que é o "
+        f"pior caso. A conta de energia usa a média ponderada dos sete dias: "
+        f"**{diaria:.1f} kWh/dia**, ou {diaria * 30:.0f} kWh/mês."
+    )
 
 
 def _mostrar_analise(analise) -> None:
@@ -1364,7 +1640,32 @@ def _solar_pelo_telhado() -> None:
         edit_options={"edit": True, "remove": True},
     ).add_to(mapa)
 
+    aguas = st.session_state["e_aguas"]
+    ativa = st.session_state["e_agua_ativa"]
     telhado_atual = st.session_state.get("e_telhado")
+
+    # As águas que não estão sendo editadas entram apagadas, contorno e
+    # módulos: continuam visíveis — é preciso ver o telhado inteiro para
+    # decidir onde marcar a próxima — sem competir com a que recebe o clique.
+    for indice, agua in enumerate(aguas):
+        if indice == ativa:
+            continue
+        folium.GeoJson(
+            agua["telhado"].as_dict()["geojson"],
+            style_function=lambda _: {
+                "color": "#a1a1aa", "weight": 1.5, "dashArray": "4,3",
+                "fillOpacity": 0.05},
+            name=agua["nome"],
+        ).add_to(mapa)
+        if agua.get("croqui"):
+            folium.GeoJson(
+                agua["croqui"], name=f"módulos · {agua['nome']}",
+                style_function=lambda f: {
+                    "color": "#94a3b8", "weight": 0.5,
+                    "fillColor": "#94a3b8",
+                    "fillOpacity": 0.45 if f["properties"].get("ativo", True) else 0.10},
+            ).add_to(mapa)
+
     if telhado_atual is not None:
         folium.GeoJson(
             telhado_atual.as_dict()["geojson"],
@@ -1400,10 +1701,14 @@ def _solar_pelo_telhado() -> None:
         _tratar_clique_no_arranjo(resultado)
 
     desenho = (resultado or {}).get("last_active_drawing")
-    if desenho and st.button("Medir e dimensionar este telhado", type="primary", width="stretch"):
+    rotulo_botao = (
+        "Medir e dimensionar esta água" if not st.session_state["e_aguas"]
+        else f"Acrescentar esta água (já há {len(st.session_state['e_aguas'])})"
+    )
+    if desenho and st.button(rotulo_botao, type="primary", width="stretch"):
         try:
             telhado = telhado_de_geojson(
-                desenho, nome=st.session_state["e_nome"] or "telhado",
+                desenho, nome=f"Água {len(st.session_state['e_aguas']) + 1}",
                 montagem=montagem, inclinacao_deg=inclinacao, fator_obstaculos=obstaculos,
             )
         except ValueError as exc:
@@ -1423,25 +1728,28 @@ def _solar_pelo_telhado() -> None:
             return
         from .pv.edicao import EdicaoLayout, croqui_editavel
 
-        st.session_state.update({
-            "e_telhado": telhado,
+        st.session_state["e_aguas"].append({
+            "nome": telhado.nome,
+            "telhado": telhado,
             # O arranjo automático fica guardado inteiro: é sobre a numeração
             # dele que a edição manual se apoia, e é dele que sai a conta de
             # quanto a edição custou em potência.
-            "e_layout_base": layout,
-            "e_layout": layout,
-            "e_edicao": EdicaoLayout(),
-            "e_croqui": croqui_editavel(layout, telhado, None),
-            "e_kwp": float(layout.potencia_kwp),
-            "e_inclinacao": float(telhado.inclinacao_deg),
-            "e_azimute": float(telhado.azimute_deg),
-            "e_azimute_fileiras": float(layout.azimute_fileiras_deg),
+            "layout_base": layout,
+            "layout": layout,
+            "edicao": EdicaoLayout(),
+            "croqui": croqui_editavel(layout, telhado, None),
         })
+        # A recém-marcada vira a ativa: é nela que o usuário vai querer mexer.
+        _ativar_agua(len(st.session_state["e_aguas"]) - 1)
+        st.session_state["e_geracao_aguas"] = None
         st.rerun()
 
-    if telhado_atual is None:
+    if not st.session_state["e_aguas"]:
         return
 
+    _quadro_das_aguas()
+
+    telhado_atual = st.session_state["e_telhado"]
     layout = st.session_state["e_layout"]
     colunas = st.columns(4)
     _cartao(colunas[0], "Área marcada", f"{_milhar(telhado_atual.area_m2)} m²")
@@ -1484,6 +1792,174 @@ def _solar_pelo_telhado() -> None:
     _editor_do_arranjo(telhado_atual)
 
 
+def _ativar_agua(indice: int) -> None:
+    """
+    Espelha uma água nas chaves antigas do estado.
+
+    O editor de arranjo, o clique no mapa e o recálculo foram escritos quando
+    havia uma água só, e continuam falando com ``e_telhado``/``e_layout``.
+    Espelhar em vez de reescrever os três é o que mantém a edição manual —
+    a parte mais delicada da tela — sem tocar numa linha.
+    """
+    aguas = st.session_state["e_aguas"]
+    if not aguas:
+        return
+    indice = max(0, min(int(indice), len(aguas) - 1))
+    agua = aguas[indice]
+    st.session_state.update({
+        "e_agua_ativa": indice,
+        "e_telhado": agua["telhado"],
+        "e_layout": agua["layout"],
+        "e_layout_base": agua["layout_base"],
+        "e_edicao": agua["edicao"],
+        "e_croqui": agua["croqui"],
+        "e_inclinacao": float(agua["telhado"].inclinacao_deg),
+        "e_azimute": float(agua["telhado"].azimute_deg),
+        "e_azimute_fileiras": float(agua["layout"].azimute_fileiras_deg),
+    })
+    _somar_aguas()
+
+
+def _guardar_agua_ativa() -> None:
+    """O caminho de volta: o que a edição mudou volta para a lista."""
+    aguas = st.session_state["e_aguas"]
+    indice = st.session_state["e_agua_ativa"]
+    if not aguas or not (0 <= indice < len(aguas)):
+        return
+    aguas[indice].update({
+        "telhado": st.session_state["e_telhado"],
+        "layout": st.session_state["e_layout"],
+        "layout_base": st.session_state["e_layout_base"],
+        "edicao": st.session_state["e_edicao"],
+        "croqui": st.session_state["e_croqui"],
+    })
+    _somar_aguas()
+
+
+def _somar_aguas() -> None:
+    """A potência do sistema é a soma das águas, e não a da água em foco."""
+    st.session_state["e_kwp"] = float(sum(
+        float(getattr(a["layout"], "potencia_kwp", 0.0) or 0.0)
+        for a in st.session_state["e_aguas"]
+    ))
+
+
+def _quadro_das_aguas() -> None:
+    """
+    A lista das águas, com a geração de cada uma.
+
+    Duas águas opostas não somam a uma água média: a do nascente enche de
+    manhã e a do poente à tarde, e o conjunto é mais plano que qualquer uma
+    delas. A tabela mostra a produtividade de cada orientação justamente para
+    que essa diferença apareça antes de virar um número só.
+    """
+    aguas = st.session_state["e_aguas"]
+    ativa = st.session_state["e_agua_ativa"]
+    geracao = st.session_state.get("e_geracao_aguas") or {}
+
+    linhas = []
+    for indice, agua in enumerate(aguas):
+        telhado, layout = agua["telhado"], agua["layout"]
+        chave = (round(float(telhado.azimute_deg), 1),
+                 round(float(telhado.inclinacao_deg), 1))
+        produtividade = geracao.get(chave)
+        kwp = float(layout.potencia_kwp)
+        linhas.append({
+            "": "◉" if indice == ativa else "",
+            "água": agua["nome"],
+            "área (m²)": round(telhado.area_m2),
+            "orientação": f"{telhado.orientacao} ({telhado.azimute_deg:.0f}°)",
+            "inclinação": f"{telhado.inclinacao_deg:.0f}°",
+            "módulos": layout.quantidade,
+            "kWp": round(kwp, 2),
+            "kWh/kWp·ano": round(produtividade) if produtividade else None,
+            "kWh/ano": round(kwp * produtividade) if produtividade else None,
+        })
+
+    quadro = pd.DataFrame(linhas)
+    st.markdown("##### As águas marcadas")
+    st.dataframe(quadro, width="stretch", hide_index=True)
+
+    total_kwp = sum(float(a["layout"].potencia_kwp) for a in aguas)
+    total_kwh = sum(l["kWh/ano"] or 0 for l in linhas)
+    colunas = st.columns(4)
+    _cartao(colunas[0], "Águas", f"{len(aguas)}")
+    _cartao(colunas[1], "Módulos", f"{sum(a['layout'].quantidade for a in aguas)}")
+    _cartao(colunas[2], "Potência total", f"{total_kwp:.1f} kWp")
+    _cartao(colunas[3], "Geração", f"{_milhar(total_kwh)} kWh/ano" if total_kwh else "—")
+
+    acoes = st.columns([2, 2, 1])
+    escolha = acoes[0].selectbox(
+        "Água em edição", range(len(aguas)),
+        index=min(ativa, len(aguas) - 1),
+        format_func=lambda i: f"{aguas[i]['nome']} · {aguas[i]['layout'].potencia_kwp:.1f} kWp",
+        key="agua_em_edicao",
+    )
+    if escolha != ativa:
+        _ativar_agua(escolha)
+        st.rerun()
+
+    if acoes[1].button("Calcular a geração de cada água", width="stretch"):
+        _calcular_geracao_das_aguas()
+        st.rerun()
+
+    if acoes[2].button("Remover", width="stretch",
+                       help="Apaga a água em edição"):
+        aguas.pop(ativa)
+        st.session_state["e_geracao_aguas"] = None
+        if aguas:
+            _ativar_agua(min(ativa, len(aguas) - 1))
+        else:
+            st.session_state.update({
+                "e_telhado": None, "e_layout": None, "e_layout_base": None,
+                "e_edicao": None, "e_croqui": None, "e_kwp": 0.0,
+                "e_agua_ativa": 0,
+            })
+        st.rerun()
+
+    if total_kwh and len(aguas) > 1:
+        st.caption(
+            "A produtividade difere de uma água para a outra porque a orientação "
+            "difere. O estudo não usa a média dos ângulos — busca uma série horária "
+            "por orientação e as combina ponderadas pela potência, que é a única "
+            "forma de a geração da manhã e a da tarde aparecerem nas horas certas."
+        )
+
+
+def _calcular_geracao_das_aguas() -> None:
+    """
+    Uma consulta por orientação distinta, e não uma por água.
+
+    Duas águas com o mesmo par de ângulos têm a mesma série -- é a mesma
+    consulta ao PVGIS, e o cache em disco é por par. Num galpão de seis águas
+    em duas orientações isso é a diferença entre duas consultas e seis.
+    """
+    from .bateria.geracao import obter_serie_horaria
+
+    aguas = st.session_state["e_aguas"]
+    if not aguas:
+        return
+    pares = {
+        (round(float(a["telhado"].azimute_deg), 1),
+         round(float(a["telhado"].inclinacao_deg), 1))
+        for a in aguas
+    }
+    resultado: dict[tuple[float, float], float] = {}
+    with st.spinner(f"Buscando a série horária de {len(pares)} orientação(ões)…"):
+        for azimute, inclinacao in pares:
+            try:
+                serie = obter_serie_horaria(
+                    st.session_state["e_lat"], st.session_state["e_lon"],
+                    azimute_deg=azimute, inclinacao_deg=inclinacao,
+                    permitir_fallback=not st.session_state.get("e_exigir_pvgis", False),
+                )
+            except Exception as exc:  # noqa: BLE001 — a tela não pode cair por isso
+                st.warning(f"Não foi possível obter a geração de {azimute:.0f}°: {exc}")
+                continue
+            resultado[(azimute, inclinacao)] = serie.anual_kwh_por_kwp()
+    st.session_state["e_geracao_aguas"] = resultado
+
+
 def _recalcular_arranjo() -> None:
     """
     Reaplica a edição sobre o arranjo automático e atualiza o que dela depende.
@@ -1502,7 +1978,10 @@ def _recalcular_arranjo() -> None:
     layout = aplicar_edicao(base, telhado, edicao)
     st.session_state["e_layout"] = layout
     st.session_state["e_croqui"] = croqui_editavel(base, telhado, edicao)
-    st.session_state["e_kwp"] = float(layout.potencia_kwp)
+    # A potência do sistema é a soma das águas — `_guardar_agua_ativa` devolve
+    # esta água à lista e refaz a soma. Escrever `e_kwp` aqui direto, como era
+    # quando havia uma água só, apagaria as outras do total.
+    _guardar_agua_ativa()
 
 
 def _tratar_clique_no_arranjo(resultado: dict | None) -> None:
@@ -2015,8 +2494,32 @@ def _montar_configuracao(
     capex_fv_brl: float | None = None,
 ) -> ConfiguracaoEstudo:
     estado = st.session_state
-    cenario: Cenario | None = estado["e_cenario"]
+    levantado: Cenario | None = estado["e_cenario"]
+    # O cenário reescrito pelo perfil de ocupação, quando houve um. O levantado
+    # continua sendo o dado: é ele que vai para o anexo de cargas.
+    cenario: Cenario | None = estado.get("e_cenario_ocupacao") or levantado
     comodos = cenario.para_comodos() if cenario else None
+
+    # O quadro de backup por equipamento, quando a vistoria classificou. Sem
+    # isto o estudo volta a recortar por ambiente, e a geladeira crítica
+    # arrasta o forno de 4 kW junto.
+    comodos_backup = instancias_backup = criticidade = None
+    if cenario is not None and cenario.tem_criticidade:
+        from .demanda.vistoria import DESCRICAO_CRITICIDADE
+
+        comodos_backup = cenario.para_comodos(True)
+        instancias_backup = cenario.instancias_de(True)
+        criticidade = {
+            "tabela": (levantado or cenario).por_criticidade(),
+            "corte": cenario.criticidades_essenciais,
+            "descricoes": DESCRICAO_CRITICIDADE,
+        }
+
+    ocupacao_dados = estado.get("e_ocupacao")
+    consumo_anual = None
+    if ocupacao_dados and ocupacao_dados.get("diaria_ponderada_kwh"):
+        consumo_anual = float(ocupacao_dados["diaria_ponderada_kwh"]) * 365.0
+
     return ConfiguracaoEstudo(
         latitude=estado["e_lat"], longitude=estado["e_lon"],
         nome=estado["e_nome"] or "instalação",
@@ -2024,10 +2527,17 @@ def _montar_configuracao(
         comodos=comodos,
         instancias_por_comodo=cenario.instancias_de() if cenario else None,
         comodos_essenciais=estado["e_essenciais"] or None,
+        comodos_backup=comodos_backup,
+        instancias_backup=instancias_backup,
+        criticidade=criticidade,
+        tabelas_cenario=(levantado or cenario).comodos if cenario else None,
+        ocupacao=ocupacao_dados,
+        consumo_anual_kwh=consumo_anual,
         simulacoes=300,
         potencia_fv_kwp=estado["e_kwp"] or None,
         telhado=estado.get("e_telhado"),
         layout=estado.get("e_layout"),
+        aguas=estado.get("e_aguas") or None,
         memoria=estado.get("e_memoria"),
         analise=estado.get("e_analise"),
         inclinacao_deg=estado.get("e_inclinacao") or None,
