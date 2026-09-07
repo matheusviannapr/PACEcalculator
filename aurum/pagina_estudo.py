@@ -433,13 +433,23 @@ def _buscar_endereco(consulta: str, limite: int = 5) -> list[dict]:
 
 
 def _fixar_local(lugar: dict) -> None:
-    """Coordenada e rótulo andam juntos — é o que faltava na importação."""
+    """
+    Coordenada e rótulo andam juntos — é o que faltava na importação.
+
+    Os campos da aba de coordenadas também são atualizados: eles são widgets
+    com chave própria, e deixá-los para trás faria a busca por endereço mover
+    o mapa enquanto os números na tela continuavam mostrando o lugar anterior.
+    """
     st.session_state.update({
         "e_lat": float(lugar["lat"]),
         "e_lon": float(lugar["lon"]),
         "e_endereco": lugar["nome"],
         "e_lugares": [],
     })
+    for chave, valor in (("e_lat_digitada", lugar["lat"]),
+                         ("e_lon_digitada", lugar["lon"])):
+        if chave in st.session_state:
+            st.session_state[chave] = float(valor)
 
 
 def _passo_cliente() -> None:
@@ -575,11 +585,37 @@ def _passo_cliente() -> None:
             )
 
     with aba_coordenadas:
-        colunas = st.columns(2)
-        colunas[0].number_input("Latitude", key="e_lat", format="%.5f")
-        colunas[1].number_input("Longitude", key="e_lon", format="%.5f")
+        st.caption(
+            "Cole a coordenada exata do telhado. É o caminho mais confiável: "
+            "endereço depende do que o geocodificador entende, e coordenada não "
+            "depende de nada."
+        )
+        colunas = st.columns([1, 1, 1])
+        lat = colunas[0].number_input(
+            "Latitude", min_value=-90.0, max_value=90.0, step=0.001, format="%.5f",
+            value=float(st.session_state["e_lat"]), key="e_lat_digitada")
+        lon = colunas[1].number_input(
+            "Longitude", min_value=-180.0, max_value=180.0, step=0.001, format="%.5f",
+            value=float(st.session_state["e_lon"]), key="e_lon_digitada")
+        # Um botão, e não a escrita direta no estado: o `number_input` só
+        # entrega o valor quando o campo perde o foco, e quem digitava e
+        # clicava direto em "Continuar" levava o valor anterior sem perceber.
+        # O botão torna o instante visível e encerra a dúvida.
+        colunas[2].markdown("<div style='height:1.85rem'></div>", unsafe_allow_html=True)
+        if colunas[2].button("Usar esta coordenada", width="stretch"):
+            st.session_state.update({
+                "e_lat": float(lat), "e_lon": float(lon), "e_lugares": [],
+                # O rótulo do lugar anterior morre aqui. Deixá-lo vivo fazia a
+                # tela dizer "Região Sudeste" com a coordenada certa embaixo.
+                "e_endereco": f"coordenada informada ({lat:.5f}, {lon:.5f})",
+            })
+            st.rerun()
 
-    st.caption(f"Coordenadas em uso: **{st.session_state['e_lat']:.4f}, {st.session_state['e_lon']:.4f}**")
+    st.caption(
+        f"Coordenadas em uso: **{st.session_state['e_lat']:.5f}, "
+        f"{st.session_state['e_lon']:.5f}** — é daqui que sai a série do PVGIS e "
+        "é aqui que o mapa do telhado abre."
+    )
     _rodape(pendencia="dar um nome ao cliente" if not st.session_state["e_nome"] else None)
 
 
@@ -699,7 +735,13 @@ def _cargas_da_vistoria() -> None:
     # e deixar a coordenada no padrão de Curitiba fazia a tela dizer "Rio de
     # Janeiro / RJ" com o mapa aberto no Paraná — e toda a geração solar do
     # estudo saía do lugar errado, sem nenhum aviso.
-    if vistoria.local:
+    #
+    # Mas **só com cidade**. Uma UF sozinha não é endereço: o geocodificador,
+    # obrigado a responder alguma coisa, devolve o centroide de uma região
+    # inteira — foi assim que "RJ" virou "Região Sudeste", a centenas de
+    # quilômetros do imóvel. Uma coordenada plausível e errada é pior que
+    # nenhuma, porque não se anuncia.
+    if vistoria.cidade:
         st.session_state["e_endereco"] = vistoria.local
         achados = _buscar_endereco(vistoria.local, limite=1)
         if achados:
@@ -710,6 +752,13 @@ def _cargas_da_vistoria() -> None:
                 "isso em coordenada. Confira o local no passo 1 antes de seguir: "
                 "a geração solar sai dali."
             )
+    elif vistoria.uf:
+        st.warning(
+            f"A vistoria informou apenas o estado ({vistoria.uf}), sem cidade. "
+            "**A coordenada não foi alterada** — um estado inteiro não vira "
+            "ponto no mapa, e chutar o centro dele poria a geração solar a "
+            "centenas de quilômetros do imóvel. Informe o local no passo 1."
+        )
     st.rerun()
 
 

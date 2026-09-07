@@ -582,3 +582,44 @@ def test_o_primeiro_passo_oferece_a_vistoria_e_abre_em_residencia():
 
     tipo = _por_rotulo(at.selectbox, "Tipo")
     assert tipo.value == "residencia", f"o padrão devia ser residência, veio {tipo.value}"
+
+
+def test_a_coordenada_digitada_chega_ao_estudo():
+    """
+    O usuário digitava a coordenada exata e a tela seguia no lugar anterior.
+
+    Três coisas concorriam: o `number_input` só entrega o valor quando o campo
+    perde o foco, o rótulo do endereço sobrevivia à troca, e a busca por uma
+    UF sozinha já tinha posto uma coordenada plausível e errada no estado. O
+    botão encerra a dúvida — e é o que este teste trava.
+    """
+    at = _abrir()
+    _por_rotulo(at.number_input, "Latitude").set_value(-22.90680).run()
+    _por_rotulo(at.number_input, "Longitude").set_value(-43.17290).run()
+    _por_rotulo(at.button, "Usar esta coordenada").click().run()
+    assert not at.exception, at.exception
+
+    assert at.session_state["e_lat"] == pytest.approx(-22.90680)
+    assert at.session_state["e_lon"] == pytest.approx(-43.17290)
+    # O rótulo antigo não pode sobreviver à coordenada nova: era ele que fazia
+    # a tela dizer "Região Sudeste" com o número certo logo abaixo.
+    assert "-22.90680" in at.session_state["e_endereco"]
+
+
+def test_uma_uf_sozinha_nao_vira_coordenada():
+    """
+    "RJ" não é endereço, e o geocodificador responde assim mesmo.
+
+    Obrigado a devolver alguma coisa, ele entrega o centroide de uma região
+    inteira — foi assim que uma vistoria sem cidade pôs o estudo a centenas de
+    quilômetros do imóvel. Coordenada plausível e errada é pior que nenhuma,
+    porque não se anuncia.
+    """
+    # A regra é do módulo da página, e o que se garante aqui é a condição:
+    # sem cidade, não se busca.
+    conteudo = (RAIZ / "aurum" / "pagina_estudo.py").read_text(encoding="utf-8")
+    trecho = conteudo[conteudo.index("def _cargas_da_vistoria"):]
+    trecho = trecho[: trecho.index("\ndef ")]
+    assert "if vistoria.cidade:" in trecho, (
+        "a busca de coordenada tem de exigir cidade, não aceitar UF sozinha")
+    assert "apenas o estado" in trecho, "e tem de avisar quando só houver UF"
