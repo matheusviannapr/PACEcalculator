@@ -355,3 +355,63 @@ def test_todo_segmento_tem_custo_de_interrupcao_positivo():
     assert MODELOS["hospital"].custo_interrupcao_brl_kwh == max(
         s.custo_interrupcao_brl_kwh for s in MODELOS.values()
     ), "hospital é o teto: ali o número não é econômico, é de segurança"
+
+
+# ----------------------------------------------------------------------------
+# Janelas múltiplas
+# ----------------------------------------------------------------------------
+def _casa_com_microondas(intervalo: str) -> pd.DataFrame:
+    """Um micro-ondas de duração intervalar, e nada mais, para isolar a janela."""
+    return pd.DataFrame([{
+        "Equipamento": "Micro-ondas", "Potência": 1200.0, "Quantidade": 1,
+        "Tipo de intervalo": "dinâmico", "intervalo": intervalo,
+        "probabilidade": 1.0, "FD": 1.0,
+        "duracao_min": 0.25, "duracao_max": 0.25,
+    }])
+
+
+def _energia_por_hora(intervalo: str, simulacoes: int = 400) -> np.ndarray:
+    """A curva média em kW, hora a hora, de uma casa com um micro-ondas só."""
+    from aurum.demanda.nucleo import cria_comodo_da_planilha
+    comodo = cria_comodo_da_planilha(_casa_com_microondas(intervalo), "Cozinha")
+    ensemble = simular_ensemble([comodo], {"Cozinha": 1}, simulacoes)
+    ensemble = ensemble.reamostrar(60) if ensemble.passo_min == 1 else ensemble
+    return ensemble.perfil_medio_w() / 1000.0
+
+
+def test_a_segunda_janela_declarada_nao_e_descartada():
+    """
+    O bug que produzia uma casa com um cume só, no horário errado.
+
+    ``parse_janela_operacao`` devolvia ``intervalos[0]`` e jogava fora o resto
+    sem avisar. Para janela única -- que é quase todo equipamento levantado em
+    campo -- nunca apareceu; para um micro-ondas declarado no almoço **e** no
+    jantar, o jantar simplesmente não acontecia, e ninguém tinha como notar
+    olhando o número.
+    """
+    curva = _energia_por_hora("11:30 as 14:00 e 18:30 as 22:00")
+    almoco = curva[11:14].sum()
+    jantar = curva[18:22].sum()
+    assert almoco > 0.0, "o almoço acontece"
+    assert jantar > 0.0, "e o jantar também — era isto que se perdia"
+    # Fora das duas janelas a casa está desligada.
+    assert curva[15:18].sum() == pytest.approx(0.0, abs=1e-6)
+
+
+def test_uma_janela_so_continua_como_era():
+    """A correção não pode mexer no caso comum, que é a janela única."""
+    curva = _energia_por_hora("18:30 as 22:00")
+    assert curva[11:14].sum() == pytest.approx(0.0, abs=1e-6)
+    assert curva[18:22].sum() > 0.0
+
+
+def test_duas_janelas_sao_dois_usos_e_nao_um_sorteado():
+    """
+    Quem declara duas janelas está dizendo que o aparelho é usado nas duas.
+
+    Sortear qual delas devolveria a mesma energia diária num cume só, deslocado
+    de um dia para o outro — o que na média some, e no pico não.
+    """
+    uma = _energia_por_hora("18:30 as 22:00").sum()
+    duas = _energia_por_hora("11:30 as 14:00 e 18:30 as 22:00").sum()
+    assert duas == pytest.approx(2.0 * uma, rel=0.15)

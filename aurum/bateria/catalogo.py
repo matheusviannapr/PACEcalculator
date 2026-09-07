@@ -77,6 +77,11 @@ def _num(valor: Any) -> float | None:
 # ----------------------------------------------------------------------------
 # Bateria
 # ----------------------------------------------------------------------------
+def _br(valor: float, casas: int = 1) -> str:
+    """Número no padrão brasileiro. Um estudo em português não usa ponto decimal."""
+    return f"{valor:,.{casas}f}".replace(",", "\x00").replace(".", ",").replace("\x00", ".")
+
+
 @dataclass(frozen=True)
 class Bateria:
     """Um módulo de bateria do catálogo."""
@@ -209,6 +214,46 @@ class InversorHibrido:
         """
         return self.tensao_bateria_min_v <= bateria.tensao_nominal_v <= self.tensao_bateria_max_v
 
+    def rede_para(self, tensao_linha_v: float | None = None) -> str:
+        """
+        A tensão declarada que corresponde à rede do estudo.
+
+        Um modelo pode atender quatro redes — a linha ES LD atende 120/208,
+        127/220, 120/240 e 127/254. Publicar as quatro numa especificação de
+        um estudo feito para 127/220 é ruído: o instalador precisa saber qual
+        vale ali, e as outras três só alargam a tabela.
+        """
+        if tensao_linha_v is None:
+            return str(self.tensao_ca_v)
+        alvo = float(tensao_linha_v)
+        # O grupo MAIS PRÓXIMO, e não o primeiro dentro da tolerância: a linha
+        # ES LD declara 120/208 antes de 127/220, e 208 cabe na tolerância de
+        # 6% de 220 — o primeiro que passa não é o certo.
+        melhor, distancia = None, float("inf")
+        for grupo in str(self.tensao_ca_v).split(","):
+            valores = [
+                float(v) for v in grupo.replace("V", "").split("/")
+                if v.strip().replace(".", "").isdigit()
+            ]
+            if not valores:
+                continue
+            erro = abs(max(valores) - alvo)
+            if erro < distancia:
+                melhor, distancia = grupo.strip(), erro
+        if melhor is not None and distancia <= 0.06 * alvo:
+            return melhor
+        return str(self.tensao_ca_v)
+
+    def especificacao(self, tensao_linha_v: float | None = None) -> str:
+        """O inversor pelo requisito: potência, pico, rede e janela de banco."""
+        fases = {1: "monofásico", 2: "bifásico", 3: "trifásico"}.get(self.fases, f"{self.fases}F")
+        return (
+            f"Híbrido {fases} de {_br(self.potencia_ca_nominal_kw, 1)} kW, pico de "
+            f"{_br(self.potencia_ca_pico_kw, 1)} kW por {self.duracao_pico_s:.0f} s, "
+            f"rede {self.rede_para(tensao_linha_v)} V, banco de "
+            f"{self.tensao_bateria_min_v:.0f} a {self.tensao_bateria_max_v:.0f} V"
+        )
+
     def __str__(self) -> str:
         return (
             f"{self.fabricante} {self.modelo} "
@@ -304,6 +349,36 @@ class ConjuntoArmazenamento:
             f"{self.inversor.fabricante} {self.inversor.modelo} + {self.modulos}× "
             f"{self.bateria.fabricante} {self.bateria.modelo} "
             f"({self.energia_util_kwh:.1f} kWh úteis, {self.potencia_descarga_kw:.1f} kW)"
+        )
+
+    def especificacao(self, tensao_linha_v: float | None = None) -> str:
+        """
+        O conjunto pelo que ele **faz**, sem dizer de quem é.
+
+        Uma proposta que abre nomeando marca convida o cliente a cotar a marca
+        — e a discussão vira preço de etiqueta em vez de desempenho. Uma
+        proposta que especifica requisito e só depois lista os modelos que o
+        cumprem é o que um memorial descritivo faz, e sustenta a substituição
+        por equivalente sem refazer o estudo.
+
+        Os números aqui são os que o instalador precisa casar: potência
+        contínua, pico com duração, energia útil e a rede em que liga.
+        """
+        return (
+            f"Inversor híbrido de {_br(self.inversor.potencia_ca_nominal_kw, 1)} kW "
+            f"(pico de {_br(self.inversor.potencia_ca_pico_kw, 1)} kW por "
+            f"{self.inversor.duracao_pico_s:.0f} s) em "
+            f"{self.inversor.rede_para(tensao_linha_v)} V, com banco de "
+            f"{_br(self.energia_util_kwh, 1)} kWh úteis e "
+            f"{_br(self.potencia_descarga_kw, 1)} kW"
+        )
+
+    def especificacao_curta(self) -> str:
+        """A versão de uma linha de tabela: potência do inversor e banco."""
+        return (
+            f"{self.inversor.potencia_ca_nominal_kw:.0f} kW · "
+            f"{_br(self.energia_util_kwh, 1)} kWh úteis · "
+            f"{_br(self.potencia_descarga_kw, 1)} kW"
         )
 
     def as_dict(self) -> dict[str, Any]:

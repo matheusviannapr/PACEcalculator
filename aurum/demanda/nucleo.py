@@ -174,13 +174,26 @@ def parse_intervalo_dinamico_split(interval_str: str) -> Callable[[], List[Tuple
     return dynamic_intervals
 
 
-def parse_janela_operacao(intervalo_str: str) -> Tuple[int, int]:
+def parse_janelas_operacao(intervalo_str: str) -> List[Tuple[int, int]]:
+    """
+    Todas as janelas de operação declaradas, em minutos.
+
+    O formato aceita mais de uma janela separada por ``" e "``. Um micro-ondas
+    de "11:30 as 14:00 e 18:30 as 21:30" é usado no almoço **e** no jantar; até
+    aqui a segunda janela era descartada em silêncio, e a carga da casa saía
+    com um cume só.
+    """
     intervalos = parse_intervalo_fixo(intervalo_str)
     if not intervalos:
         raise ValueError(
             "Para duração intervalar, use intervalo no formato 'HH:MM as HH:MM' para janela de operação."
         )
-    return intervalos[0]
+    return intervalos
+
+
+def parse_janela_operacao(intervalo_str: str) -> Tuple[int, int]:
+    """A primeira janela declarada. Mantido para quem só sabe lidar com uma."""
+    return parse_janelas_operacao(intervalo_str)[0]
 
 
 def criar_gerador_duracao_intervalar(
@@ -262,6 +275,45 @@ def _get_duration_bounds_h(row: pd.Series) -> Tuple[Optional[float], Optional[fl
     return None, None
 
 
+def criar_gerador_multijanela(
+    janelas: List[Tuple[int, int]],
+    duracao_min_h: float,
+    duracao_max_h: float,
+    dt_min: int = 1,
+    probabilidade: float = 1.0,
+    on_overflow: str = "clamp",
+) -> Callable[[], List[Tuple[int, int]]]:
+    """
+    Uma utilização por janela declarada, cada uma com seu próprio sorteio.
+
+    Com uma janela só o comportamento é idêntico ao de
+    :func:`criar_gerador_duracao_intervalar` -- é o caso de quase todo
+    equipamento levantado em campo. Com duas, o aparelho pode ser usado nas
+    duas, e é isso que produz os dois cumes de refeição: sortear qual das
+    janelas devolveria de novo um cume só, deslocado de um dia para o outro.
+    """
+    geradores = [
+        criar_gerador_duracao_intervalar(
+            janela_inicio_min=inicio,
+            janela_fim_min=fim,
+            duracao_min_h=duracao_min_h,
+            duracao_max_h=duracao_max_h,
+            dt_min=dt_min,
+            probabilidade=probabilidade,
+            on_overflow=on_overflow,
+        )
+        for inicio, fim in janelas
+    ]
+
+    def _generator() -> List[Tuple[int, int]]:
+        intervalos: List[Tuple[int, int]] = []
+        for gerar in geradores:
+            intervalos.extend(gerar())
+        return intervalos
+
+    return _generator
+
+
 def cria_comodo_da_planilha(sheet_df: pd.DataFrame, comodo_nome: str) -> Comodo:
     equipamentos = []
     for _, row in sheet_df.iterrows():
@@ -293,10 +345,8 @@ def cria_comodo_da_planilha(sheet_df: pd.DataFrame, comodo_nome: str) -> Comodo:
 
         if tipo_intervalo == "fixo":
             if duracao_min_h is not None and modo_fixo == "FIXO_DURACAO_INTERVALAR":
-                inicio, fim = parse_janela_operacao(intervalo_str)
-                intervalos = criar_gerador_duracao_intervalar(
-                    janela_inicio_min=inicio,
-                    janela_fim_min=fim,
+                intervalos = criar_gerador_multijanela(
+                    janelas=parse_janelas_operacao(intervalo_str),
                     duracao_min_h=duracao_min_h,
                     duracao_max_h=duracao_max_h,
                     probabilidade=probabilidade,
@@ -308,10 +358,8 @@ def cria_comodo_da_planilha(sheet_df: pd.DataFrame, comodo_nome: str) -> Comodo:
                 intervalos = parse_intervalo_fixo(intervalo_str)
         elif tipo_intervalo == "dinâmico":
             if duracao_min_h is not None:
-                inicio, fim = parse_janela_operacao(intervalo_str)
-                intervalos = criar_gerador_duracao_intervalar(
-                    janela_inicio_min=inicio,
-                    janela_fim_min=fim,
+                intervalos = criar_gerador_multijanela(
+                    janelas=parse_janelas_operacao(intervalo_str),
                     duracao_min_h=duracao_min_h,
                     duracao_max_h=duracao_max_h,
                     probabilidade=probabilidade,

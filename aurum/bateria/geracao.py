@@ -64,6 +64,7 @@ _INICIO_ESTACOES_SUL = (
 )
 
 __all__ = [
+    "combinar_series",
     "SerieGeracao",
     "estacao_da_data",
     "obter_serie_horaria",
@@ -294,6 +295,81 @@ def _montar_serie_pvgis(payload: dict, **kwargs: Any) -> SerieGeracao:
         LOGGER.warning("%s", aviso)
         kwargs.setdefault("aviso", aviso)
     return SerieGeracao(datas=datas, potencia_w_por_kwp=matriz, **kwargs)
+
+
+def combinar_series(
+    series: "Sequence[SerieGeracao]",
+    pesos_kwp: "Sequence[float]",
+) -> SerieGeracao:
+    """
+    A série do sistema inteiro, a partir de uma série por água.
+
+    Cada água contribui com a sua geração por kWp na proporção da potência que
+    carrega. O resultado continua sendo uma série de 1 kWp -- do sistema, e não
+    de uma água -- e por isso tudo que consome :class:`SerieGeracao` continua
+    funcionando sem saber que existem águas.
+
+    A média ponderada é a operação certa e não uma aproximação: geração é
+    aditiva, e a potência de cada água é conhecida. O que não se pode fazer é
+    a média das *orientações* e pedir uma série só -- duas águas a leste e a
+    oeste dariam uma água ao norte, com pico ao meio-dia que nenhuma das duas
+    tem.
+
+    As séries precisam cobrir os mesmos dias; é o que acontece quando saem da
+    mesma coordenada e do mesmo intervalo de anos, que é o único uso previsto.
+    """
+    if not series:
+        raise ValueError("combinar_series precisa de pelo menos uma série")
+    if len(series) != len(pesos_kwp):
+        raise ValueError("uma potência por série")
+
+    pesos = np.asarray([max(0.0, float(p)) for p in pesos_kwp], dtype=float)
+    total = float(pesos.sum())
+    if total <= 0:
+        raise ValueError("a potência total das águas precisa ser positiva")
+    if len(series) == 1:
+        return series[0]
+
+    dias = {s.n_dias for s in series}
+    if len(dias) != 1:
+        raise ValueError(f"as séries cobrem números de dias diferentes: {sorted(dias)}")
+
+    matriz = np.zeros_like(np.asarray(series[0].potencia_w_por_kwp, dtype=float))
+    for serie, peso in zip(series, pesos):
+        matriz += np.asarray(serie.potencia_w_por_kwp, dtype=float) * peso
+    matriz /= total
+
+    # A orientação declarada passa a ser a da água de maior potência: é a que
+    # descreve melhor o conjunto, e guardar a média dos ângulos seria guardar
+    # uma orientação que não existe no telhado.
+    principal = series[int(np.argmax(pesos))]
+    fontes = {s.fonte for s in series}
+    avisos = [s.aviso for s in series if s.aviso]
+
+    return SerieGeracao(
+        datas=principal.datas,
+        potencia_w_por_kwp=matriz,
+        latitude=principal.latitude,
+        longitude=principal.longitude,
+        azimute_deg=principal.azimute_deg,
+        inclinacao_deg=principal.inclinacao_deg,
+        perdas_percent=principal.perdas_percent,
+        fonte=principal.fonte if len(fontes) == 1 else "misto",
+        aviso=" ".join(dict.fromkeys(avisos)) or None,
+        metadados={
+            "aguas": [
+                {
+                    "azimute_deg": s.azimute_deg,
+                    "inclinacao_deg": s.inclinacao_deg,
+                    "potencia_kwp": float(peso),
+                    "produtividade_kwh_kwp_ano": s.anual_kwh_por_kwp(),
+                    "fonte": s.fonte,
+                }
+                for s, peso in zip(series, pesos)
+            ],
+            "potencia_total_kwp": total,
+        },
+    )
 
 
 def obter_serie_horaria(
