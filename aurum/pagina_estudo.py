@@ -109,6 +109,9 @@ _PADROES: dict[str, Any] = {
     "e_kwp": 0.0,
     "e_estudo": None,
     "e_pacote": None,
+    #: Figuras do relatório desenhadas para a tela, e de qual estudo vieram.
+    "e_figuras": None,
+    "e_figuras_de": None,
     "e_avisos_carga": [],
     "e_assinatura_carga": None,
     "e_assinatura_analise": None,
@@ -1734,7 +1737,15 @@ def _solar_pelo_telhado() -> None:
     st.caption(
         "Use a ferramenta de **polígono** ou **retângulo** e contorne **uma água** do "
         "telhado. Cada água tem uma orientação própria; marque a que vai receber os "
-        "módulos."
+        "módulos — e repita para as demais."
+    )
+    # Dizer onde o mapa está aberto. Quando a coordenada estava errada, o
+    # sintoma era o usuário desenhar um telhado sobre a cidade errada e só
+    # descobrir na produtividade do PVGIS, onde ninguém procura.
+    st.caption(
+        f"Aberto em **{st.session_state.get('e_endereco') or 'coordenada informada'}** "
+        f"· `{st.session_state['e_lat']:.5f}, {st.session_state['e_lon']:.5f}`. "
+        "Não é aqui? Volte ao passo 1 e corrija o local."
     )
 
     centro = [st.session_state["e_lat"], st.session_state["e_lon"]]
@@ -1799,12 +1810,22 @@ def _solar_pelo_telhado() -> None:
             ).add_to(mapa)
         mapa.fit_bounds(folium.GeoJson(telhado_atual.as_dict()["geojson"]).get_bounds())
 
-    # A chave carrega as coordenadas de propósito. O `st_folium` guarda o
-    # centro e o zoom por chave, então um mapa criado antes de o usuário
-    # localizar o endereço continuava mostrando o lugar antigo, por mais que
-    # `folium.Map(location=...)` pedisse outro. Coordenada nova, mapa novo.
+    # `center` e `zoom` como argumentos, e não só no `folium.Map`.
+    #
+    # O `location` do `folium.Map` decide a vista na **primeira** montagem do
+    # componente e mais nenhuma: depois disso o `st_folium` guarda centro e
+    # zoom do lado do navegador e os devolve a cada rerun. Trocar o endereço
+    # movia o estado do Python e deixava o mapa onde estava — e o usuário
+    # desenhava o telhado sobre a cidade errada sem nenhum aviso. Passados
+    # como argumento, a vista é dirigida pelo Python.
+    #
+    # A chave continua carregando a coordenada porque as duas coisas se
+    # somam: a chave descarta o desenho da localização anterior, que não tem
+    # sentido na nova.
+    zoom = 19 if not st.session_state["e_aguas"] else 18
     resultado = st_folium(
         mapa, height=460, width=None,
+        center=(centro[0], centro[1]), zoom=zoom,
         key=f"mapa_telhado_{centro[0]:.5f}_{centro[1]:.5f}",
         returned_objects=["all_drawings", "last_active_drawing", "last_clicked"],
     )
@@ -2849,10 +2870,39 @@ def _passo_resultado() -> None:
         "Vida útil", "Baixar",
     ])
 
+    # As mesmas figuras do dossiê, e não uma segunda versão desenhada de
+    # outro jeito — é assim que um relatório e uma interface passam a
+    # discordar sobre o mesmo estudo.
+    figuras = _figuras_do_estudo(estudo)
+
     with abas[0]:
         _aba_cenarios(estudo)
+        _mostrar_figura(
+            figuras, "cenarios",
+            "Cada arranjo nas duas dimensões que decidem: o que faz na conta de luz "
+            "e o que faz no apagão. Solar aparece num painel e não no outro; bateria, "
+            "o contrário.")
+        _mostrar_figura(
+            figuras, "perfis_ocupacao",
+            "Os padrões de ocupação da instalação e a geração solar no mesmo eixo.")
 
     with abas[1]:
+        # A fronteira e o estado de carga são as duas figuras que explicam o
+        # tamanho do banco, e viviam só dentro do PDF: quem lia o resultado na
+        # tela via tabela e mais tabela, e o número tinha de ser aceito de fé.
+        _mostrar_figura(
+            figuras, "fronteira",
+            "A fronteira entre energia e potência: onde o banco falta por kWh e "
+            "onde falta por kW. São dois problemas diferentes, e a solução de um "
+            "não resolve o outro.")
+        _mostrar_figura(
+            figuras, "soc",
+            "O estado de carga do banco ao longo do apagão — quanto sobra, e quando "
+            "acaba.")
+        _mostrar_figura(
+            figuras, "mapa_atendimento",
+            "A probabilidade de atravessar, por hora em que a luz cai e por duração "
+            "da interrupção.")
         if estudo.resiliencia:
             nomes = [r.conjunto.descricao() for r in estudo.resiliencia]
             padrao = estudo.recomendado.conjunto.descricao() if estudo.recomendado else nomes[0]
@@ -2884,6 +2934,10 @@ def _passo_resultado() -> None:
         )
 
     with abas[3]:
+        _mostrar_figura(
+            figuras, "excedencia",
+            "A curva de excedência de pico: qual potência é ultrapassada em que "
+            "fração dos dias. É ela que dimensiona o inversor, e não a média.")
         st.dataframe(estudo.tabela_excedencia.round(2), width="stretch", hide_index=True)
         st.dataframe(
             estudo.diagnostico_inversores[
@@ -2913,6 +2967,10 @@ def _passo_resultado() -> None:
             )
 
     with abas[5]:
+        _mostrar_figura(
+            figuras, "degradacao",
+            "A perda de capacidade do banco ao longo dos anos, e o que ela faz com "
+            "a autonomia prometida.")
         nomes = list(estudo.degradacao)
         escolha = st.selectbox("Conjunto  ", nomes, key="deg")
         st.dataframe(estudo.degradacao[escolha].round(4), width="stretch", hide_index=True)
@@ -3080,6 +3138,47 @@ def _reais(valor: float) -> str:
 def _slug(texto: str) -> str:
     limpo = "".join(c if c.isalnum() else "-" for c in str(texto).lower())
     return "-".join(p for p in limpo.split("-") if p)[:50] or "estudo"
+
+
+def _figuras_do_estudo(estudo) -> dict[str, Path]:
+    """
+    As figuras do relatório, desenhadas uma vez e reaproveitadas na tela.
+
+    São as mesmas do dossiê -- não uma segunda versão, desenhada de outro
+    jeito, que é como um relatório e uma interface passam a discordar. Ficam
+    numa pasta temporária da sessão, e o cache é a própria pasta: refazer
+    treze gráficos de matplotlib a cada clique numa aba tornaria a tela
+    inutilizável.
+    """
+    import tempfile
+
+    from .bateria.relatorio import escrever_relatorio
+
+    marca_atual = id(estudo)
+    if st.session_state.get("e_figuras_de") == marca_atual:
+        return st.session_state.get("e_figuras") or {}
+
+    destino = Path(tempfile.mkdtemp(prefix="pace-figuras-"))
+    try:
+        escritos = escrever_relatorio(estudo, destino, com_graficos=True, com_latex=False)
+    except Exception as exc:  # noqa: BLE001 — a tela não pode cair por um gráfico
+        st.warning(f"Não consegui desenhar as figuras: {exc}")
+        return {}
+    figuras = {
+        chave.removeprefix("figura_"): caminho
+        for chave, caminho in escritos.items()
+        if chave.startswith("figura_")
+    }
+    st.session_state["e_figuras"] = figuras
+    st.session_state["e_figuras_de"] = marca_atual
+    return figuras
+
+
+def _mostrar_figura(figuras: dict, chave: str, legenda: str) -> None:
+    """Uma figura do relatório, quando ela existe para este estudo."""
+    caminho = figuras.get(chave)
+    if caminho and Path(caminho).exists():
+        st.image(str(caminho), caption=legenda, width="stretch")
 
 
 def _montar_zip(estudo, capa: DadosCapa | None = None) -> bytes:
