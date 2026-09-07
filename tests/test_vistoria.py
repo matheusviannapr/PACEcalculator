@@ -216,7 +216,10 @@ def test_a_cozinha_da_casa_cheia_ganha_o_almoco():
     base = ler_backup(_backup()).cenario
     forno = ocupacao.aplicar(base, "casa_cheia").comodos["Cozinha"].iloc[1]["intervalo"]
     assert " e " in forno, "duas refeições, duas janelas"
-    assert forno.startswith("11:30"), "o almoço entra antes do jantar"
+    # A janela canônica do almoço, e não um literal: as duas refeições têm de
+    # ter a mesma largura, e mexer nisso é mexer no pico da casa.
+    inicio = ocupacao._hhmm(ocupacao._ALMOCO[0])
+    assert forno.startswith(inicio), "o almoço entra antes do jantar"
     # A TV da sala às 20 h não é carga de refeição, e não ganha almoço nenhum.
     sala = ocupacao.aplicar(base, "casa_cheia").comodos["Sala"].iloc[1]["intervalo"]
     assert " e " not in sala
@@ -270,12 +273,12 @@ def test_espalhar_compensa_a_diluicao_da_janela():
     assert ajustado == pytest.approx(esperado, rel=1e-3)
 
 
-def test_os_dois_estudos_pesam_a_semana_inteira():
+def test_os_tres_estudos_pesam_a_semana_inteira():
     """Sete dias, nem mais nem menos — a média ponderada sai errada se não."""
     for chave, estudo in ocupacao.ESTUDOS.items():
         assert sum(estudo["perfis"].values()) == 7, chave
         assert set(estudo["perfis"]) <= set(ocupacao.PERFIS), chave
-    assert ocupacao.PERFIL_DIMENSIONANTE in ocupacao.PERFIS
+    assert ocupacao.ESTUDO_DO_MEIO in ocupacao.ESTUDOS
 
 
 def test_o_original_nao_e_alterado():

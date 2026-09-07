@@ -452,12 +452,17 @@ def _secao_cenarios_de_uso(estudo: ResultadoEstudo, figuras: dict[str, Path]) ->
 
     partes = [
         secao("Três cenários de uso, três sistemas"),
-        "Uma residência não tem uma curva de carga. Tem pelo menos três leituras "
-        "possíveis, e elas produzem sistemas diferentes: o que a vistoria levantou "
-        "em campo, a casa usada no limite todos os dias, e a rotina de quem "
-        "trabalha fora. Cada uma recebeu aqui o seu próprio dimensionamento — o "
-        "gerador fotovoltaico pela energia do ano daquele cenário, e o banco pelo "
-        "pior dia dele.",
+        "Uma residência não tem uma curva de carga: tem um nível de uso, e o nível "
+        "muda com quem mora e com a rotina. O estudo não escolhe entre eles — "
+        "apresenta os três, com o sistema de cada um, e a escolha vira uma conversa "
+        "com números na mesa em vez de uma premissa escondida no começo. O gerador "
+        "fotovoltaico é dimensionado pela energia do ano de cada cenário; o banco, "
+        "pelo pior dia dele.",
+        "A janela que a vistoria levantou não é um dos três. Ela é recortada pelo "
+        "que o morador lembra de responder — quase sempre a noite, quase nunca o "
+        "almoço, e o horário comercial quando o formulário o sugere —, e por isso é "
+        "o insumo dos três e não um deles. A seção anterior mostra, item a item, o "
+        "que foi reescrito e por quê.",
     ]
 
     partes.append(tabela(
@@ -504,17 +509,19 @@ def _secao_cenarios_de_uso(estudo: ResultadoEstudo, figuras: dict[str, Path]) ->
         )
         if meio is not None:
             texto += (
-                f" O cenário do meio — {esc(meio.nome)} — é o que a maioria das "
-                "famílias vive, e é dele que costuma sair a recomendação."
+                f" O cenário do meio — {esc(meio.nome)} — é onde a maioria das "
+                "famílias cai, o que não faz dele a resposta: quem conhece a casa "
+                "é o cliente."
             )
         partes.append(caixa("O que separa os três", texto, cor="amarelopace"))
 
     partes.append(nota(
-        "O cenário levantado em campo é o piso e serve de controle: se um cenário "
-        "transformado sai muito acima dele, a diferença tem de ser explicável pela "
-        "transformação — casa cheia usa mais, e o quanto está declarado na seção "
-        "de ocupação — e não por um erro dela. Escolher entre os três é decisão do "
-        "cliente, e é a única deste estudo que nenhum cálculo toma no lugar dele."
+        "Os três foram conferidos contra a curva residencial de referência da base: "
+        "a distribuição da energia entre madrugada, manhã, tarde e noite fica dentro "
+        "da tolerância nos três, e o pico cai à noite nos três, como em qualquer casa "
+        "brasileira. É essa conferência que separa um cenário construído de um "
+        "cenário inventado. Escolher entre eles é decisão do cliente, e é a única "
+        "deste estudo que nenhum cálculo toma no lugar dele."
     ))
     return "\n\n".join(p for p in partes if p)
 

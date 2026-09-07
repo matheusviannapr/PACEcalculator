@@ -108,6 +108,27 @@ class PerfilOcupacao:
     alargamento_max: float = 2.0
     #: Multiplica a probabilidade do que é usado durante o expediente.
     fator_diurno: float = 1.0
+    #: Que fração da madrugada o item ligado na hora de dormir atravessa.
+    #:
+    #: 0,6 numa casa cheia — os quartos estão todos ocupados e o ar roda até
+    #: quase o amanhecer; 0,35 numa casa quase vazia, onde metade dos quartos
+    #: está fechada e o que roda é menos e por menos tempo. Zero
+    #: desliga a regra. O primeiro esboço tinha o parâmetro sem uso e uma
+    #: janela de tamanho fixo, e a simulação saía com 25% da energia na
+    #: madrugada contra 12% da referência — o erro oposto ao que a regra veio
+    #: corrigir.
+    #:
+    #: O formulário da vistoria pede uma janela por equipamento, o morador
+    #: responde "das 18 às 23", e o ar-condicionado do quarto some às 23:00 em
+    #: ponto — o que nenhum ar-condicionado faz. A simulação saía com 1% da
+    #: energia na madrugada contra 12% da curva residencial de referência.
+    arrasto_noturno: float = 0.0
+    #: A que hora a casa acorda — o fim da madrugada.
+    hora_de_acordar: float = 6.0
+    #: Duração mínima, em horas, para um item atravessar a noite. Climatização
+    #: e refrigeração atravessam; lâmpada e televisor, não — e sem este filtro
+    #: a luz da sala passaria a acender às 3 h da manhã.
+    duracao_minima_para_arrasto_h: float = 1.0
     #: Multiplica a probabilidade das cargas de refeição, separado do resto.
     #:
     #: Almoço e jantar acontecem em qualquer dia — mudam de tamanho, não de
@@ -149,7 +170,14 @@ def _hhmm(hora: float) -> str:
 #: As refeições de uma residência brasileira. O café da manhã não entra: ele
 #: é curto, de baixa potência, e já está na janela da manhã que a vistoria
 #: levanta para o boiler e o chuveiro.
-_ALMOCO = (11.5, 14.0)
+#:
+#: As duas têm a **mesma largura**, e isso não é estética. A energia de um
+#: item dinâmico não depende da largura da janela — só o instante depende —,
+#: então uma janela mais estreita concentra a mesma carga num cume mais alto.
+#: Com o almoço em 2,5 h e o jantar em 3,5 h, o cume do meio-dia passava o da
+#: noite, e a casa aparecia com o pico às 12 h contra as 20 h da curva
+#: residencial de referência. Numa casa brasileira o pico é o jantar.
+_ALMOCO = (11.0, 14.5)
 _JANTAR = (18.5, 22.0)
 
 PERFIS: dict[str, PerfilOcupacao] = {
@@ -184,6 +212,7 @@ PERFIS: dict[str, PerfilOcupacao] = {
         janelas_refeicao=(_ALMOCO, _JANTAR),
         espalhar=True,
         desdobrar_refeicoes=True,
+        arrasto_noturno=0.6,
         fator_probabilidade=1.35,
         dias_por_semana=2,
     ),
@@ -204,12 +233,20 @@ PERFIS: dict[str, PerfilOcupacao] = {
         # meio-dia que nenhuma casa tem — justamente na hora em que o sol está
         # no máximo, que é onde o autoconsumo se decide.
         desdobrar_refeicoes=True,
+        arrasto_noturno=0.35,
         fator_probabilidade=1.0,
         # Alguém cozinha para um, e não para a família: a refeição acontece,
-        # menor.
-        fator_refeicao=0.55,
-        # Uma pessoa em vez da família: menos da metade do uso diurno.
-        fator_diurno=0.45,
+        # menor. Mas **menos reduzida que o uso geral do dia**: quem fica em
+        # casa deixa de usar metade da casa e não deixa de almoçar. Um fator
+        # de refeição abaixo do diurno — foi o primeiro valor tentado — dizia
+        # o contrário, e nenhuma casa faz isso.
+        fator_refeicao=0.72,
+        # Uma pessoa em vez da família. O primeiro valor tentado, 0,45,
+        # empurrava 25 pontos percentuais de energia a mais para a noite do
+        # que a curva residencial de referência tem: uma casa quase vazia não
+        # é uma casa desligada, e o que sobra durante o dia — refrigeração,
+        # rede, uma pessoa em casa — é mais que isso.
+        fator_diurno=0.62,
         dias_por_semana=5,
     ),
 }
@@ -218,37 +255,57 @@ PERFIS: dict[str, PerfilOcupacao] = {
 #: promete cumprir.
 PERFIL_DIMENSIONANTE = "casa_cheia"
 
-#: Os dois estudos que fazem sentido pedir, e o que cada um responde.
+#: Os três níveis de uso que o estudo entrega, sempre os três.
+#:
+#: **Ninguém escolhe entre eles antes do estudo.** Escolher antes é o que
+#: transforma uma premissa em conclusão: quem decide "esta casa é de pouco
+#: uso" no começo recebe um sistema dimensionado para isso e nenhuma forma de
+#: saber o que perdeu. Os três saem juntos, com o sistema de cada um, e a
+#: escolha passa a ser uma conversa com números na mesa.
+#:
+#: O que **não** é um cenário: a janela que a vistoria levantou. Ela é
+#: recortada pelo que o morador lembra de responder — quase sempre a noite,
+#: quase nunca o almoço — e por isso é o insumo dos três, e não um deles. O
+#: perfil ``levantado`` continua existindo para a seção de ocupação mostrar a
+#: transformação lado a lado, que é o que a torna auditável.
 ESTUDOS: dict[str, dict[str, Any]] = {
-    "levantado": {
-        "nome": "Como a vistoria levantou",
-        "perfis": {"levantado": 7},
+    "pouco_uso": {
+        "nome": "Pouco uso",
+        "perfis": {"casa_quase_vazia": 7},
         "para_que": (
-            "O dado de campo sem nenhuma interpretação. Serve de piso e de "
-            "controle: se um cenário transformado sai muito acima deste, a "
-            "diferença tem de ser explicável pela transformação, e não por um "
-            "erro dela."
+            "A casa esvazia de segunda a domingo: casal que trabalha fora e "
+            "viaja no fim de semana, ou segunda residência ocupada de vez em "
+            "quando. É o piso do consumo, e o sistema mais enxuto que faz "
+            "sentido propor."
         ),
     },
-    "casa_cheia": {
-        "nome": "Casa cheia o ano inteiro",
-        "perfis": {"casa_cheia": 7},
-        "para_que": (
-            "A casa usada no limite todos os dias — férias, home office da "
-            "família toda, casa de veraneio na temporada. É o cenário mais "
-            "exigente e o que dá o sistema maior."
-        ),
-    },
-    "semana_e_fds": {
-        "nome": "Semana quase vazia, fim de semana cheio",
+    "uso_comum": {
+        "nome": "Uso comum",
         "perfis": {"casa_quase_vazia": 5, "casa_cheia": 2},
         "para_que": (
-            "A rotina de uma família que trabalha fora. O equipamento é "
-            "dimensionado pelo fim de semana, e a conta de energia sai da "
-            "média ponderada dos sete dias."
+            "Cinco dias de casa quase vazia e dois cheios — a rotina de quem "
+            "trabalha fora. É onde a maioria das famílias cai — o que não faz "
+            "dele a resposta: quem conhece a casa é o cliente."
+        ),
+    },
+    "muito_uso": {
+        "nome": "Muito uso",
+        "perfis": {"casa_cheia": 7},
+        "para_que": (
+            "Todo mundo em casa todos os dias: férias, home office da família "
+            "inteira, casa de veraneio na temporada. É o teto, e é o cenário "
+            "que a proposta tem de cumprir se o cliente disser que é o dele."
         ),
     },
 }
+
+#: A ordem em que os três são apresentados — do mais leve ao mais pesado.
+ORDEM_DOS_ESTUDOS = ("pouco_uso", "uso_comum", "muito_uso")
+
+#: O cenário do meio. Não é uma recomendação do estudo — o estudo apresenta os
+#: três e não escolhe —, é só a posição dele na ordem, útil para o texto do
+#: relatório dizer qual fica entre os outros dois.
+ESTUDO_DO_MEIO = "uso_comum"
 
 
 # ----------------------------------------------------------------------------
@@ -301,6 +358,50 @@ def _fracao_no_expediente(faixa: tuple[float, float], perfil: PerfilOcupacao) ->
     return _sobreposicao(faixa, perfil.janela_expediente) / duracao
 
 
+def _atravessa_a_noite(
+    faixa: tuple[float, float], linha: "pd.Series", perfil: PerfilOcupacao,
+) -> bool:
+    """
+    O item estava ligado na hora de dormir, e é do tipo que não desliga?
+
+    Dois filtros, e os dois são necessários. O primeiro pergunta se a janela
+    termina junto com a hora de dormir — se termina, o item estava ligado ali.
+    O segundo pergunta se ele tem duração longa por utilização: climatização e
+    refrigeração atravessam a noite, lâmpada e televisor não. Sem o segundo, a
+    luz da sala passaria a acender às 3 h da manhã.
+    """
+    if perfil.arrasto_noturno <= 0:
+        return False
+    fim_da_noite = perfil.janela_acordado[1]
+    # Termina na última hora e meia da vigília — foi dormir com aquilo ligado.
+    if not (fim_da_noite - 1.5 <= faixa[1] <= fim_da_noite + 0.5):
+        return False
+    duracao = linha.get("duracao_max")
+    if duracao is None or pd.isna(duracao):
+        duracao = linha.get("duracao_min")
+    if duracao is None or pd.isna(duracao):
+        return False
+    return float(duracao) >= perfil.duracao_minima_para_arrasto_h
+
+
+def _e_de_formulario(faixa: tuple[float, float], perfil: PerfilOcupacao) -> bool:
+    """
+    A janela parece o padrão do catálogo, ou parece observação de campo?
+
+    Uma janela que cai principalmente dentro do expediente é suspeita numa
+    residência: ninguém opera nada por horário comercial dentro de casa, e
+    08:00-18:00 é o padrão que o catálogo traz e que o formulário aceita sem
+    discussão. Essa é a janela que a casa cheia tem o direito de reescrever.
+
+    Já uma janela ancorada na noite ou na manhã é o que o morador observou, e
+    o morador estava lá. Reescrevê-la também — que era o comportamento antes —
+    apagava a concentração natural do jantar e levava o pico da casa para as
+    12 h, contra as 20 h da curva residencial de referência. Espalhar tudo
+    parecia mais isento e era menos fiel.
+    """
+    return _fracao_no_expediente(faixa, perfil) >= 0.6
+
+
 def _janela_das_refeicoes(faixa: tuple[float, float], perfil: PerfilOcupacao) -> str:
     """
     A janela que cobre almoço **e** jantar, no formato que o núcleo entende.
@@ -351,9 +452,10 @@ def aplicar(cenario: Cenario, perfil: PerfilOcupacao | str) -> Cenario:
             de_refeicao = _e_de_refeicao(faixa, comodo, perfil)
 
             # 1. A janela. Refeição tem hora e é preservada; o resto se
-            #    espalha pela janela acordada quando a casa está cheia.
+            #    espalha pela janela acordada quando a casa está cheia — mas
+            #    só o que parece padrão de formulário. Ver `_e_de_formulario`.
             alargamento = 1.0
-            if perfil.espalhar and not de_refeicao:
+            if perfil.espalhar and not de_refeicao and _e_de_formulario(faixa, perfil):
                 nova.at[indice, "intervalo"] = (
                     f"{_hhmm(perfil.janela_acordado[0])} as "
                     f"{_hhmm(perfil.janela_acordado[1])}"
@@ -367,6 +469,12 @@ def aplicar(cenario: Cenario, perfil: PerfilOcupacao | str) -> Cenario:
             #    também é almoço: o equipamento passa a cobrir as duas.
             if de_refeicao and perfil.desdobrar_refeicoes:
                 nova.at[indice, "intervalo"] = _janela_das_refeicoes(faixa, perfil)
+
+            # 2b. A madrugada de quem foi dormir com o ar ligado.
+            elif _atravessa_a_noite(faixa, linha, perfil):
+                ate = perfil.hora_de_acordar * perfil.arrasto_noturno
+                atual = str(nova.at[indice, "intervalo"])
+                nova.at[indice, "intervalo"] = f"00:00 as {_hhmm(ate)} e {atual}"
 
             # 3. A intensidade. O fator diurno pesa pela fração da janela que
             #    cai no expediente: um equipamento das 8 às 18 leva o fator

@@ -75,31 +75,31 @@ def test_os_tres_cenarios_aparecem(comparacao):
     assert {c.chave for c in comparacao.cenarios} == set(ocupacao.ESTUDOS)
 
 
-def test_o_levantado_e_o_piso(comparacao):
+def test_o_pouco_uso_e_o_piso(comparacao):
     """
-    O dado de campo sem interpretação é o menor dos três, e é o controle.
-
-    Se um cenário transformado saísse **abaixo** dele, a transformação estaria
-    removendo carga em vez de acrescentar — e nenhum dos dois perfis faz isso.
+    Os três são níveis, e níveis se ordenam. Se não se ordenassem, não seriam
+    níveis — seriam três leituras avulsas, e a comparação não diria nada.
     """
     piso = comparacao.piso
-    assert piso is not None and piso.chave == "levantado"
+    assert piso is not None and piso.chave == "pouco_uso"
     for outro in comparacao.cenarios:
         assert outro.consumo_anual_kwh >= piso.consumo_anual_kwh * 0.999
 
 
-def test_a_casa_cheia_e_o_teto(comparacao):
+def test_o_muito_uso_e_o_teto(comparacao):
     teto = comparacao.teto
-    assert teto is not None and teto.chave == "casa_cheia"
+    assert teto is not None and teto.chave == "muito_uso"
 
 
 def test_o_do_meio_e_a_rotina_de_quem_trabalha_fora(comparacao):
     """
-    A resposta quase nunca é o piso nem o teto, e a comparação não pode
-    terminar sem apontar um.
+    O uso comum fica entre os outros dois — o que **não** faz dele a resposta.
+
+    O estudo apresenta os três e não escolhe: quem conhece a casa é o cliente,
+    e escolher por ele transformaria uma premissa em conclusão.
     """
     meio = comparacao.intermediario
-    assert meio is not None and meio.chave == "semana_e_fds"
+    assert meio is not None and meio.chave == "uso_comum"
     assert comparacao.piso.consumo_anual_kwh < meio.consumo_anual_kwh
     assert meio.consumo_anual_kwh < comparacao.teto.consumo_anual_kwh
 
@@ -189,4 +189,4 @@ def test_o_dia_de_pouco_uso_ainda_almoca_e_janta():
     ajustado = ocupacao.aplicar(_casa(), perfil)
     micro = ajustado.comodos["Cozinha"].iloc[1]["intervalo"]
     assert " e " in micro, "duas refeições, duas janelas"
-    assert micro.startswith("11:30")
+    assert micro.startswith(ocupacao._hhmm(ocupacao._ALMOCO[0]))
