@@ -284,6 +284,54 @@ def test_planilha_faz_ida_e_volta(tmp_path):
     assert not [p for p in lido.validar() if p.impede]
 
 
+def test_comodo_com_barra_no_nome_ainda_exporta(tmp_path):
+    """
+    O erro que derrubava a tela inteira no download da planilha.
+
+    O Excel proíbe ``\\ / * ? : [ ]`` no nome da aba, e a vistoria devolve
+    cômodos como "Sala de TV / Cinema" e "Espaço Gourmet / Churrasqueira". A
+    exceção vinha lá de dentro do openpyxl e não dizia qual cômodo era o
+    culpado — o usuário via só um app quebrado.
+    """
+    cenario = Cenario.de_segmento("escritorio", "X")
+    primeiro = next(iter(cenario.comodos))
+    cenario.comodos["Sala de TV / Cinema"] = cenario.comodos.pop(primeiro)
+    cenario.instancias["Sala de TV / Cinema"] = cenario.instancias.pop(primeiro, 1)
+
+    caminho = tmp_path / "cargas.xlsx"
+    cenario.para_planilha(caminho)
+
+    lido = Cenario.de_planilha(caminho, "X")
+    assert "Sala de TV - Cinema" in lido.comodos, "a barra vira hífen"
+    assert lido.total_de_equipamentos() == cenario.total_de_equipamentos()
+
+
+def test_nomes_longos_parecidos_nao_colidem_na_mesma_aba():
+    """
+    O corte em 31 caracteres pode colar dois cômodos no mesmo nome.
+
+    Sem desambiguar, o Excel recusa a segunda aba — ou, dependendo da versão,
+    a sobrescreve em silêncio, que é o pior dos dois: a planilha sai com um
+    cômodo a menos e ninguém percebe.
+    """
+    from aurum.demanda.cenario import LIMITE_NOME_DE_ABA, nome_de_aba
+
+    longo = "Area de servico e lavanderia dos fundos"
+    usados: set[str] = set()
+    nomes = [nome_de_aba(longo, usados) for _ in range(3)]
+    assert len(set(nomes)) == 3
+    assert all(len(n) <= LIMITE_NOME_DE_ABA for n in nomes)
+
+
+def test_nome_de_aba_nunca_sai_vazio():
+    """Aba sem nome é recusada pelo Excel tanto quanto aba com barra."""
+    from aurum.demanda.cenario import nome_de_aba
+
+    assert nome_de_aba("") == "comodo"
+    assert nome_de_aba("   ") == "comodo"
+    assert nome_de_aba("///") == "---"
+
+
 def test_adicionar_e_remover_comodo():
     cenario = Cenario.de_segmento("varejo", "Loja")
     antes = len(cenario.comodos)

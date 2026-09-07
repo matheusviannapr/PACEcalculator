@@ -107,6 +107,41 @@ def _janela_minutos(intervalo: str) -> tuple[int, int] | None:
     return inicio, fim
 
 
+#: O que o Excel não aceita no nome de uma aba.
+_PROIBIDO_NA_ABA = str.maketrans({c: "-" for c in "\\/*?:[]"})
+
+#: E o limite de tamanho, que é do formato e não do openpyxl.
+LIMITE_NOME_DE_ABA = 31
+
+
+def nome_de_aba(nome: str, usados: set[str] | None = None) -> str:
+    """
+    O nome de cômodo convertido para um nome de aba que o Excel aceita.
+
+    Três regras do formato, e nenhuma delas é opcional: nada de ``\\ / * ? :
+    [ ]``, no máximo 31 caracteres, e sem repetir. A vistoria devolve cômodos
+    como "Sala de TV / Cinema", e a barra sozinha derrubava a exportação
+    inteira com um erro que não dizia qual cômodo era o culpado.
+
+    Quando ``usados`` é passado, o nome é desambiguado com um sufixo numérico e
+    registrado no conjunto. Sem isso, dois cômodos longos que só diferem depois
+    do trigésimo primeiro caractere virariam a mesma aba, e o Excel recusaria a
+    segunda — ou pior, dependendo da versão, a sobrescreveria em silêncio.
+    """
+    limpo = str(nome or "").translate(_PROIBIDO_NA_ABA).strip() or "comodo"
+    limpo = limpo[:LIMITE_NOME_DE_ABA]
+    if usados is None:
+        return limpo
+
+    candidato, n = limpo, 2
+    while candidato.lower() in usados:
+        sufixo = f" {n}"
+        candidato = f"{limpo[:LIMITE_NOME_DE_ABA - len(sufixo)]}{sufixo}"
+        n += 1
+    usados.add(candidato.lower())
+    return candidato
+
+
 @dataclass
 class Cenario:
     """
@@ -430,12 +465,19 @@ class Cenario:
         return {n: int(self.instancias.get(n, 1)) for n in self._selecao(apenas_essenciais)}
 
     def para_planilha(self, destino: str | Path | io.BytesIO | None = None) -> bytes:
-        """Grava no formato que o D² lê — e devolve os bytes, para download."""
+        """
+        Grava no formato que o D² lê — e devolve os bytes, para download.
+
+        Os nomes das abas passam por :func:`nome_de_aba`: o Excel é mais
+        restritivo que o cadastro de cômodos, e um "Sala de TV / Cinema" vindo
+        da vistoria derrubava o download inteiro.
+        """
         buffer = io.BytesIO()
+        usados: set[str] = {"instancias"}
         with pd.ExcelWriter(buffer, engine="openpyxl") as escritor:
             for nome, tabela in self.comodos.items():
-                # O Excel limita o nome da aba a 31 caracteres.
-                tabela.to_excel(escritor, sheet_name=str(nome)[:31], index=False)
+                tabela.to_excel(
+                    escritor, sheet_name=nome_de_aba(nome, usados), index=False)
             pd.DataFrame(
                 [{"comodo": n, "instancias": q} for n, q in self.instancias.items()]
             ).to_excel(escritor, sheet_name="instancias", index=False)
