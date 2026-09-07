@@ -1150,6 +1150,111 @@ def _secao_quadro_backup(estudo: ResultadoEstudo) -> str:
     return "\n\n".join(partes)
 
 
+def _secao_escopos(estudo: ResultadoEstudo, figuras: dict[str, Path]) -> str:
+    """
+    Quanto custa levar junto o que seria bom ter.
+
+    A seção anterior responde o que a bateria segura. Esta responde a pergunta
+    comercial que vem logo depois: o nível ``P`` da vistoria — preferível —
+    não é crítico, a casa não para sem ele, mas o cliente sente falta. Decidir
+    se vale pagar exige três números, e nenhum deles é o total do orçamento.
+    """
+    escopos = getattr(estudo, "escopos", None)
+    if escopos is None or not escopos.tem_preferiveis:
+        return ""
+
+    base, ampliado = escopos.base, escopos.ampliado
+    marginal, ociosidade = escopos.marginal(), escopos.ociosidade()
+
+    partes = [
+        secao("O que custaria levar também o desejável"),
+        "A vistoria separa o que não pode faltar do que seria bom não faltar. "
+        "O quadro que a proposta assina é o primeiro; o segundo é uma escolha, e "
+        "escolha precisa de preço. Os dois quadros foram dimensionados separados — e "
+        "não um dimensionado e o outro estimado por diferença, porque a coincidência "
+        "entre as duas cargas não é aditiva: o pico do conjunto é menor que a soma "
+        "dos picos.",
+    ]
+
+    partes.append(tabela(
+        ["Quadro", "Níveis", "Equip.", "Instalada", "Consumo", "Pico P95",
+         "Banco", "Autonomia", "Investimento"],
+        [
+            (
+                m.escopo.nome, m.escopo.rotulo_dos_niveis, _n(m.equipamentos, 0),
+                _n(m.potencia_instalada_w / 1000.0, 2, "kW"),
+                _n(m.energia_diaria_kwh, 1, "kWh/dia"),
+                _n(m.pico_p95_kw, 2, "kW"),
+                _n(m.energia_util_kwh, 1, "kWh"),
+                _n(m.autonomia_h, 0, "h"),
+                _brl(m.capex_brl),
+            )
+            for m in escopos.medidas
+        ],
+        alinhamento="p{3.0cm}p{1.7cm}rrrrrrr",
+        tamanho_fonte="scriptsize",
+        legenda="O quadro essencial e o ampliado, cada um com o banco que exige",
+    ))
+
+    if figuras.get("escopos_backup"):
+        partes.append(_figura(
+            figuras["escopos_backup"],
+            "À esquerda, a carga de cada quadro ao longo do dia; à direita, o que "
+            "cada um consome e o banco que exige. As duas grandezas se resolvem com "
+            "equipamentos diferentes: energia é módulo de bateria, pico é inversor.",
+            largura="1.0",
+        ))
+
+    if marginal:
+        partes.append(caixa(
+            "O preço de promover os preferíveis",
+            f"Levar o desejável junto acrescenta "
+            f"{_n(marginal['energia_diaria_kwh'], 1, 'kWh/dia')} de consumo e "
+            f"{_n(marginal['pico_kw'], 2, 'kW')} de pico ao quadro de backup. Em "
+            f"equipamento, são {_n(marginal['energia_util_kwh'], 1, 'kWh')} de banco "
+            f"a mais e {_brl(marginal['capex_brl'])} de investimento — "
+            f"{_brl(marginal['capex_por_kwh_dia'])} por kWh/dia de carga promovida. "
+            "É esse o número que decide, e não o total: o quadro essencial já foi "
+            "aprovado quando esta pergunta é feita.",
+            cor="amarelopace",
+        ))
+
+    if ociosidade:
+        limitante = escopos.limitante
+        folga = _n(ociosidade.get("folga_kwh", 0.0), 1, "kWh")
+        if limitante == "potencia":
+            diagnostico = (
+                f"O banco do quadro essencial tem {folga} de folga de energia, e ela "
+                "não serve para os preferíveis: o pico do quadro ampliado "
+                f"({_n(ampliado.pico_p95_kw, 2, 'kW')}) passa da potência de descarga "
+                f"do banco ({_n(ociosidade.get('potencia_kw', 0.0), 2, 'kW')}), e o "
+                "sistema desarma no primeiro instante em vez de esvaziar devagar. "
+                "Faltar energia se resolve acrescentando módulo de bateria ao mesmo "
+                "inversor, que é barato e linear; faltar potência exige inversor "
+                "maior — outro equipamento e outro preço. É por isso que o salto de "
+                "investimento acima não é proporcional ao salto de consumo."
+            )
+        elif limitante == "energia":
+            diagnostico = (
+                f"O banco do quadro essencial tem {folga} de folga, e com ela "
+                f"atravessa {_n(escopos.autonomia_do_base_no_ampliado_h, 1, 'h')} "
+                "carregando também os preferíveis — contra "
+                f"{_n(base.autonomia_h, 0, 'h')} carregando só o essencial. A folga "
+                "já está paga: ela vem dos degraus do catálogo, porque banco não se "
+                "compra na medida exata. O que falta daí em diante é energia, e "
+                "energia se resolve com módulo de bateria no mesmo inversor."
+            )
+        else:
+            diagnostico = (
+                f"O banco do quadro essencial tem {folga} de folga e atravessa "
+                f"{_n(escopos.autonomia_do_base_no_ampliado_h, 1, 'h')} carregando "
+                "também os preferíveis, sem equipamento nenhum a mais."
+            )
+        partes.append(nota(diagnostico))
+
+    return "\n\n".join(p for p in partes if p)
+
+
 def _secao_armazenamento(estudo: ResultadoEstudo, figuras: dict[str, Path]) -> str:
     cfg = estudo.configuracao
     partes = [
@@ -2066,6 +2171,10 @@ def montar_documento(
         # equipamento comprar", e é a pergunta que o cliente faz primeiro.
         _secao_quadro_backup(estudo),
         _secao_armazenamento(estudo, figuras),
+        # Depois do armazenamento: a pergunta "e se eu quisesse levar mais?"
+        # só faz sentido quando o leitor já sabe o que o quadro essencial
+        # custou.
+        _secao_escopos(estudo, figuras),
         _secao_vida_util(estudo, figuras),
         _secao_cenarios(estudo, figuras),
         _secao_economia(estudo),

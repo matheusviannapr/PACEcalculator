@@ -109,6 +109,9 @@ def gerar_graficos(estudo: ResultadoEstudo, destino: Path) -> dict[str, Path]:
     ocupacao = getattr(estudo.configuracao, "ocupacao", None) or {}
     if ocupacao.get("curvas"):
         figuras["perfis_ocupacao"] = _grafico_perfis_ocupacao(estudo, destino)
+    escopos = getattr(estudo, "escopos", None)
+    if escopos is not None and escopos.tem_preferiveis:
+        figuras["escopos_backup"] = _grafico_escopos(escopos, destino)
     if estudo.cenarios is not None and len(estudo.cenarios.cenarios) > 1:
         figuras["cenarios"] = _grafico_cenarios(estudo.cenarios, destino)
         custo_grupo = estudo_do_gerador(estudo.cenarios)
@@ -682,6 +685,65 @@ def _grafico_perfis_ocupacao(estudo: ResultadoEstudo, destino: Path) -> Path:
     )
     eixo.legend(fontsize=8, ncol=2, frameon=False)
     return _salvar(fig, destino, "perfis_ocupacao")
+
+
+def _grafico_escopos(escopos, destino: Path) -> Path:
+    """
+    O essencial e o ampliado, nas duas dimensões que decidem o banco.
+
+    Dois painéis, e não um índice único, porque são duas grandezas que se
+    resolvem com equipamentos diferentes. A **energia** do dia diz quantos
+    módulos de bateria; o **pico** diz qual inversor. Um quadro que dobra de
+    energia e não muda de pico custa módulo; um que dobra de pico exige
+    inversor maior, e nenhum módulo extra resolve.
+
+    A curva de cada escopo entra por cima porque a diferença entre eles não é
+    só de tamanho: os preferíveis costumam ser cargas de conforto, e elas se
+    concentram nas horas em que a família está em casa -- exatamente quando o
+    essencial também está no seu máximo.
+    """
+    medidas = list(escopos.medidas)
+    fig, eixos = plt.subplots(1, 2, figsize=(11.0, 4.6), dpi=140)
+    for eixo in eixos:
+        eixo.grid(alpha=0.25, linewidth=0.6)
+        eixo.set_axisbelow(True)
+
+    # Painel 1: as curvas médias, uma por escopo.
+    cores = [_SEM["backup"], marca.APOIO["azul"]]
+    for i, medida in enumerate(medidas):
+        curva = np.asarray(medida.curva_w) / 1000.0
+        horas = np.arange(len(curva)) * medida.passo_min / 60.0
+        eixos[0].plot(horas, curva, color=cores[i % len(cores)], lw=2.2,
+                      label=f"{medida.escopo.nome} ({medida.escopo.rotulo_dos_niveis})")
+    eixos[0].set_xlabel("Hora do dia")
+    eixos[0].set_ylabel("Potência (kW)")
+    eixos[0].set_xlim(0, 24)
+    eixos[0].set_ylim(bottom=0)
+    eixos[0].set_xticks(range(0, 25, 4))
+    eixos[0].set_title("A carga de cada quadro")
+    eixos[0].legend(fontsize=8, frameon=False)
+
+    # Painel 2: energia e pico lado a lado, com o banco de cada um.
+    rotulos = [m.escopo.nome for m in medidas]
+    posicoes = np.arange(len(medidas))
+    largura = 0.36
+    eixos[1].bar(posicoes - largura / 2, [m.energia_diaria_kwh for m in medidas],
+                 largura, color=_SEM["backup"], label="energia do dia (kWh)")
+    eixos[1].bar(posicoes + largura / 2, [m.energia_util_kwh for m in medidas],
+                 largura, color=marca.APOIO["azul"], label="banco necessário (kWh úteis)")
+    for i, medida in enumerate(medidas):
+        eixos[1].annotate(
+            f"pico {medida.pico_p95_kw:.2f} kW\n{medida.autonomia_h:.0f} h",
+            (i, max(medida.energia_diaria_kwh, medida.energia_util_kwh)),
+            textcoords="offset points", xytext=(0, 6), ha="center", fontsize=7.5,
+        )
+    eixos[1].set_xticks(posicoes)
+    eixos[1].set_xticklabels(rotulos, fontsize=8)
+    eixos[1].set_ylabel("kWh")
+    eixos[1].set_title("O que cada quadro consome e exige")
+    eixos[1].legend(fontsize=8, frameon=False)
+
+    return _salvar(fig, destino, "escopos_backup")
 
 
 def _grafico_cenarios(comparacao, destino: Path) -> Path:

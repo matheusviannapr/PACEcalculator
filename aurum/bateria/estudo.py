@@ -110,6 +110,13 @@ class ConfiguracaoEstudo:
     #: 1,9 kW não responde à pergunta que o cliente faz, que é se a geladeira
     #: fica de pé.
     criticidade: dict[str, Any] | None = None
+    #: Comparar o quadro essencial (MC+C) com o ampliado (MC+C+P).
+    #:
+    #: A vistoria classifica em quatro níveis e o estudo usava só a linha de
+    #: corte. O nível ``P`` — preferível — não é crítico, mas o cliente sente
+    #: falta, e decidir se vale pagar por ele exige medir o que ele consome e
+    #: quanto banco ele exige **a mais**. Ver :mod:`aurum.bateria.escopos`.
+    comparar_escopos: bool = False
     #: As tabelas do cenário, por cômodo, como o usuário as editou. O núcleo
     #: do D² converte intervalo e duração em minutos e descarta o resto; o
     #: anexo precisa do original para dizer por quanto tempo cada equipamento
@@ -250,6 +257,9 @@ class ResultadoEstudo:
     #: Solar, bateria e gerador ligados e desligados. ``None`` quando não há
     #: conjunto recomendado nem gerador -- não há o que comparar.
     cenarios: ComparacaoFontes | None = None
+    #: Quadro essencial contra quadro ampliado, quando a vistoria classificou
+    #: equipamentos como preferíveis. ``None`` quando não há o que comparar.
+    escopos: Any = None
     avisos: list[str] = field(default_factory=list)
 
     @property
@@ -692,6 +702,31 @@ def executar_estudo(cfg: ConfiguracaoEstudo, progresso=None) -> ResultadoEstudo:
     if cenarios is not None:
         avisos.extend(cenarios.avisos)
 
+    # O quadro em dois níveis. Roda por último e nunca derruba o estudo: é uma
+    # leitura a mais sobre o mesmo dado, e não uma etapa de que o resto depende.
+    escopos = None
+    if cfg.comparar_escopos and cfg.tabelas_cenario:
+        avisar("Comparando o quadro essencial com o ampliado", 0.95)
+        try:
+            from .escopos import comparar_escopos as _comparar_escopos
+
+            escopos = _comparar_escopos(
+                cfg.tabelas_cenario,
+                cfg.instancias_backup or cfg.instancias_por_comodo or {},
+                candidatos, serie, cfg.malha,
+                autonomia_alvo_h=cfg.autonomia_alvo_h,
+                confiabilidade=cfg.confiabilidade_alvo,
+                simulacoes=cfg.simulacoes,
+                premissas=cfg.premissas,
+                semente=cfg.semente,
+                ajustes_sazonais=cfg.ajustes_sazonais,
+                catalogo=base,
+            )
+            avisos.extend(escopos.avisos)
+        except Exception as exc:  # noqa: BLE001 — leitura extra não derruba estudo
+            LOGGER.warning("comparação de escopos falhou: %s", exc)
+            avisos.append(f"A comparação entre quadro essencial e ampliado falhou: {exc}")
+
     avisar("Estudo concluído", 1.0)
     return ResultadoEstudo(
         configuracao=cfg,
@@ -709,6 +744,7 @@ def executar_estudo(cfg: ConfiguracaoEstudo, progresso=None) -> ResultadoEstudo:
         ranking=ranking,
         recomendado=recomendado,
         cenarios=cenarios,
+        escopos=escopos,
         avisos=avisos,
     )
 

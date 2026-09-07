@@ -2811,6 +2811,11 @@ def _montar_configuracao(
         comodos_backup=comodos_backup,
         instancias_backup=instancias_backup,
         criticidade=criticidade,
+        # Ligado sozinho quando a vistoria classificou: se o levantamento
+        # separou o preferível do crítico, foi para que alguém decidisse entre
+        # os dois, e perguntar de novo na tela seria pedir a mesma informação
+        # duas vezes.
+        comparar_escopos=criticidade is not None,
         tabelas_cenario=(levantado or cenario).comodos if cenario else None,
         ocupacao=ocupacao_dados,
         consumo_anual_kwh=consumo_anual,
@@ -2903,6 +2908,7 @@ def _passo_resultado() -> None:
             figuras, "mapa_atendimento",
             "A probabilidade de atravessar, por hora em que a luz cai e por duração "
             "da interrupção.")
+        _mostrar_escopos(estudo, figuras)
         if estudo.resiliencia:
             nomes = [r.conjunto.descricao() for r in estudo.resiliencia]
             padrao = estudo.recomendado.conjunto.descricao() if estudo.recomendado else nomes[0]
@@ -3138,6 +3144,54 @@ def _reais(valor: float) -> str:
 def _slug(texto: str) -> str:
     limpo = "".join(c if c.isalnum() else "-" for c in str(texto).lower())
     return "-".join(p for p in limpo.split("-") if p)[:50] or "estudo"
+
+
+def _mostrar_escopos(estudo, figuras: dict) -> None:
+    """
+    O quadro essencial contra o ampliado: quanto custa levar o desejável.
+
+    Só aparece quando a vistoria classificou alguma coisa como preferível.
+    Sem isso os dois quadros são o mesmo, e mostrar duas linhas iguais sugere
+    uma escolha que não existe.
+    """
+    escopos = getattr(estudo, "escopos", None)
+    if escopos is None or not escopos.tem_preferiveis:
+        return
+
+    st.markdown("##### E se o quadro levasse também o que é preferível?")
+    st.dataframe(escopos.tabela(), width="stretch", hide_index=True)
+    _mostrar_figura(
+        figuras, "escopos_backup",
+        "À esquerda, a carga de cada quadro; à direita, o que cada um consome e o "
+        "banco que exige.")
+
+    marginal = escopos.marginal()
+    if marginal:
+        colunas = st.columns(4)
+        _cartao(colunas[0], "Consumo a mais",
+                f"{marginal['energia_diaria_kwh']:.1f} kWh/dia")
+        _cartao(colunas[1], "Pico a mais", f"{marginal['pico_kw']:.2f} kW")
+        _cartao(colunas[2], "Banco a mais",
+                f"{marginal['energia_util_kwh']:.1f} kWh")
+        _cartao(colunas[3], "Investimento a mais", _reais(marginal["capex_brl"]))
+
+    limitante = escopos.limitante
+    if limitante == "potencia":
+        st.warning(
+            "O que impede o banco do quadro essencial de carregar também os "
+            "preferíveis é **potência**, e não energia: o pico do quadro ampliado "
+            "passa da descarga do banco, e o sistema desarma no primeiro instante "
+            "em vez de esvaziar devagar. Acrescentar módulo de bateria não resolve "
+            "— é preciso inversor maior, que é outro equipamento e outro preço."
+        )
+    elif limitante == "energia":
+        st.info(
+            f"O banco do quadro essencial atravessa "
+            f"{escopos.autonomia_do_base_no_ampliado_h:.1f} h carregando também os "
+            "preferíveis, com a folga que já veio dos degraus do catálogo. Daí em "
+            "diante o que falta é energia, e energia se resolve com módulo de "
+            "bateria no mesmo inversor."
+        )
 
 
 def _figuras_do_estudo(estudo) -> dict[str, Path]:
