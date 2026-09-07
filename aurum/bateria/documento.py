@@ -1434,10 +1434,47 @@ def _premissa_de_capex(estudo: ResultadoEstudo, comparacao) -> str:
     if capex <= 0 or kwp <= 0:
         return ""
 
+    partes_do_kit = None
+    if cfg.capex_fv_brl is None and getattr(cfg, "topologia_kit", None):
+        from ..pv.kits import (
+            MAO_DE_OBRA_BRL_KWP,
+            MATERIAL_CA_BRL_KWP,
+            TOPOLOGIAS,
+            composicao_de_kit,
+        )
+
+        partes_do_kit = composicao_de_kit(
+            kwp, cfg.topologia_kit,
+            MAO_DE_OBRA_BRL_KWP if cfg.mao_de_obra_brl_kwp is None
+            else cfg.mao_de_obra_brl_kwp,
+            MATERIAL_CA_BRL_KWP if cfg.material_ca_brl_kwp is None
+            else cfg.material_ca_brl_kwp,
+        )
+
     if cfg.capex_fv_brl is not None:
         origem = (
             "O investimento no sistema fotovoltaico foi informado, e não estimado: "
             f"{_brl(capex)} para {_n(kwp, 1, 'kWp')}, ou {_brl(capex / kwp)}/kWp."
+        )
+    elif partes_do_kit is not None:
+        from ..pv.kits import APURADO_EM, POTENCIA_MAXIMA_KWP
+
+        total = sum(partes_do_kit.values())
+        origem = (
+            f"O investimento não vem de curva de R$/kWp: vem da tabela de preço de "
+            f"kit do distribuidor, coluna "
+            f"{esc(TOPOLOGIAS.get(cfg.topologia_kit, cfg.topologia_kit))}, apurada em "
+            f"{APURADO_EM.strftime('%d/%m/%Y')} e válida até "
+            f"{_n(POTENCIA_MAXIMA_KWP, 0, 'kWp')}. Abaixo dessa potência o preço tem "
+            "degraus e depende da topologia do inversor — um kit split-phase custa "
+            "mais de 50% acima de um mono da mesma potência —, e nenhuma curva de "
+            "escala representa isso, porque é topologia e não tamanho.\n\n"
+            f"O kit é equipamento posto: {_brl(partes_do_kit['kit'])}. A ele somam-se "
+            f"{_brl(partes_do_kit['mao_de_obra'])} de mão de obra (equipe, estrutura "
+            f"fora do kit, projeto, ART e homologação) e "
+            f"{_brl(partes_do_kit['material_ca'])} de material do lado CA (cabo até o "
+            f"quadro, disjuntores, DPS, eletroduto e aterramento). Total de "
+            f"{_brl(total)} para {_n(kwp, 1, 'kWp')}, ou {_brl(total / kwp)}/kWp."
         )
     else:
         rotulos = {
@@ -1460,7 +1497,30 @@ def _premissa_de_capex(estudo: ResultadoEstudo, comparacao) -> str:
             f"chega a {faixa[-1] / faixa[0] - 1:.0%}, e ela atravessa inteira para o "
             "payback e para o valor presente."
         )
-    return caixa("De onde vem o investimento", origem, cor="pretopace")
+    blocos = [caixa("De onde vem o investimento", origem, cor="pretopace")]
+    if partes_do_kit is not None:
+        blocos.append(tabela(
+            ["Parcela", "Valor", "R$/kWp", "Do total"],
+            [
+                (rotulo, _brl(valor), _brl(valor / kwp), _pct(valor / sum(partes_do_kit.values())))
+                for rotulo, valor in (
+                    ("Kit fotovoltaico (equipamento)", partes_do_kit["kit"]),
+                    ("Mão de obra e projeto", partes_do_kit["mao_de_obra"]),
+                    ("Material do lado CA", partes_do_kit["material_ca"]),
+                )
+            ],
+            alinhamento="p{6.4cm}rrr",
+            legenda="Composição do investimento no sistema fotovoltaico",
+        ))
+        blocos.append(nota(
+            "O preço do kit é cotação de distribuidor, com data. As outras duas "
+            "parcelas são premissas do instalador, em R$/kWp — somadas e não "
+            "aplicadas como percentual, porque a equipe leva o mesmo tempo para "
+            "montar um kit caro e um barato de mesma potência. São elas que mudam "
+            "de uma empresa para outra, e é nelas que uma cotação de verdade deve "
+            "entrar primeiro."
+        ))
+    return "\n\n".join(blocos)
 
 
 def _subsecao_gerador(comparacao, figuras: dict[str, Path]) -> list[str]:

@@ -88,12 +88,14 @@ PRIMEIRO_PASSO_ANALISE = next(i for i, p in enumerate(PASSOS, start=1) if p[0] =
 _PADROES: dict[str, Any] = {
     "e_passo": 1,
     "e_nome": "",
-    "e_segmento": "hotel",
+    "e_segmento": "residencia",
     "e_com_solar": True,
     "e_tensao_rede": 380.0,
     "e_lat": -25.4284,
     "e_lon": -49.2733,
     "e_endereco": "",
+    #: Candidatos da última busca de endereço, à espera de escolha.
+    "e_lugares": [],
     "e_modo_carga": "modelo",
     "e_cenario": None,
     "e_vistoria": None,
@@ -141,6 +143,11 @@ _PADROES: dict[str, Any] = {
     "e_inclinacao": 0.0,
     "e_azimute": 0.0,
     "e_exigir_pvgis": False,
+    #: Coluna da tabela de kit; vazio volta para a curva de R$/kWp.
+    "e_topologia_kit": "",
+    #: As duas parcelas que a obra soma ao kit, em R$/kWp.
+    "e_mao_de_obra": None,
+    "e_material_ca": None,
 }
 
 
@@ -359,6 +366,76 @@ def _resumo_do_catalogo(tensao_rede_v: float) -> None:
     )
 
 
+def _vistoria_na_primeira_tela() -> None:
+    """
+    O atalho: quem tem o backup da vistoria não precisa responder nada.
+
+    O arquivo traz cliente, cidade, tensão da rede e a criticidade de cada
+    equipamento. Pedir isso à mão antes, e só aceitar o arquivo no passo
+    seguinte, invertia a ordem da confiança: a resposta digitada vencia a
+    medida em campo por chegar primeiro. Aqui ela chega antes, e os campos
+    abaixo já nascem preenchidos.
+
+    Continua sendo opcional, e continua disponível no passo de cargas — quem
+    não tem vistoria não é obrigado a passar por aqui.
+    """
+    if st.session_state.get("e_vistoria") is not None:
+        vistoria = st.session_state["e_vistoria"]
+        st.success(
+            f"✅ Vistoria de **{vistoria.cliente}** carregada — "
+            f"{vistoria.cenario.total_de_equipamentos()} equipamentos, rede de "
+            f"{vistoria.tensao_rede_v:.0f} V, {vistoria.local or 'local não informado'}. "
+            "Os campos abaixo já vieram dela."
+        )
+        return
+
+    with st.expander("Tenho o backup de uma vistoria técnica (.json)"):
+        st.caption(
+            "É a origem mais completa que este software aceita: traz o cliente, a "
+            "cidade, a tensão da rede e a criticidade **de cada equipamento** — que "
+            "é o que monta o quadro de backup. Carregando aqui, o resto da tela já "
+            "vem preenchido."
+        )
+        _cargas_da_vistoria()
+
+
+def _buscar_endereco(consulta: str, limite: int = 5) -> list[dict]:
+    """
+    Os lugares que o geocodificador achou, para o usuário escolher.
+
+    Devolve lista de ``{"nome", "lat", "lon"}``. Uma lista, e não o primeiro
+    resultado: "Rua São João" existe em quinze cidades, e escolher sozinho
+    põe o estudo inteiro na cidade errada sem avisar ninguém.
+    """
+    from .geo.nominatim import GeocodingError, NominatimClient
+
+    try:
+        lugares = NominatimClient(get_settings()).search(
+            consulta, limit=limite, with_geometry=False)
+    except GeocodingError as exc:
+        st.error(f"Não achei esse endereço: {exc}")
+        return []
+    if not lugares:
+        st.warning(
+            f"Nenhum lugar encontrado para “{consulta}”. Tente incluir a cidade "
+            "e o estado, ou digite as coordenadas na outra aba."
+        )
+    return [
+        {"nome": lugar.display_name, "lat": float(lugar.lat), "lon": float(lugar.lon)}
+        for lugar in lugares
+    ]
+
+
+def _fixar_local(lugar: dict) -> None:
+    """Coordenada e rótulo andam juntos — é o que faltava na importação."""
+    st.session_state.update({
+        "e_lat": float(lugar["lat"]),
+        "e_lon": float(lugar["lon"]),
+        "e_endereco": lugar["nome"],
+        "e_lugares": [],
+    })
+
+
 def _passo_cliente() -> None:
     # `key=` em vez de atribuir o retorno: a barra lateral é desenhada antes
     # do corpo da página e leria o valor anterior, ficando um rerun atrás do
@@ -369,6 +446,8 @@ def _passo_cliente() -> None:
         key="e_nome",
         placeholder="Ex.: Hotel Central",
     )
+
+    _vistoria_na_primeira_tela()
 
     st.markdown("##### Que tipo de instalação é?")
     st.caption(
@@ -454,21 +533,32 @@ def _passo_cliente() -> None:
             placeholder="Ex.: Avenida Sete de Setembro, Curitiba",
         )
         if st.button("Localizar", disabled=not consulta):
-            from .geo.nominatim import GeocodingError, NominatimClient
+            st.session_state["e_lugares"] = _buscar_endereco(consulta)
+            st.rerun()
 
-            try:
-                lugares = NominatimClient(get_settings()).search(consulta, limit=3, with_geometry=False)
-            except GeocodingError as exc:
-                st.error(f"Não achei esse endereço: {exc}")
-            else:
-                lugar = lugares[0]
-                st.session_state.update({
-                    "e_lat": float(lugar.lat), "e_lon": float(lugar.lon),
-                    "e_endereco": lugar.display_name,
-                })
+        # As alternativas ficam à vista. Pegar a primeira em silêncio era o
+        # que fazia "Rua São João" cair na cidade errada -- e o erro só
+        # aparecia depois, na produtividade do PVGIS, onde ninguém procura.
+        lugares = st.session_state.get("e_lugares") or []
+        if len(lugares) > 1:
+            escolha = st.radio(
+                "Achei mais de um lugar. Qual é?",
+                range(len(lugares)),
+                format_func=lambda i: lugares[i]["nome"],
+            )
+            if st.button("Usar este", type="primary"):
+                _fixar_local(lugares[escolha])
                 st.rerun()
+        elif len(lugares) == 1:
+            _fixar_local(lugares[0])
+            st.session_state["e_lugares"] = []
+            st.rerun()
+
         if st.session_state["e_endereco"]:
-            st.success(f"📍 {st.session_state['e_endereco']}")
+            st.success(
+                f"📍 {st.session_state['e_endereco']}  \n"
+                f"`{st.session_state['e_lat']:.5f}, {st.session_state['e_lon']:.5f}`"
+            )
 
     with aba_coordenadas:
         colunas = st.columns(2)
@@ -591,8 +681,21 @@ def _cargas_da_vistoria() -> None:
         "e_ensemble_backup": None,
         "e_assinatura_carga": None,
     })
-    if vistoria.uf:
+    # A cidade da vistoria vira coordenada, e não só rótulo. Escrever o texto
+    # e deixar a coordenada no padrão de Curitiba fazia a tela dizer "Rio de
+    # Janeiro / RJ" com o mapa aberto no Paraná — e toda a geração solar do
+    # estudo saía do lugar errado, sem nenhum aviso.
+    if vistoria.local:
         st.session_state["e_endereco"] = vistoria.local
+        achados = _buscar_endereco(vistoria.local, limite=1)
+        if achados:
+            _fixar_local(achados[0])
+        else:
+            st.warning(
+                f"A vistoria diz “{vistoria.local}”, mas não consegui converter "
+                "isso em coordenada. Confira o local no passo 1 antes de seguir: "
+                "a geração solar sai dali."
+            )
     st.rerun()
 
 
@@ -2304,7 +2407,12 @@ def _passo_meta() -> None:
         help="Zero usa a curva do padrão escolhido. Cotação de verdade passa na "
              "frente de qualquer curva.",
     )
-    referencia = _referencia_capex(padrao_capex, st.session_state.get("e_kwp") or 0.0)
+    topologia_kit, mao_de_obra, material_ca = _controles_do_kit()
+
+    referencia = _referencia_capex(
+        padrao_capex, st.session_state.get("e_kwp") or 0.0,
+        topologia_kit, mao_de_obra, material_ca,
+    )
     if referencia:
         colunas[0].caption(referencia)
 
@@ -2385,6 +2493,9 @@ def _passo_meta() -> None:
             considerar_solar=com_solar, considerar_bateria=com_bateria,
             considerar_gerador=com_gerador,
             padrao_capex=padrao_capex,
+            topologia_kit=topologia_kit,
+            mao_de_obra_brl_kwp=mao_de_obra,
+            material_ca_brl_kwp=material_ca,
             capex_fv_brl=float(capex_informado) or None,
         )
         barra = st.progress(0.0, text="Preparando…")
@@ -2463,19 +2574,157 @@ def _aba_cenarios(estudo) -> None:
         st.warning(aviso)
 
 
-def _referencia_capex(padrao: str, kwp: float) -> str:
+def _controles_do_kit() -> tuple[str | None, float, float]:
     """
-    Mostra o R$/kWp que o padrão escolhido produz nessa potência.
+    A topologia do kit e as duas parcelas que a obra acrescenta.
+
+    Abaixo de 40 kWp o preço do equipamento não sai de curva de escala: sai da
+    tabela do distribuidor, e a coluna importa tanto quanto a linha — um kit
+    split-phase custa mais de 50% acima de um mono da mesma potência.
+
+    A mão de obra e o material CA entram **somados por kWp**, e não como
+    percentual sobre o kit: a equipe leva o mesmo tempo para instalar os dois
+    kits, e um percentual cobraria mais caro pela instalação só porque o
+    equipamento é mais caro.
+    """
+    from .pv.kits import (
+        MAO_DE_OBRA_BRL_KWP,
+        MATERIAL_CA_BRL_KWP,
+        POTENCIA_MAXIMA_KWP,
+        TOPOLOGIAS,
+        potencia_maxima,
+        topologia_para_rede,
+    )
+
+    kwp = float(st.session_state.get("e_kwp") or 0.0)
+    sugerida = topologia_para_rede(float(st.session_state.get("e_tensao_rede") or 380.0))
+    chaves = ["", *TOPOLOGIAS]
+
+    # Com `key=`, o Streamlit lê o estado e ignora o `value=` do widget. Como
+    # o estado nasce vazio, o número entrava como None e o widget quebrava na
+    # primeira abertura. Semear antes de desenhar é o caminho previsto — e
+    # mantém a constante viva num lugar só, em `aurum.pv.kits`.
+    for chave, padrao in (("e_mao_de_obra", MAO_DE_OBRA_BRL_KWP),
+                          ("e_material_ca", MATERIAL_CA_BRL_KWP)):
+        if st.session_state.get(chave) is None:
+            st.session_state[chave] = padrao
+
+    with st.expander(
+        f"Preço de kit e obra (a tabela vai até {POTENCIA_MAXIMA_KWP:.0f} kWp)",
+        expanded=0 < kwp <= POTENCIA_MAXIMA_KWP,
+    ):
+        st.caption(
+            "A tabela de kit é **equipamento posto**: não traz mão de obra, projeto, "
+            "ART, homologação nem o material do lado CA. Os dois campos abaixo somam "
+            "isso ao preço do kit, por kWp — é o que transforma material em usina "
+            "ligada."
+        )
+        colunas = st.columns([1.4, 1, 1])
+        topologia = colunas[0].selectbox(
+            "Topologia do kit",
+            chaves,
+            index=chaves.index(sugerida) if sugerida in chaves else 0,
+            format_func=lambda c: (
+                "Não usar a tabela — estimar pela curva de R$/kWp" if not c
+                else f"{TOPOLOGIAS[c]} — até {potencia_maxima(c):.0f} kWp"
+            ),
+            key="e_topologia_kit",
+            help="A sugestão vem da tensão da rede: 380 V pede trifásico; 220 V, "
+                 "split-phase ou mono/bifásico. Cada coluna tem o seu alcance — "
+                 "acima de 40 kWp a entrada é trifásica e só o trifásico continua, "
+                 "até 125 kWp. Fora da tabela, a curva volta a valer sozinha.",
+        )
+        mao_de_obra = colunas[1].number_input(
+            "Mão de obra (R$/kWp)", 0.0, 5_000.0, step=25.0,
+            key="e_mao_de_obra",
+            help="Equipe, estrutura fora do kit, projeto, ART e homologação.",
+        )
+        material_ca = colunas[2].number_input(
+            "Material CA (R$/kWp)", 0.0, 5_000.0, step=25.0,
+            key="e_material_ca",
+            help="Cabo CA até o quadro, disjuntores, DPS, eletroduto e aterramento. "
+                 "Inversor longe do padrão de entrada sobe este número.",
+        )
+        _mostrar_composicao_do_kit(topologia, kwp, mao_de_obra, material_ca)
+
+    return (topologia or None), float(mao_de_obra), float(material_ca)
+
+
+def _mostrar_composicao_do_kit(
+    topologia: str, kwp: float, mao_de_obra: float, material_ca: float,
+) -> None:
+    """As três parcelas à vista, para o número não ter que ser aceito de fé."""
+    from .pv.kits import (
+        TOPOLOGIAS,
+        composicao_de_kit,
+        potencia_maxima,
+        preco_kit_com_bateria,
+    )
+
+    if not topologia or kwp <= 0:
+        return
+    partes = composicao_de_kit(kwp, topologia, mao_de_obra, material_ca)
+    if partes is None:
+        st.caption(
+            f"A tabela não cobre {kwp:.1f} kWp em {TOPOLOGIAS.get(topologia, topologia)} "
+            f"— essa coluna vai até {potencia_maxima(topologia):.0f} kWp. O "
+            "investimento sai da curva do padrão de obra escolhido."
+        )
+        return
+
+    total = sum(partes.values())
+    colunas = st.columns(4)
+    _cartao(colunas[0], "Kit (equipamento)", _reais(partes["kit"]))
+    _cartao(colunas[1], "Mão de obra", _reais(partes["mao_de_obra"]))
+    _cartao(colunas[2], "Material CA", _reais(partes["material_ca"]))
+    _cartao(colunas[3], "Investimento", f"{_reais(total)} · {_reais(total / kwp)}/kWp")
+
+    com_bateria = preco_kit_com_bateria(kwp)
+    if com_bateria:
+        st.caption(
+            f"Conferência: o kit split-phase com 5 kWh de bateria embutidos custa "
+            f"{_reais(com_bateria)} nessa potência. O estudo **não** usa esse "
+            "número — ele dimensiona e precifica o armazenamento à parte, e somar "
+            "os dois cobraria a bateria duas vezes. Serve para comparar: se o "
+            "solar mais o banco do estudo saírem muito acima disto, ou o banco "
+            "ficou grande, ou o preço de armazenamento está velho."
+        )
+
+
+def _referencia_capex(
+    padrao: str, kwp: float,
+    topologia: str | None = None,
+    mao_de_obra: float | None = None,
+    material_ca: float | None = None,
+) -> str:
+    """
+    Mostra o R$/kWp que a escolha produz nessa potência.
 
     A curva tem ganho de escala, então a referência de tabela (medida em
     100 kWp) não é o número que vai sair. Esconder isso faria o usuário
     escolher "alto padrão" esperando R$ 4.705/kWp e receber R$ 4.105.
+
+    Com uma topologia de kit escolhida e potência dentro da tabela, quem manda
+    é a tabela, e o padrão de obra deixa de valer — dizer isso aqui evita que
+    o usuário mexa no seletor de padrão e não veja número nenhum mudar.
     """
     from .pv.financials import estimar_capex
 
     if kwp <= 0:
         return ""
-    total = estimar_capex(kwp, padrao=padrao)
+    total = estimar_capex(
+        kwp, padrao=padrao, topologia=topologia,
+        mao_de_obra_brl_kwp=mao_de_obra, material_ca_brl_kwp=material_ca,
+    )
+    if topologia:
+        from .pv.kits import capex_de_kit
+
+        if capex_de_kit(kwp, topologia, mao_de_obra or 0.0, material_ca or 0.0) is not None:
+            return (
+                f"Nessa potência ({kwp:.1f} kWp) o preço vem da **tabela de kit**, "
+                f"não do padrão de obra: {_reais(total / kwp)}/kWp, "
+                f"{_reais(total)} no total."
+            )
     return (
         f"Nessa potência ({kwp:.0f} kWp): {_reais(total / kwp)}/kWp, "
         f"{_reais(total)} no total."
@@ -2491,6 +2740,9 @@ def _montar_configuracao(
     considerar_bateria: bool = True,
     considerar_gerador: bool = False,
     padrao_capex: str = "padrao",
+    topologia_kit: str | None = None,
+    mao_de_obra_brl_kwp: float | None = None,
+    material_ca_brl_kwp: float | None = None,
     capex_fv_brl: float | None = None,
 ) -> ConfiguracaoEstudo:
     estado = st.session_state
@@ -2550,6 +2802,9 @@ def _montar_configuracao(
         considerar_bateria=considerar_bateria,
         considerar_gerador=considerar_gerador,
         padrao_capex=padrao_capex,
+        topologia_kit=topologia_kit,
+        mao_de_obra_brl_kwp=mao_de_obra_brl_kwp,
+        material_ca_brl_kwp=material_ca_brl_kwp,
         capex_fv_brl=capex_fv_brl,
         autonomia_alvo_h=float(autonomia),
         confiabilidade_alvo=float(confiabilidade),

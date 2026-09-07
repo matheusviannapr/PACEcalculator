@@ -202,6 +202,20 @@ class ConfiguracaoEstudo:
     #: nível "alto" foi calibrado numa obra real de 312 kWp fechada a
     #: R$ 4.104/kWp, contra os R$ 2.792/kWp que a curva média daria.
     padrao_capex: str = "padrao"
+    #: Topologia do kit fotovoltaico, quando o sistema cabe na tabela de preço
+    #: de varejo (:mod:`aurum.pv.kits`, até 40 kWp).
+    #:
+    #: Abaixo de 40 kWp o preço não sai de curva de escala: sai de tabela de
+    #: distribuidor, e a diferença entre um kit monofásico e um split-phase de
+    #: mesma potência passa de 50%. Vazio, ou acima de 40 kWp, vale a curva de
+    #: ``padrao_capex``.
+    topologia_kit: str | None = None
+    #: Mão de obra de instalação, em R$/kWp, somada ao preço do kit. Vazio usa
+    #: :data:`aurum.pv.kits.MAO_DE_OBRA_BRL_KWP`.
+    mao_de_obra_brl_kwp: float | None = None
+    #: Material do lado CA, em R$/kWp, também somado. Vazio usa
+    #: :data:`aurum.pv.kits.MATERIAL_CA_BRL_KWP`.
+    material_ca_brl_kwp: float | None = None
 
     # -- critério ----------------------------------------------------------
     autonomia_alvo_h: float = 12.0
@@ -809,6 +823,9 @@ def _comparar_fontes(
         malha=malha,
         capex_fv_brl=cfg.capex_fv_brl,
         padrao_capex=cfg.padrao_capex,
+        topologia_kit=cfg.topologia_kit,
+        mao_de_obra_brl_kwp=cfg.mao_de_obra_brl_kwp,
+        material_ca_brl_kwp=cfg.material_ca_brl_kwp,
         composicoes=fontes,
         semente=cfg.semente,
     )

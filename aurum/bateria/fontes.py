@@ -643,6 +643,9 @@ def comparar_fontes(
     malha: MalhaApagao | None = None,
     capex_fv_brl: float | None = None,
     padrao_capex: str | None = None,
+    topologia_kit: str | None = None,
+    mao_de_obra_brl_kwp: float | None = None,
+    material_ca_brl_kwp: float | None = None,
     composicoes: Sequence[Composicao] | None = None,
     dias_por_estacao: int = 45,
     semente: int = 20260902,
@@ -691,7 +694,12 @@ def comparar_fontes(
     capex_fv = (
         float(capex_fv_brl)
         if capex_fv_brl is not None
-        else estimar_capex(potencia_fv_kwp, padrao=padrao_capex)
+        else estimar_capex(
+            potencia_fv_kwp, padrao=padrao_capex,
+            topologia=topologia_kit,
+            mao_de_obra_brl_kwp=mao_de_obra_brl_kwp,
+            material_ca_brl_kwp=material_ca_brl_kwp,
+        )
     )
     capex_bat, capex_baterias = _capex_do_conjunto(conjunto, premissas)
     modelo_degradacao = (

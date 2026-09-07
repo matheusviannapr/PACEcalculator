@@ -319,6 +319,96 @@ class Segmento:
 
 
 MODELOS: dict[str, Segmento] = {
+    "residencia": Segmento(
+        "residencia", "Residência", "residencial",
+        (
+            # A sala é o centro da noite: TV, luz e o ar que só liga quando a
+            # família se junta. O rack de rede e o CFTV são o que não desliga
+            # nunca, e é por isso que os dois vão para o quadro de backup.
+            ModeloComodo("Sala de estar", 1, (
+                ("TV LED 50\"", 1, {"intervalo": "18:00 as 23:30"}),
+                ("Lâmpada LED bulbo 9 W", 6, {"intervalo": "18:00 as 23:30"}),
+                ("Ventilador de teto", 1,
+                 {"intervalo": "12:00 as 23:00", "probabilidade": 0.5}),
+                ("Ar-condicionado split 12.000 BTU", 1,
+                 {"intervalo": "19:00 as 23:30", "duracao_min": 2.0,
+                  "duracao_max": 4.5, "probabilidade": 0.55}),
+                ("Nobreak / rack de rede", 1),
+                ("Sistema de segurança / CFTV", 1),
+            ), essencial=True),
+            # A cozinha tem a única carga que roda 24 h e as duas refeições. O
+            # micro-ondas entra duas vezes de propósito: almoço e jantar são
+            # eventos separados, e uma janela esticada das 11 às 21 h faria a
+            # casa esquentar a comida às 16 h.
+            ModeloComodo("Cozinha", 1, (
+                ("Geladeira doméstica", 1),
+                ("Freezer horizontal", 1),
+                ("Forno de micro-ondas", 1,
+                 {"intervalo": "11:30 as 14:00", "probabilidade": 0.8}),
+                ("Forno de micro-ondas", 1,
+                 {"intervalo": "18:30 as 21:30", "probabilidade": 0.8}),
+                ("Coifa / exaustão de cozinha", 1,
+                 {"intervalo": "18:30 as 21:30", "probabilidade": 0.6}),
+                ("Lâmpada LED bulbo 9 W", 4, {"intervalo": "17:30 as 22:30"}),
+                ("Torneira elétrica", 1,
+                 {"intervalo": "06:00 as 22:00", "duracao_min": 0.15,
+                  "duracao_max": 0.4, "probabilidade": 0.6}),
+            ), essencial=True),
+            # Três quartos. O ar da noite é a carga que mais separa uma casa
+            # de alto padrão de uma casa média -- e é também a que mais
+            # facilmente estraga o modelo: uma janela das 21:30 às 07:00 com
+            # 4 a 8 h de duração jogava 30% da energia da casa na madrugada,
+            # contra 12% da curva de referência. Quem dorme desliga o ar de
+            # madrugada, ou o termostato o faz.
+            ModeloComodo("Quarto", 3, (
+                ("Ar-condicionado split 9.000 BTU", 1,
+                 {"intervalo": "21:30 as 03:00", "duracao_min": 2.5,
+                  "duracao_max": 5.0, "probabilidade": 0.55}),
+                ("Ventilador de teto", 1,
+                 {"intervalo": "13:00 as 18:00", "probabilidade": 0.4}),
+                ("Lâmpada LED bulbo 9 W", 2, {"intervalo": "18:30 as 23:30"}),
+                ("Notebook", 1, {"intervalo": "13:00 as 23:30",
+                                 "probabilidade": 0.7}),
+            )),
+            # O chuveiro é o pico da manhã da casa brasileira, e o segundo
+            # banho da noite é real: sem ele o modelo devolve uma manhã
+            # pesada demais em relação à noite.
+            ModeloComodo("Banheiro", 2, (
+                ("Chuveiro elétrico 5.500 W", 1,
+                 {"intervalo": "06:00 as 09:00", "duracao_min": 0.12,
+                  "duracao_max": 0.25, "probabilidade": 0.9}),
+                ("Chuveiro elétrico 5.500 W", 1,
+                 {"intervalo": "18:00 as 22:30", "duracao_min": 0.12,
+                  "duracao_max": 0.3, "probabilidade": 0.6}),
+                ("Lâmpada LED bulbo 9 W", 1, {"intervalo": "06:00 as 23:00"}),
+                ("Exaustor de banheiro", 1, {"intervalo": "06:00 as 23:00"}),
+            )),
+            ModeloComodo("Área de serviço", 1, (
+                ("Máquina de lavar doméstica", 1,
+                 {"intervalo": "08:00 as 19:00", "duracao_min": 0.8,
+                  "duracao_max": 1.5, "probabilidade": 0.5}),
+                ("Lâmpada LED bulbo 9 W", 2, {"intervalo": "17:30 as 21:00"}),
+            )),
+            # A bomba d'água é contínua no catálogo e liga por minutos: é ela
+            # que põe carga na madrugada sem inventar ninguém acordado. A da
+            # piscina é o contrário -- roda no meio do dia, e é a carga que
+            # dá à tarde da casa o peso que a curva de referência mostra e que
+            # um modelo só de gente presente não consegue explicar.
+            ModeloComodo("Área externa", 1, (
+                ("Bomba d'água 1 CV", 1),
+                ("Bomba de piscina", 1,
+                 {"intervalo": "09:00 as 16:00", "duracao_min": 3.0,
+                  "duracao_max": 5.0, "probabilidade": 0.8}),
+                ("Portão automático", 1),
+                ("Luminária LED alta potência 150 W", 2,
+                 {"intervalo": "18:00 as 06:00"}),
+            )),
+        ),
+        eui_kwh_m2_ano=45.0,
+        # Casa parada custa conforto, e não faturamento: comida estragando na
+        # geladeira é o único prejuízo que não volta quando a luz volta.
+        custo_interrupcao_brl_kwh=10.0,
+    ),
     "hotel": Segmento(
         "hotel", "Hotel / pousada", "hotel",
         (

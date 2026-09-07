@@ -215,21 +215,50 @@ def estimar_capex(
     defaults: SolarDefaults | None = None,
     referencia_brl_kwp: float | None = None,
     padrao: str | None = None,
+    topologia: str | None = None,
+    mao_de_obra_brl_kwp: float | None = None,
+    material_ca_brl_kwp: float | None = None,
 ) -> float:
     """
-    CAPEX indicativo, com ganho de escala.
+    CAPEX indicativo: tabela de kit no varejo, curva de escala acima dela.
 
-    O R$/kWp cai com o tamanho: engenharia, mobilização e projeto se diluem.
-    A curva usa expoente -0,12 sobre a razão de potência, calibrada em torno
-    de 100 kWp -- um sistema de 1 MWp sai cerca de 25% mais barato por kWp que
-    um de 10 kWp. É estimativa de pré-viabilidade, não cotação.
+    Até 40 kWp o preço não vem de curva nenhuma -- vem da tabela de kit do
+    distribuidor, com degraus por potência e colunas por topologia de inversor
+    (:mod:`aurum.pv.kits`). A diferença entre um kit monofásico e um
+    split-phase de mesma potência passa de 50%, e isso é topologia, não
+    tamanho: nenhuma curva de escala a captura. Basta informar ``topologia``
+    para a tabela ser consultada.
 
-    ``padrao`` escolhe a referência em :data:`PADROES_CAPEX`; um
-    ``referencia_brl_kwp`` explícito passa na frente dos dois, para quando
-    existe cotação de verdade -- que é sempre melhor que qualquer curva.
+    Acima de 40 kWp, e para topologia que a tabela não cobre naquela potência,
+    vale a curva de sempre: o R$/kWp cai com o tamanho porque engenharia,
+    mobilização e projeto se diluem. Expoente -0,12 sobre a razão de potência,
+    calibrada em torno de 100 kWp -- um sistema de 1 MWp sai cerca de 25% mais
+    barato por kWp que um de 10 kWp.
+
+    A ordem de precedência é a da confiança na origem do número:
+    ``referencia_brl_kwp`` explícito (cotação) vence a tabela de kit, que vence
+    ``padrao`` (:data:`PADROES_CAPEX`). Cotação de verdade sempre passa na
+    frente de qualquer curva.
+
+    Nos dois caminhos o resultado é **obra entregue**, e não material posto: ao
+    preço de kit são somadas a mão de obra e o material CA, ambos em R$/kWp.
+    Somadas, e não multiplicadas -- a equipe leva o mesmo tempo para instalar
+    um kit mono e um split-phase de mesma potência.
     """
     if potencia_kwp <= 0:
         return 0.0
+
+    if topologia and not referencia_brl_kwp:
+        from .kits import MAO_DE_OBRA_BRL_KWP, MATERIAL_CA_BRL_KWP, capex_de_kit
+
+        do_kit = capex_de_kit(
+            potencia_kwp, topologia,
+            MAO_DE_OBRA_BRL_KWP if mao_de_obra_brl_kwp is None else mao_de_obra_brl_kwp,
+            MATERIAL_CA_BRL_KWP if material_ca_brl_kwp is None else material_ca_brl_kwp,
+        )
+        if do_kit is not None:
+            return do_kit
+
     referencia = (
         float(referencia_brl_kwp)
         if referencia_brl_kwp
