@@ -51,6 +51,7 @@ __all__ = [
     "APURADO_EM",
     "capex_de_kit",
     "composicao_de_kit",
+    "fora_da_tabela",
     "potencia_maxima",
     "preco_kit",
     "preco_kit_com_bateria",
@@ -186,17 +187,22 @@ POTENCIA_MINIMA_KWP = min(TABELA_KIT)
 #: tamanho do telhado, e não com o preço do equipamento, que é a razão de ser
 #: uma parcela somada em vez de um percentual.
 #:
-#: **É arbitrado**, e é o número deste módulo que mais move o payback. Quem
-#: conhece a própria estrutura de custo deve trocá-lo.
-MAO_DE_OBRA_BRL_KWP = 500.0
+#: **Nasce em zero, de propósito.** Era o número mais arbitrado do módulo, e
+#: arbitrado é o que não deveria entrar num orçamento sem alguém ter dito de
+#: onde veio. Em zero, o investimento que sai do estudo é cotação de ponta a
+#: ponta — o kit da tabela mais os blocos de bateria — e quem conhece a
+#: própria estrutura de custo informa o valor na tela.
+MAO_DE_OBRA_BRL_KWP = 0.0
 
 #: Material do lado CA, em R$/kWp.
 #:
 #: Cabo CA do inversor ao quadro, disjuntores, DPS, quadro de proteção,
 #: eletroduto e aterramento -- tudo que o kit não traz porque depende da
-#: distância até o padrão de entrada. Também arbitrado, e também por kWp: numa
-#: instalação com o inversor longe do quadro, sobe.
-MATERIAL_CA_BRL_KWP = 300.0
+#: distância até o padrão de entrada. Também por kWp: numa instalação com o
+#: inversor longe do quadro, sobe.
+#:
+#: Nasce em zero pela mesma razão que a mão de obra.
+MATERIAL_CA_BRL_KWP = 0.0
 
 
 def topologia_para_rede(tensao_rede_v: float, monofasico: bool = False) -> str:
@@ -324,6 +330,34 @@ def preco_da_bateria(
     return blocos_de_bateria(energia_kwh, bloco_kwh) * max(0.0, float(bloco_brl))
 
 
+def fora_da_tabela(potencia_kwp: float, topologia: str) -> str | None:
+    """
+    O aviso de quem cruzou a fronteira das duas bases de preço.
+
+    Abaixo do alcance da coluna o preço é **equipamento posto** — o kit do
+    distribuidor. Acima dela vale a curva de R$/kWp, que é **obra entregue**.
+    Enquanto a mão de obra entrava com algum valor, a diferença entre as duas
+    ficava em poucos por cento e ninguém precisava saber disso; com a obra em
+    zero, o degrau passa de 30%, e um sistema de 41 kWp aparece um terço mais
+    caro que um de 40. A diferença não é do sistema — é do que cada número
+    inclui, e é isso que o aviso diz.
+
+    Devolve ``None`` quando não há fronteira cruzada, que é o caso comum.
+    """
+    if not topologia:
+        return None
+    teto = potencia_maxima(topologia)
+    if not teto or potencia_kwp <= teto:
+        return None
+    return (
+        f"O sistema tem {potencia_kwp:.1f} kWp e a tabela de kit vai até "
+        f"{teto:.0f} kWp em {TOPOLOGIAS.get(topologia, topologia)}. Acima disso o "
+        "investimento vem da curva de R$/kWp, que é obra entregue — inclui mão de "
+        "obra, projeto, ART e margem —, enquanto abaixo dela o número é equipamento "
+        "posto. As duas bases não são comparáveis entre si."
+    )
+
+
 def capex_de_kit(
     potencia_kwp: float,
     topologia: str = "mono_bifasico",
@@ -374,15 +408,16 @@ def composicao_de_kit(
     if kit is None:
         return None
     kwp = float(potencia_kwp)
-    partes = {
+    # Parcela zerada não vira linha: uma linha de R$ 0 numa tabela de
+    # composição não informa nada e ainda sugere que alguém esqueceu de
+    # preencher. Quem não informou mão de obra não a vê no documento.
+    candidatas = {
         "kit": kit,
         "mao_de_obra": max(0.0, float(mao_de_obra_brl_kwp)) * kwp,
         "material_ca": max(0.0, float(material_ca_brl_kwp)) * kwp,
+        "bateria": preco_da_bateria(bateria_kwh, bloco_kwh, bloco_brl),
     }
-    bateria = preco_da_bateria(bateria_kwh, bloco_kwh, bloco_brl)
-    if bateria > 0:
-        partes["bateria"] = bateria
-    return partes
+    return {chave: valor for chave, valor in candidatas.items() if valor > 0}
 
 
 def linhas_da_tabela(topologias: Iterable[str] | None = None) -> list[dict[str, object]]:

@@ -1674,11 +1674,29 @@ def _premissa_de_capex(estudo: ResultadoEstudo, comparacao) -> str:
             "degraus e depende da topologia do inversor — um kit split-phase custa "
             "mais de 50% acima de um mono da mesma potência —, e nenhuma curva de "
             "escala representa isso, porque é topologia e não tamanho.\n\n"
-            f"O kit é equipamento posto: {_brl(partes_do_kit['kit'])}. A ele somam-se "
-            f"{_brl(partes_do_kit['mao_de_obra'])} de mão de obra (equipe, estrutura "
-            f"fora do kit, projeto, ART e homologação) e "
-            f"{_brl(partes_do_kit['material_ca'])} de material do lado CA (cabo até o "
-            f"quadro, disjuntores, DPS, eletroduto e aterramento). Total de "
+        )
+        # As parcelas são citadas conforme existem. Zeradas, elas somem da
+        # composição — uma linha de R$ 0 não informa nada — e citá-las por
+        # nome quebrava a frase.
+        descricoes = {
+            "kit": "de kit fotovoltaico (módulos, inversor híbrido e estrutura)",
+            "bateria": "de banco de baterias, contado em blocos de expansão",
+            "mao_de_obra": ("de mão de obra (equipe, estrutura fora do kit, projeto, "
+                            "ART e homologação)"),
+            "material_ca": ("de material do lado CA (cabo até o quadro, disjuntores, "
+                            "DPS, eletroduto e aterramento)"),
+        }
+        citadas = [
+            f"{_brl(valor)} {descricoes[chave]}"
+            for chave, valor in partes_do_kit.items()
+            if chave in descricoes
+        ]
+        if len(citadas) > 1:
+            lista_das_parcelas = ", ".join(citadas[:-1]) + " e " + citadas[-1]
+        else:
+            lista_das_parcelas = citadas[0] if citadas else ""
+        origem += (
+            f"O investimento se compõe de {lista_das_parcelas}. Total de "
             f"{_brl(total)} para {_n(kwp, 1, 'kWp')}, ou {_brl(total / kwp)}/kWp."
         )
     else:
@@ -1728,14 +1746,29 @@ def _premissa_de_capex(estudo: ResultadoEstudo, comparacao) -> str:
             blocos_de_bateria,
         )
 
-        detalhe = (
-            "O preço do kit e o do bloco de bateria são cotação de distribuidor, com "
-            "data. A mão de obra e o material CA são premissas do instalador, em "
-            "R$/kWp — somadas e não aplicadas como percentual, porque a equipe leva o "
-            "mesmo tempo para montar um kit caro e um barato de mesma potência. São "
-            "elas que mudam de uma empresa para outra, e é nelas que uma cotação de "
-            "verdade deve entrar primeiro."
-        )
+        tem_obra = bool(partes_do_kit.get("mao_de_obra") or partes_do_kit.get("material_ca"))
+        if tem_obra:
+            detalhe = (
+                "O preço do kit e o do bloco de bateria são cotação de distribuidor, "
+                "com data. A mão de obra e o material CA são premissas do instalador, "
+                "em R$/kWp — somadas e não aplicadas como percentual, porque a equipe "
+                "leva o mesmo tempo para montar um kit caro e um barato de mesma "
+                "potência. São elas que mudam de uma empresa para outra."
+            )
+        else:
+            # Sem as duas parcelas, o número é material posto. Dizer isso onde o
+            # número aparece não é ressalva de rodapé: um payback calculado sobre
+            # equipamento e apresentado como obra entregue é otimista, e o erro
+            # não se anuncia.
+            detalhe = (
+                "Este valor é de equipamento posto, e não de obra entregue: o kit "
+                "do distribuidor mais os blocos de bateria, ambos com cotação e data. "
+                "Não estão aqui a mão de obra, a estrutura fora do kit, o projeto, a "
+                "ART, a homologação na distribuidora, o frete até a obra nem a margem. "
+                "O payback e o valor presente deste estudo se referem, portanto, ao "
+                "custo do material — some as suas parcelas de obra antes de levar o "
+                "número a uma proposta comercial."
+            )
         if partes_do_kit.get("bateria"):
             quantos = blocos_de_bateria(banco_kwh)
             detalhe += (

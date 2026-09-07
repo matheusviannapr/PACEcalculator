@@ -142,16 +142,28 @@ def test_acima_de_40_kwp_a_curva_volta_sozinha():
     assert com > 0
 
 
-def test_a_transicao_em_40_kwp_nao_da_salto():
+def test_a_fronteira_da_tabela_e_avisada_e_nao_disfarcada():
     """
-    Um degrau grande em 40 kWp faria o estudo recomendar 39,9 kWp por preço.
+    As duas bases de preço não são comparáveis, e o degrau é grande.
 
-    Não se exige continuidade perfeita — são duas fontes diferentes —, mas o
-    salto tem de ser pequeno o bastante para não distorcer a escolha.
+    Abaixo do alcance da tabela o número é **equipamento posto**; acima dela
+    vale a curva de R$/kWp, que é **obra entregue**. Enquanto a mão de obra
+    entrava com algum valor, a diferença ficava em poucos por cento e ninguém
+    precisava saber; com a obra em zero, o degrau passa de 30%.
+
+    Disfarçar isso — interpolando entre as duas, ou estendendo a tabela — seria
+    o pior dos mundos, porque o degrau passaria a parecer um resultado. O que
+    se garante aqui é que ele existe e que vem acompanhado de aviso.
     """
-    antes = estimar_capex(40.0, padrao="padrao", topologia="mono_bifasico") / 40.0
-    depois = estimar_capex(40.5, padrao="padrao", topologia="mono_bifasico") / 40.5
-    assert abs(depois / antes - 1.0) < 0.10
+    from aurum.pv.kits import fora_da_tabela
+
+    dentro = estimar_capex(40.0, padrao="padrao", topologia="mono_bifasico") / 40.0
+    fora = estimar_capex(40.5, padrao="padrao", topologia="mono_bifasico") / 40.5
+    assert fora > dentro, "a curva de obra entregue tem de ficar acima do kit"
+
+    assert fora_da_tabela(40.0, "mono_bifasico") is None
+    aviso = fora_da_tabela(40.5, "mono_bifasico")
+    assert aviso and "não são comparáveis" in aviso
 
 
 def test_referencia_explicita_vence_a_tabela():

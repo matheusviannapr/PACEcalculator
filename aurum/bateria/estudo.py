@@ -585,6 +585,12 @@ def executar_estudo(cfg: ConfiguracaoEstudo, progresso=None) -> ResultadoEstudo:
         if serie.aviso:
             avisos.append(serie.aviso)
         kwp, avisos_fv = _dimensionar_fv(cfg, ensemble_total, serie)
+        if cfg.topologia_kit and cfg.capex_fv_brl is None:
+            from ..pv.kits import fora_da_tabela
+
+            aviso_fronteira = fora_da_tabela(kwp, cfg.topologia_kit)
+            if aviso_fronteira:
+                avisos_fv.append(aviso_fronteira)
         avisos.extend(avisos_fv)
 
     # 3. triagem por potência ---------------------------------------------

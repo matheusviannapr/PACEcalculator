@@ -146,11 +146,21 @@ def test_a_curva_e_a_media_ponderada_e_nao_a_do_dimensionante(comparacao):
 
 
 def test_cada_cenario_tem_o_seu_investimento(comparacao):
-    """Comparar um sistema só sob três consumos responderia outra pergunta."""
+    """
+    Comparar um sistema só sob três consumos responderia outra pergunta.
+
+    O investimento **não** cresce sempre com o consumo, e isso não é defeito: a
+    tabela de kit tem um piso, porque inversor, estrutura e projeto não
+    encolhem com a potência. Numa casa pequena os três cenários podem cair no
+    mesmo degrau de 5 kWp e custar o mesmo — o que o estudo tem a dizer, ali, é
+    que o cenário mais leve não economiza nada em equipamento.
+    """
     for cenario in comparacao.cenarios:
         assert cenario.capex_sem_bateria_brl > 0, cenario.nome
         assert cenario.capex_com_bateria_brl >= cenario.capex_sem_bateria_brl
-    assert comparacao.teto.capex_com_bateria_brl > comparacao.piso.capex_com_bateria_brl
+    assert comparacao.teto.capex_com_bateria_brl >= comparacao.piso.capex_com_bateria_brl
+    # O que sempre difere é a potência, porque ela sai de uma divisão.
+    assert comparacao.teto.potencia_fv_kwp > comparacao.piso.potencia_fv_kwp
 
 
 def test_a_amplitude_mede_o_quanto_a_escolha_importa(comparacao):
@@ -158,8 +168,9 @@ def test_a_amplitude_mede_o_quanto_a_escolha_importa(comparacao):
     assert amplitude["consumo"] > 1.0
     assert amplitude["solar_kwp"] == pytest.approx(amplitude["consumo"], rel=1e-6)
     # O investimento varia menos que o consumo: o banco quase não muda entre os
-    # cenários, porque o quadro de backup é refrigeração e rede.
-    assert amplitude["capex"] < amplitude["consumo"]
+    # cenários (o quadro de backup é refrigeração e rede) e a tabela de kit tem
+    # um piso abaixo do qual o preço não cai.
+    assert amplitude["capex"] <= amplitude["consumo"]
 
 
 def test_a_tabela_sai_pronta_para_o_relatorio(comparacao):
