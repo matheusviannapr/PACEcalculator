@@ -22,12 +22,14 @@ from aurum.demanda.biblioteca import COLUNAS, linha_de_planilha
 
 def _tabela(itens) -> pd.DataFrame:
     """``(equipamento, quantidade, criticidade, ajustes)`` → tabela do cenário."""
-    linhas = []
-    for nome, quantidade, criticidade, ajustes in itens:
-        linha = linha_de_planilha(nome, quantidade, **ajustes)
-        linha["criticidade"] = criticidade
-        linhas.append(linha)
-    return pd.DataFrame(linhas, columns=[*COLUNAS, "criticidade"])
+    # A criticidade vai como ajuste, e não como coluna acrescentada: ela passou
+    # a fazer parte de COLUNAS, e somá-la de novo criava uma coluna duplicada —
+    # que o pandas devolve como Series e derruba tudo adiante.
+    return pd.DataFrame(
+        [linha_de_planilha(nome, quantidade, criticidade=criticidade, **ajustes)
+         for nome, quantidade, criticidade, ajustes in itens],
+        columns=COLUNAS,
+    )
 
 
 @pytest.fixture(scope="module")

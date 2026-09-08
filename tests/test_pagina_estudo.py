@@ -266,10 +266,16 @@ def test_erro_de_carga_bloqueia_e_aponta_a_linha():
     cenario = at.session_state["e_cenario"]
     primeiro = next(iter(cenario.comodos))
     tabela = cenario.comodos[primeiro].copy()
-    tabela.loc[len(tabela)] = [
-        "Bomba sem duração", 750, 1, "dinâmico", "08:00 as 18:00",
-        1.0, 1.0, np.nan, np.nan, np.nan,
-    ]
+    # Por nome, e não por posição: a grade de cargas ganha coluna de tempos em
+    # tempos — a de criticidade foi a última —, e uma linha montada
+    # posicionalmente quebra a cada uma delas sem que nada esteja errado.
+    tabela.loc[len(tabela)] = {
+        "Equipamento": "Bomba sem duração", "Potência": 750, "Quantidade": 1,
+        "Tipo de intervalo": "dinâmico", "intervalo": "08:00 as 18:00",
+        "probabilidade": 1.0, "FD": 1.0,
+        "duracao_min": np.nan, "duracao_max": np.nan, "modo_fixo": np.nan,
+        "criticidade": "NC",
+    }
     cenario.comodos[primeiro] = tabela
     at.run()
     assert not at.exception, at.exception
@@ -391,14 +397,18 @@ def test_desligar_solar_descarta_o_que_ja_foi_dimensionado():
     assert at.session_state["e_telhado"] is None
 
 
-def test_tirar_um_ambiente_do_backup_e_definitivo():
+def test_tirar_um_nivel_do_backup_e_definitivo():
     """
     Desmarcar tinha de ser feito duas vezes, e às vezes voltava tudo.
 
     O widget usava `default=`, que reimpõe o padrão a cada re-execução. Como
-    lista vazia é falsa em Python, `[] or cenario.essenciais or todos` caía no
-    terceiro termo: tirar o último ambiente devolvia a lista inteira. Com
-    `key=`, o estado é do widget e a escolha do usuário manda.
+    lista vazia é falsa em Python, `[] or presentes[:2]` cai no segundo termo:
+    tirar o último nível devolvia a lista inteira. Com `key=` e o estado
+    semeado uma vez, a escolha do usuário manda.
+
+    O recorte passou a ser por criticidade e não por ambiente — marcar
+    "Cozinha" levava a geladeira e o forno de 4 kW juntos —, e a lição
+    continua valendo na unidade nova.
     """
     at = _ate_o_consumo(_abrir())
     _continuar(at)                       # consumo -> telhado
@@ -408,19 +418,40 @@ def test_tirar_um_ambiente_do_backup_e_definitivo():
     _por_rotulo(at.button, "Analisar com bateria").click().run()
     assert at.session_state["e_passo"] == BACKUP
 
-    ambientes = at.multiselect[0]
-    assert len(ambientes.value) > 1, "o modelo precisa vir com mais de um ambiente"
+    niveis = at.multiselect[0]
+    assert len(niveis.value) > 1, "o padrão precisa trazer mais de um nível"
 
-    # Tira todos menos um, e depois o último.
-    ambientes.set_value([ambientes.value[0]]).run()
+    niveis.set_value([niveis.value[0]]).run()
     assert not at.exception, at.exception
-    assert len(at.session_state["e_essenciais"]) == 1
+    assert len(at.session_state["e_criticidades_sel"]) == 1
 
     at.multiselect[0].set_value([]).run()
     assert not at.exception, at.exception
-    assert at.session_state["e_essenciais"] == [], "o vazio tem de permanecer vazio"
+    assert at.session_state["e_criticidades_sel"] == [], "o vazio tem de permanecer vazio"
     # E a tela diz o que falta, em vez de repovoar a lista sozinha.
-    assert any("ao menos um ambiente" in str(c.value).lower() for c in at.caption)
+    texto = " ".join(str(c.value).lower() for c in at.caption)
+    assert "criticidade" in texto
+
+
+def test_o_backup_e_recortado_por_equipamento_e_nao_por_ambiente():
+    """
+    A diferença que muda o inversor, agora também para cenário de modelo.
+
+    Na cozinha, a geladeira é crítica e o forno de 4 kW não. Recortando por
+    ambiente, os dois entram; por criticidade, entra só a geladeira. Antes
+    desta mudança, só quem importava uma vistoria técnica tinha esse recorte.
+    """
+    at = _ate_o_consumo(_abrir())
+    cenario = at.session_state["e_cenario"]
+    assert cenario.tem_criticidade, "o modelo de segmento traz criticidade"
+
+    cenario.criticidades_essenciais = ("MC", "C")
+    total = cenario.potencia_instalada_w()
+    backup = cenario.potencia_instalada_w(True)
+    assert 0 < backup < total * 0.25, (
+        f"o quadro de backup ficou em {backup / total:.0%} da instalação — o recorte "
+        "por criticidade tem de deixar de fora a carga de alta potência"
+    )
 
 
 def test_custo_da_interrupcao_nasce_sugerido_e_nao_zerado():

@@ -70,7 +70,76 @@ ARQUIVO_TIPICOS = RAIZ_PERFIS / "typical_load_profiles.json"
 COLUNAS = [
     "Equipamento", "Potência", "Quantidade", "Tipo de intervalo", "intervalo",
     "probabilidade", "FD", "duracao_min", "duracao_max", "modo_fixo",
+    "criticidade",
 ]
+
+#: Criticidade por categoria, quando o nome do equipamento não diz mais.
+#:
+#: É o que decide o que entra no quadro de backup, e portanto o tamanho do
+#: inversor. Recortar por ambiente — o comportamento anterior para cenários de
+#: modelo — levava a geladeira e o forno de 4 kW juntos por estarem na mesma
+#: cozinha, e dobrava o inversor por causa de um equipamento que ninguém
+#: precisa no apagão.
+CRITICIDADE_POR_CATEGORIA: dict[str, str] = {
+    "Refrigeração": "C",       # comida estraga, e o prejuízo não volta
+    "Elevação": "C",           # gente presa
+    "Saúde": "MC",             # segurança de vida
+    "Escritório e TI": "P",
+    "Iluminação": "P",
+    "Climatização": "P",       # conforto: o cliente sente falta e a casa não para
+    "Outros": "P",
+    "Motores e bombas": "NC",
+    "Cozinha": "NC",           # alta potência, e pode esperar a rede voltar
+    "Aquecimento de água": "NC",
+    "Lavanderia": "NC",
+    "Industrial": "NC",
+}
+
+#: As exceções, por nome. Onde a categoria erraria, e erraria feio.
+CRITICIDADE_POR_EQUIPAMENTO: dict[str, str] = {
+    # Rede e segurança não admitem interrupção, e consomem quase nada — é essa
+    # combinação que faz o quadro de backup ser barato.
+    "Nobreak / rack de rede": "MC",
+    "Servidor de rack": "MC",
+    "Sistema de segurança / CFTV": "MC",
+    "Central de alarme": "MC",
+    "Iluminação de emergência": "MC",
+    # Água: a casa fica sem água antes de ficar sem luz, na percepção de quem
+    # mora nela.
+    "Bomba d'água 1 CV": "C",
+    "Bomba d'água 3 CV": "C",
+    "Bomba de recalque 5 CV": "C",
+    # Câmara fria é refrigeração de estoque, e o degelo é o que a mantém.
+    "Câmara fria (unidade condensadora)": "C",
+    "Degelo de câmara fria": "C",
+    "Portão automático": "P",
+    # Piscina é conforto que espera; carro elétrico carrega quando a luz volta.
+    "Bomba de piscina": "NC",
+    "Carregador de veículo elétrico 7 kW": "NC",
+}
+
+#: Onde a criticidade não é conhecida. Fica de fora do backup por omissão, que
+#: é o lado seguro: um equipamento a mais no quadro encarece o inversor, e um a
+#: menos aparece na conversa com o cliente antes da compra.
+CRITICIDADE_PADRAO = "NC"
+
+
+def criticidade_sugerida(nome: str) -> str:
+    """
+    O nível sugerido para um equipamento do catálogo.
+
+    Sugestão, e não veredito: a coluna é editável na tela de cargas, e a
+    vistoria técnica, quando existe, passa por cima dela. Quem esteve no
+    imóvel sabe mais que uma regra por categoria — mas uma regra por categoria
+    sabe mais que o silêncio, que era o que havia antes.
+    """
+    especifica = CRITICIDADE_POR_EQUIPAMENTO.get(nome)
+    if especifica:
+        return especifica
+    item = next((e for e in EQUIPAMENTOS if e["nome"] == nome), None)
+    if item is None:
+        return CRITICIDADE_PADRAO
+    return CRITICIDADE_POR_CATEGORIA.get(item["categoria"], CRITICIDADE_PADRAO)
 
 #: Blocos de seis horas usados na conferência contra a curva de referência.
 PERIODOS = ("madrugada", "manhã", "tarde", "noite")
@@ -261,6 +330,11 @@ def linha_de_planilha(nome_equipamento: str, quantidade: int = 1, **ajustes: Any
         "duracao_min": float(item["duracao_min"]) if item["duracao_min"] is not None else np.nan,
         "duracao_max": float(item["duracao_max"]) if item["duracao_max"] is not None else np.nan,
         "modo_fixo": item["modo_fixo"],
+        # A criticidade acompanha a linha desde a origem. Sem ela, o quadro de
+        # backup de um cenário de modelo tinha de ser recortado por ambiente —
+        # e recortar por ambiente leva a geladeira e o forno de 4 kW juntos,
+        # por estarem na mesma cozinha.
+        "criticidade": ajustes.get("criticidade") or criticidade_sugerida(item["nome"]),
     }
 
 

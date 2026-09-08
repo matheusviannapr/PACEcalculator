@@ -146,6 +146,11 @@ _PADROES: dict[str, Any] = {
     "e_inclinacao": 0.0,
     "e_azimute": 0.0,
     "e_exigir_pvgis": False,
+    #: Níveis de criticidade que entram no quadro de backup, e as opções que
+    #: existiam quando a escolha foi feita.
+    "e_criticidades_sel": None,
+    "e_criticidades": [],
+    "e_opcoes_criticidade": None,
     #: Coluna da tabela de kit; vazio volta para a curva de R$/kWp.
     "e_topologia_kit": "",
     #: O bloco de expansão de bateria: quanto de energia e quanto custa.
@@ -1448,6 +1453,112 @@ def _para_latex(formula: str) -> str:
 # ============================================================================
 # Passo 3 — backup
 # ============================================================================
+def _selecionar_carga_de_backup(cenario: Cenario) -> None:
+    """
+    O que fica ligado no inversor quando a rede cai — por criticidade.
+
+    Marcar ambientes levava o ambiente inteiro, e ambiente não é unidade de
+    decisão: a geladeira e o forno de 4 kW estão os dois na cozinha, e só um
+    deles precisa atravessar o apagão. No primeiro caso real, o recorte por
+    equipamento deixou 1,95 kW de 31,50 kW instalados.
+
+    Vindo de vistoria técnica, não se pergunta nada: quem esteve no imóvel já
+    classificou item a item, e repetir a pergunta convidaria a sobrescrever
+    trabalho de campo com um palpite de tela.
+    """
+    from .demanda.vistoria import CRITICIDADES, DESCRICAO_CRITICIDADE
+
+    if not cenario.tem_criticidade:
+        st.warning(
+            "Este levantamento não traz criticidade por equipamento, então o quadro "
+            "de backup não pode ser recortado item a item. Acrescente a coluna "
+            "`criticidade` na tela de cargas — ou importe uma vistoria técnica, que "
+            "já vem com ela."
+        )
+        return
+
+    por_nivel = cenario.por_criticidade()
+    potencias = (
+        por_nivel.groupby("criticidade")["potencia_w"].sum().to_dict()
+        if len(por_nivel) else {}
+    )
+    contagens = (
+        por_nivel.groupby("criticidade")["equipamento"].size().to_dict()
+        if len(por_nivel) else {}
+    )
+    presentes = [c for c in CRITICIDADES if c in potencias]
+
+    da_vistoria = st.session_state.get("e_vistoria") is not None
+    if da_vistoria:
+        # A vistoria já decidiu. Mostrar o que ela decidiu, e seguir.
+        corte = cenario.criticidades_essenciais or ("MC", "C")
+        st.success(
+            "A vistoria técnica classificou cada equipamento, e é essa classificação "
+            f"que monta o quadro de backup: entram os níveis **{', '.join(corte)}**. "
+            "Não há o que escolher aqui — quem esteve no imóvel já escolheu."
+        )
+    else:
+        st.caption(
+            "Escolha **até que nível de criticidade** entra no quadro de backup. O "
+            "recorte é por equipamento, e não por ambiente: a geladeira e o forno de "
+            "4 kW estão os dois na cozinha, e só um deles precisa atravessar o apagão. "
+            "É esse recorte que decide o tamanho do inversor, que é o que domina o "
+            "preço."
+        )
+        # `key=` sozinho, semeando o estado antes. Com `default=`, cada
+        # re-execução reimpõe o padrão por cima do que o usuário acabou de
+        # fazer, e desmarcar o último nível devolveria a lista inteira —
+        # `[] or presentes[:2]` cai no segundo termo, porque lista vazia é
+        # falsa em Python. É o mesmo defeito que a versão por ambiente teve, e
+        # o sintoma era ter de clicar duas vezes.
+        if st.session_state.get("e_opcoes_criticidade") != presentes:
+            anterior = st.session_state.get("e_criticidades_sel")
+            if anterior is None:
+                anterior = list(cenario.criticidades_essenciais or ("MC", "C"))
+            st.session_state["e_criticidades_sel"] = (
+                [c for c in anterior if c in presentes] or presentes[:2]
+            )
+            st.session_state["e_opcoes_criticidade"] = presentes
+
+        escolha = st.multiselect(
+            "Níveis que entram no backup",
+            options=presentes,
+            format_func=lambda c: f"{c} — {DESCRICAO_CRITICIDADE.get(c, c)}",
+            key="e_criticidades_sel",
+            label_visibility="collapsed",
+        )
+        corte = tuple(c for c in CRITICIDADES if c in escolha)
+        cenario.criticidades_essenciais = corte
+        st.session_state["e_criticidades"] = list(corte)
+
+    # A tabela por nível é o que torna a escolha concreta: ver que 81% da
+    # potência está em "não crítico" é o argumento de por que o quadro é
+    # pequeno, e vale mais que qualquer explicação.
+    total = sum(potencias.values()) or 1.0
+    st.dataframe(
+        pd.DataFrame([
+            {
+                "nível": nivel,
+                "significado": DESCRICAO_CRITICIDADE.get(nivel, nivel),
+                "equipamentos": int(contagens.get(nivel, 0)),
+                "potência (kW)": round(potencias.get(nivel, 0.0) / 1000.0, 2),
+                "% da instalação": f"{potencias.get(nivel, 0.0) / total:.0%}",
+                "no backup": "sim" if nivel in (cenario.criticidades_essenciais or ()) else "não",
+            }
+            for nivel in presentes
+        ]),
+        width="stretch", hide_index=True,
+    )
+
+    instalado = cenario.potencia_instalada_w() / 1000.0
+    backup = cenario.potencia_instalada_w(True) / 1000.0
+    colunas = st.columns(3)
+    _cartao(colunas[0], "Instalado total", f"{instalado:.1f} kW")
+    _cartao(colunas[1], "No quadro de backup", f"{backup:.2f} kW")
+    _cartao(colunas[2], "Fração no backup",
+            f"{backup / instalado:.0%}" if instalado else "—")
+
+
 def _passo_backup() -> None:
     cenario: Cenario | None = st.session_state["e_cenario"]
     if cenario is None:
@@ -1477,44 +1588,12 @@ def _passo_backup() -> None:
         _rodape()
         return
 
-    st.caption(
-        "Marque os ambientes que ficam ligados no inversor quando a rede cai. Um hotel "
-        "que põe só elevador, bombas e circulação no backup precisa de **um terço** do "
-        "inversor que a carga total pediria — e é o inversor que domina o preço."
-    )
-
-    # `key=` em vez de `default=`. Com `default=`, cada re-execução reimpõe o
-    # padrão por cima do que o usuário acabou de fazer: desmarcar o último
-    # ambiente devolvia a lista inteira, porque `[] or cenario.essenciais or
-    # todos` cai no terceiro termo — lista vazia é falsa em Python. O sintoma
-    # era ter de clicar duas vezes para tirar um ambiente.
-    opcoes = list(cenario.comodos)
-    if st.session_state.get("e_opcoes_essenciais") != opcoes:
-        # As opções mudaram (o usuário mexeu nas cargas): reaproveita o que
-        # ainda existe em vez de deixar o Streamlit quebrar com um valor órfão.
-        anterior = st.session_state.get("e_essenciais_sel")
-        if anterior is None:
-            anterior = st.session_state["e_essenciais"] or cenario.essenciais or opcoes
-        st.session_state["e_essenciais_sel"] = [c for c in anterior if c in opcoes]
-        st.session_state["e_opcoes_essenciais"] = opcoes
-
-    escolhidos = st.multiselect(
-        "Ambientes essenciais",
-        options=opcoes,
-        key="e_essenciais_sel",
-        placeholder="Escolha ao menos um ambiente",
-        label_visibility="collapsed",
-    )
-    cenario.essenciais = escolhidos
-    st.session_state["e_essenciais"] = escolhidos
-
-    if escolhidos:
-        total = cenario.potencia_instalada_w() / 1000.0
-        backup = cenario.potencia_instalada_w(True) / 1000.0
-        colunas = st.columns(3)
-        _cartao(colunas[0], "Instalado total", f"{total:.1f} kW")
-        _cartao(colunas[1], "No quadro de backup", f"{backup:.1f} kW")
-        _cartao(colunas[2], "Fração no backup", f"{backup / total:.0%}" if total else "—")
+    _selecionar_carga_de_backup(cenario)
+    # O que decide se o passo está pronto deixou de ser "há ambiente marcado"
+    # e passou a ser "há equipamento no quadro": é o mesmo critério dito na
+    # unidade certa, e vale igual para quem veio de vistoria e para quem
+    # escolheu os níveis aqui.
+    escolhidos = list(cenario.criticidades_essenciais or ())
 
     with st.expander("Ajustes avançados"):
         simulacoes = st.slider(
@@ -1550,7 +1629,7 @@ def _passo_backup() -> None:
         _mostrar_carga_de_backup()
 
     if not escolhidos:
-        pendencia = "escolher ao menos um ambiente"
+        pendencia = "escolher ao menos um nível de criticidade para o backup"
     elif not atualizado:
         pendencia = "simular a demanda com as cargas atuais"
     else:
@@ -2869,6 +2948,13 @@ def _montar_configuracao(
     # O quadro de backup por equipamento, quando a vistoria classificou. Sem
     # isto o estudo volta a recortar por ambiente, e a geladeira crítica
     # arrasta o forno de 4 kW junto.
+    # O corte de criticidade é escolhido no passo de backup, que roda depois
+    # do de análise — quando o cenário reescrito pela ocupação já foi criado.
+    # São objetos diferentes, e sem esta linha a escolha do usuário ficava no
+    # levantado e o estudo rodava com o corte anterior.
+    if cenario is not None and levantado is not None and cenario is not levantado:
+        cenario.criticidades_essenciais = levantado.criticidades_essenciais
+
     comodos_backup = instancias_backup = criticidade = None
     if cenario is not None and cenario.tem_criticidade:
         from .demanda.vistoria import DESCRICAO_CRITICIDADE

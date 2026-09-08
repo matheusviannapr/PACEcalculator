@@ -89,9 +89,13 @@ def converter(pacote: dict) -> Cenario:
         potencia = i.get('potInformada')
         if potencia is None or potencia == '':
             potencia = i.get('potTipica')
+        # A criticidade entra junto, na ordem de COLUNAS. A coleta HTML já a
+        # traz por equipamento, e é ela que monta o quadro de backup: sem
+        # trazê-la aqui, o recorte voltaria a ser por ambiente e levaria a
+        # geladeira e o forno de 4 kW no mesmo quadro.
         valores = [i['equipamento'], potencia, i.get('quantidade'), i.get('tipoInt'),
                    i.get('intervalo'), i.get('prob'), i.get('fd'), i.get('durMin'),
-                   i.get('durMax'), i.get('modo')]
+                   i.get('durMax'), i.get('modo'), i.get('criticidade') or 'NC']
         # Impede fórmulas originadas de texto ao abrir a planilha no Excel.
         if isinstance(valores[0], str) and valores[0].lstrip().startswith(('=', '+', '-', '@')):
             valores[0] = "'" + valores[0]

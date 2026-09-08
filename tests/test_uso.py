@@ -29,12 +29,14 @@ from aurum.demanda.cenario import Cenario
 def _casa() -> Cenario:
     """Uma casa pequena, com criticidade, para os três cenários morderem."""
     def tabela(itens):
-        linhas = []
-        for nome, quantidade, criticidade, ajustes in itens:
-            linha = linha_de_planilha(nome, quantidade, **ajustes)
-            linha["criticidade"] = criticidade
-            linhas.append(linha)
-        return pd.DataFrame(linhas, columns=[*COLUNAS, "criticidade"])
+        # A criticidade vai como ajuste, e não como coluna acrescentada: ela
+        # passou a fazer parte de COLUNAS, e somá-la de novo criava uma coluna
+        # duplicada — que o pandas devolve como Series e derruba tudo adiante.
+        return pd.DataFrame(
+            [linha_de_planilha(nome, quantidade, criticidade=criticidade, **ajustes)
+             for nome, quantidade, criticidade, ajustes in itens],
+            columns=COLUNAS,
+        )
 
     cenario = Cenario(
         nome="Casa de teste", segmento="residencia",

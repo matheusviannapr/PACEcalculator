@@ -202,8 +202,15 @@ def _tabela_do_comodo(linhas: Iterable[dict[str, Any]]) -> pd.DataFrame:
     for coluna in COLUNAS:
         if coluna not in tabela.columns:
             tabela[coluna] = np.nan
-    extras = [COLUNA_CRITICIDADE, COLUNA_COMODO, COLUNA_FATOR_PARTIDA]
-    return tabela[[*COLUNAS, *[c for c in extras if c in tabela.columns]]]
+    # `criticidade` passou a fazer parte de COLUNAS — todo equipamento do
+    # catálogo tem a sua, sugerida pela categoria. Repeti-la aqui como extra
+    # criava uma coluna duplicada, e o pandas devolve duplicata como Series:
+    # `linha["criticidade"]` deixava de ser um valor e derrubava tudo adiante.
+    extras = [
+        coluna for coluna in (COLUNA_CRITICIDADE, COLUNA_COMODO, COLUNA_FATOR_PARTIDA)
+        if coluna in tabela.columns and coluna not in COLUNAS
+    ]
+    return tabela[[*COLUNAS, *extras]]
 
 
 # ----------------------------------------------------------------------------
