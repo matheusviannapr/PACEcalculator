@@ -884,10 +884,14 @@ def _capex_do_conjunto(
     from .economia import _capex
 
     if topologia_kit == TOPOLOGIA_COM_BATERIA:
-        baterias = preco_da_bateria(conjunto.energia_util_kwh)
+        # Pela capacidade **nominal**, e não pela útil: o bloco é vendido pela
+        # placa, e um banco de 5 kWh nominais entrega 4,6 kWh úteis. Contar
+        # pelos úteis pedia um segundo bloco onde um basta.
+        baterias = preco_da_bateria(conjunto.capacidade_nominal_kwh)
         if baterias > 0:
-            instalado = baterias * (1.0 + premissas.instalacao_percent_do_equipamento)
-            return instalado, baterias
+            # Sem os 35% de instalação: o bloco já é preço de módulo pronto,
+            # com caixa, BMS e a instalação do módulo dentro.
+            return baterias, baterias
     return _capex(conjunto, premissas)
 
 

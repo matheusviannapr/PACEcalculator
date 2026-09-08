@@ -171,6 +171,54 @@ def _capa(estudo: ResultadoEstudo, capa: DadosCapa) -> str:
     ])
 
 
+def _resumo_dos_cenarios(estudo: ResultadoEstudo) -> str:
+    """
+    Os três níveis de uso, no resumo, sempre que se fala de energia.
+
+    Um consumo isolado esconde a única premissa deste estudo que nenhum cálculo
+    verifica: quanto a casa é usada. Repetir os três aqui, e não só na seção
+    própria, é o que impede o leitor de tomar o número do cenário simulado por
+    um fato medido.
+    """
+    uso = getattr(estudo, "uso", None)
+    if uso is None or len(getattr(uso, "cenarios", ())) < 2:
+        return ""
+
+    cfg = estudo.configuracao
+    diaria = float(cfg.consumo_anual_kwh) / 365.0 if cfg.consumo_anual_kwh else 0.0
+    linhas = []
+    for cenario in uso.cenarios:
+        # O cenário deste estudo é o que bate com a energia usada nas contas.
+        atual = abs(cenario.energia_diaria_kwh - diaria) < 0.5 if diaria else False
+        linhas.append((
+            Raw(rf"\textbf{{{esc(cenario.nome)}}}") if atual else cenario.nome,
+            _n(cenario.energia_diaria_kwh, 1, "kWh/dia"),
+            _n(cenario.energia_diaria_kwh * 30.0, 0, "kWh/mês"),
+            _n(cenario.potencia_fv_kwp, 1, "kWp"),
+            _n(cenario.banco_kwh, 1, "kWh"),
+            _brl(cenario.capex_com_bateria_brl),
+        ))
+    return "\n\n".join([
+        tabela(
+            ["Nível de uso", "Consumo", "Por mês", "Solar", "Banco", "Investimento"],
+            linhas,
+            alinhamento="p{4.2cm}rrrrr",
+            tamanho_fonte="scriptsize",
+            legenda=(
+                "Os três níveis de uso e o sistema de cada um — em negrito, o "
+                "cenário sobre o qual este documento foi calculado"
+            ),
+        ),
+        nota(
+            "Quanto a casa é usada é a única premissa deste estudo que nenhum "
+            "cálculo verifica, e é a que mais move o resultado. Por isso os três "
+            "níveis aparecem sempre que se fala de energia, e não uma vez só: o "
+            "número de um cenário simulado não é um fato medido, e a diferença "
+            "entre o mais leve e o mais pesado é de mais de duas vezes."
+        ),
+    ])
+
+
 def _sumario_executivo(estudo: ResultadoEstudo) -> str:
     cfg = estudo.configuracao
     partes = [secao("O que se conclui")]
@@ -191,13 +239,22 @@ def _sumario_executivo(estudo: ResultadoEstudo) -> str:
         # A energia diária é o número que o cliente reconhece — ele vê kWh na
         # conta, não kW. Sem ela, o resumo fala só de potência, e potência é a
         # grandeza que ninguém tem intuição para conferir.
+        #
+        # E é a energia **do cenário**, não a do perfil que dimensiona. O
+        # equipamento sai do pior dia, e está certo que saia; relatar o pior
+        # dia como se fosse o consumo da casa é outra coisa — fazia o estudo
+        # de "uso comum" abrir com 47 kWh/dia, que é o número da casa cheia.
         geral = estudo.ensemble_total.resumo()["geral"]
         geral_backup = estudo.ensemble_backup.resumo()["geral"]
+        diaria = (
+            float(cfg.consumo_anual_kwh) / 365.0 if cfg.consumo_anual_kwh
+            else float(geral["energia_diaria_media_kwh"])
+        )
         linhas = [
-            ("Consumo diário médio da instalação",
-             _n(geral["energia_diaria_media_kwh"], 1, "kWh/dia")),
-            ("Consumo mensal equivalente",
-             _n(geral["energia_diaria_media_kwh"] * 30, 0, "kWh/mês")),
+            ("Consumo diário médio da instalação", _n(diaria, 1, "kWh/dia")),
+            ("Consumo mensal equivalente", _n(diaria * 30.0, 0, "kWh/mês")),
+            ("Pico da instalação (P95, dimensiona o inversor)",
+             _n(geral["pico_p95_kw"], 2, "kW")),
             ("Consumo diário do quadro de backup",
              _n(geral_backup["energia_diaria_media_kwh"], 1, "kWh/dia")),
             *([("Sistema fotovoltaico", _n(estudo.potencia_fv_kwp, 1, "kWp"))]
@@ -210,16 +267,53 @@ def _sumario_executivo(estudo: ResultadoEstudo) -> str:
              f"{_n(conjunto.potencia_descarga_kw, 1, 'kW')} / "
              f"{_n(conjunto.potencia_pico_kw, 1, 'kW')} por "
              f"{_n(conjunto.inversor.duracao_pico_s, 0, 's')}"),
-            ("Investimento estimado", _brl(economico.capex_brl)),
-            ("Vida útil estimada do banco", _n(economico.vida_util_anos, 1, "anos")),
         ]
-        if economico.payback_anos:
-            linhas.append(("Retorno do investimento", _n(economico.payback_anos, 1, "anos")))
+
+        # O investimento do **arranjo completo**, e não só o do banco.
+        # `economia[conjunto]` precifica o armazenamento; quem lê "investimento
+        # estimado" entende o sistema inteiro, e a diferença entre os dois é o
+        # gerador fotovoltaico — que costuma ser a maior parte.
+        completo = None
+        if estudo.cenarios is not None:
+            completo = next(
+                (c for c in estudo.cenarios.cenarios
+                 if c.composicao.solar and c.composicao.bateria),
+                None,
+            )
+        if completo is not None:
+            linhas.append(("Investimento — solar e bateria", _brl(completo.capex_brl)))
+            linhas.append(("  do qual, o armazenamento", _brl(economico.capex_brl)))
+        else:
+            linhas.append(("Investimento no armazenamento", _brl(economico.capex_brl)))
+        linhas.append(("Vida útil estimada do banco",
+                       _n(economico.vida_util_anos, 1, "anos")))
+
+        retorno = completo.payback_anos if completo is not None else economico.payback_anos
+        if retorno:
+            linhas.append(("Retorno do investimento", _n(retorno, 1, "anos")))
         partes.append(tabela(
             ["Item", "Valor"], linhas,
             alinhamento="p{6.6cm}p{8.2cm}",
             legenda="Resumo da solução recomendada",
         ))
+
+        partes.append(nota(
+            "O inversor entrega "
+            f"{_n(conjunto.potencia_descarga_kw, 1, 'kW')} de forma contínua e "
+            f"{_n(conjunto.potencia_pico_kw, 1, 'kW')} por "
+            f"{_n(conjunto.inversor.duracao_pico_s, 0, 'segundos')}. A segunda "
+            "não é um erro de digitação nem uma potência que se possa usar: é a "
+            "sobrecarga de partida, e ela existe porque motor não liga na "
+            "potência em que trabalha. O compressor da geladeira, a bomba e o "
+            "ar-condicionado puxam de três a seis vezes a corrente nominal no "
+            "instante em que arrancam, por menos de um segundo. Um inversor sem "
+            "essa folga desarma ao ligar a geladeira, mesmo sobrando energia no "
+            "banco."
+        ))
+
+        # Os três cenários sempre que se fala de energia: um número isolado de
+        # consumo esconde a única premissa que o cálculo não verifica.
+        partes.append(_resumo_dos_cenarios(estudo))
     else:
         melhor = estudo.ranking.sort_values("autonomia_garantida_h", ascending=False).iloc[0]
         partes.append(caixa_aviso(
@@ -664,10 +758,22 @@ def _secao_demanda(estudo: ResultadoEstudo, figuras: dict[str, Path]) -> str:
          _n(backup["geral"]["pico_medio_kw"], 1, "kW")),
         ("Pico diário P95", _n(total["geral"]["pico_p95_kw"], 1, "kW"),
          _n(backup["geral"]["pico_p95_kw"], 1, "kW")),
-        ("Consumo diário médio", _n(total["geral"]["energia_diaria_media_kwh"], 0, "kWh"),
+        # Dois números, e são coisas diferentes: o dia simulado é o do perfil
+        # que dimensiona — o pior —, e a média ponderada é o que a casa gasta
+        # e o que a conta de luz vê. Mostrar só o primeiro fazia um estudo de
+        # uso comum abrir com o consumo da casa cheia.
+        ("Consumo do dia que dimensiona",
+         _n(total["geral"]["energia_diaria_media_kwh"], 0, "kWh"),
          _n(backup["geral"]["energia_diaria_media_kwh"], 0, "kWh")),
+        *([(
+            "Consumo médio do cenário (o da conta de luz)",
+            _n(float(cfg.consumo_anual_kwh) / 365.0, 0, "kWh"),
+            "--",
+        )] if cfg.consumo_anual_kwh else []),
         ("Consumo anual estimado",
-         _n(total["geral"]["energia_diaria_media_kwh"] * 365, 0, "kWh"),
+         _n(float(cfg.consumo_anual_kwh)
+            if cfg.consumo_anual_kwh
+            else total["geral"]["energia_diaria_media_kwh"] * 365, 0, "kWh"),
          _n(backup["geral"]["energia_diaria_media_kwh"] * 365, 0, "kWh")),
     ]
     partes.append(tabela(
@@ -855,11 +961,21 @@ def _analise_completa(analise, figuras: dict[str, Path]) -> list[str]:
                 for linha in analise.por_estacao.itertuples()
             ],
             alinhamento="lrrrrr",
-            legenda="Demanda por estação do ano",
+            legenda=(
+                "Demanda por estação do ano, no dia que dimensiona o equipamento"
+            ),
         ),
         "O mesmo prédio tem picos diferentes em janeiro e em julho, e é o pior deles que "
         "dimensiona. Simular as quatro estações em separado, em vez de uma média anual, é "
         "o que impede um sistema correto no papel de ficar pequeno no verão.",
+        nota(
+            "Estes números são do dia que dimensiona — o de maior ocupação —, e "
+            "não do consumo médio do cenário. A distinção é deliberada nas colunas "
+            "de pico: é o pior dia que decide o inversor, e uma média entre um "
+            "sábado cheio e uma quarta vazia não dimensiona nada. Para o consumo, o "
+            "número que vale na conta de luz é o da tabela dos três níveis de uso, "
+            "no início do documento."
+        ),
     ]
     return [x for x in partes if x]
 

@@ -590,6 +590,19 @@ def executar_estudo(cfg: ConfiguracaoEstudo, progresso=None) -> ResultadoEstudo:
 
     avisos: list[str] = []
 
+    # As premissas econômicas herdam o bloco de bateria quando o kit é
+    # split-phase: sem isso, o mesmo banco aparecia com um preço na tabela de
+    # cenários e outro na análise econômica, no mesmo documento.
+    if cfg.topologia_kit == "splitphase" and cfg.premissas.bloco_bateria_brl <= 0:
+        from ..pv.kits import BATERIA_BLOCO_BRL, BATERIA_BLOCO_KWH
+
+        cfg = replace(cfg, premissas=replace(
+            cfg.premissas,
+            bloco_bateria_kwh=BATERIA_BLOCO_KWH,
+            bloco_bateria_brl=BATERIA_BLOCO_BRL,
+            inversor_no_kit_fv=bool(cfg.considerar_solar),
+        ))
+
     # 1. carga -------------------------------------------------------------
     avisar("Simulando a demanda (Monte Carlo por estação)", 0.05)
     comodos, instancias = _carregar_cargas(cfg)

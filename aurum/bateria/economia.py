@@ -78,7 +78,19 @@ class PremissasBateria:
     capex_inversor_brl_kw: float = PRECOS["inversor_hibrido_brl_w"].tipico * 1000.0
     #: Projeto, instalação, proteções e quadro de backup, sobre o custo de
     #: equipamento. Bateria puxa mais que FV porque exige quadro dedicado.
+    #:
+    #: **Não se aplica ao banco quando ele é contado em blocos**: o bloco é
+    #: preço de varejo de um módulo pronto, com caixa, BMS e instalação do
+    #: módulo já dentro. Somar 35% em cima seria cobrar instalação duas vezes.
     instalacao_percent_do_equipamento: float = 0.35
+    #: Preço do bloco de bateria, quando o banco é contado em blocos.
+    #:
+    #: Zero desliga a regra e devolve a conta de sempre — bateria por R$/kWh
+    #: mais inversor —, que é a de quem compra a granel e monta o sistema.
+    bloco_bateria_kwh: float = 0.0
+    bloco_bateria_brl: float = 0.0
+    #: O inversor já veio no kit fotovoltaico e não é cobrado outra vez.
+    inversor_no_kit_fv: bool = False
     opex_percent_do_capex_ano: float = 0.01
     #: Queda real de preço do kWh de bateria ao ano — o que barateia a troca
     #: futura. 5% a.a. é conservador diante da série histórica de LFP.
@@ -365,7 +377,32 @@ class ResultadoEconomicoBateria:
 
 
 def _capex(conjunto: ConjuntoArmazenamento, premissas: PremissasBateria) -> tuple[float, float]:
-    """Devolve (capex total, custo só das baterias) — o segundo é o que se troca."""
+    """
+    Devolve (capex total, custo só das baterias) — o segundo é o que se troca.
+
+    Com bloco declarado nas premissas, o banco custa blocos e mais nada: o
+    bloco é preço de varejo de módulo pronto, com caixa, BMS e instalação do
+    módulo dentro, e os 35% de instalação não se aplicam a ele. O inversor
+    entra ou não conforme tenha vindo no kit fotovoltaico — cobrá-lo duas
+    vezes era o que fazia o mesmo sistema aparecer com três preços diferentes
+    no mesmo documento.
+    """
+    if premissas.bloco_bateria_brl > 0 and premissas.bloco_bateria_kwh > 0:
+        import math
+
+        blocos = max(1, math.ceil(
+            conjunto.capacidade_nominal_kwh / premissas.bloco_bateria_kwh))
+        baterias = blocos * premissas.bloco_bateria_brl
+        if premissas.inversor_no_kit_fv:
+            return baterias, baterias
+        inversor = (
+            conjunto.inversor.preco_brl
+            if conjunto.inversor.preco_brl
+            else conjunto.inversor.potencia_ca_nominal_kw * premissas.capex_inversor_brl_kw
+        )
+        return baterias + inversor * (
+            1.0 + premissas.instalacao_percent_do_equipamento), baterias
+
     baterias = (
         conjunto.bateria.preco_brl * conjunto.modulos
         if conjunto.bateria.preco_brl
