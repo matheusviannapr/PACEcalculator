@@ -348,6 +348,46 @@ def _carregar_cargas(cfg: ConfiguracaoEstudo) -> tuple[list[Comodo], dict[str, i
     return cenario_exemplo(cfg.cenario_demo)
 
 
+def _taxa_efetiva(cenarios, cfg: ConfiguracaoEstudo, kwp: float, serie) -> float:
+    """
+    Quanto vale, de fato, cada kWh gerado — depois de tudo que a conta desconta.
+
+    A tarifa nominal é o teto: na prática o kWh injetado vale menos que o
+    autoconsumido, o custo de disponibilidade não some, e o fio B cobra a sua
+    parte. Dividir a economia que o balanço horário calculou pela geração do
+    mesmo arranjo devolve a taxa que o sistema realmente realiza, e é ela que
+    torna a estimativa dos três cenários comparável com a análise econômica do
+    documento em vez de contradizê-la.
+
+    Sem comparação de arranjos, cai para a tarifa nominal — que é otimista, e
+    é o melhor que se pode fazer sem o balanço.
+    """
+    nominal = (
+        cfg.fatura.tarifa_brl_kwh if cfg.fatura is not None
+        else cfg.premissas.tarifa_fora_ponta_brl_kwh
+    )
+    if cenarios is None:
+        return float(nominal)
+    completo = next(
+        (c for c in cenarios.cenarios if c.composicao.solar and c.composicao.bateria),
+        None,
+    )
+    if completo is None or completo.economia_anual_brl <= 0:
+        return float(nominal)
+    # O denominador tem de ser **o mesmo** que quem recebe a taxa vai
+    # multiplicar. O motor escala a geração para a fatura informada quando ela
+    # diverge do levantamento — 7.992 kWh contra os 11.693 que os kWp geram —,
+    # e a comparação de cenários usa a bruta. Dividir por uma e multiplicar
+    # pela outra reinflava a economia em 46%: dava payback 3,3 onde o balanço
+    # horário dá 4,6, no mesmo documento.
+    geracao = float(kwp) * serie.anual_kwh_por_kwp()
+    consumo = float(cfg.consumo_anual_kwh or 0.0)
+    aproveitada = min(x for x in (geracao, consumo) if x > 0) if (geracao or consumo) else 0.0
+    if aproveitada <= 0:
+        return float(nominal)
+    return float(completo.economia_anual_brl) / aproveitada
+
+
 def _serie_do_telhado(cfg: ConfiguracaoEstudo) -> SerieGeracao:
     """
     A série de 1 kWp do sistema: uma água, ou a combinação de várias.
@@ -590,6 +630,24 @@ def executar_estudo(cfg: ConfiguracaoEstudo, progresso=None) -> ResultadoEstudo:
 
     avisos: list[str] = []
 
+    # Bateria implica inversor híbrido, e híbrido no varejo é split-phase.
+    # Precificar um estudo com bateria pela coluna mono/bifásico ou
+    # microinversor sai 30% abaixo do real, porque essas colunas não trazem
+    # híbrido — é orçar um equipamento que não existe. A topologia é corrigida
+    # aqui, e não recusada: quem pediu bateria quer bateria.
+    if cfg.considerar_bateria and cfg.topologia_kit:
+        from ..pv.kits import TOPOLOGIA_COM_BATERIA, TOPOLOGIAS
+
+        if cfg.topologia_kit != TOPOLOGIA_COM_BATERIA:
+            avisos.append(
+                f"O estudo tem bateria, e a topologia escolhida era "
+                f"{TOPOLOGIAS.get(cfg.topologia_kit, cfg.topologia_kit)}, que não "
+                "traz inversor híbrido. O preço passou a ser o da coluna "
+                "split-phase, que é a única com híbrido — as demais orçariam um "
+                "sistema que não atende a bateria."
+            )
+            cfg = replace(cfg, topologia_kit=TOPOLOGIA_COM_BATERIA)
+
     # As premissas econômicas herdam o bloco de bateria quando o kit é
     # split-phase: sem isso, o mesmo banco aparecia com um preço na tabela de
     # cenários e outro na análise econômica, no mesmo documento.
@@ -630,11 +688,12 @@ def executar_estudo(cfg: ConfiguracaoEstudo, progresso=None) -> ResultadoEstudo:
             avisos.append(serie.aviso)
         kwp, avisos_fv = _dimensionar_fv(cfg, ensemble_total, serie)
         if cfg.topologia_kit and cfg.capex_fv_brl is None:
-            from ..pv.kits import fora_da_tabela
+            from ..pv.kits import fora_da_tabela, revisao_defasada
 
-            aviso_fronteira = fora_da_tabela(kwp, cfg.topologia_kit)
-            if aviso_fronteira:
-                avisos_fv.append(aviso_fronteira)
+            for aviso_preco in (fora_da_tabela(kwp, cfg.topologia_kit),
+                                revisao_defasada(kwp, cfg.topologia_kit)):
+                if aviso_preco:
+                    avisos_fv.append(aviso_preco)
         avisos.extend(avisos_fv)
 
     # 3. triagem por potência ---------------------------------------------
@@ -804,6 +863,16 @@ def executar_estudo(cfg: ConfiguracaoEstudo, progresso=None) -> ResultadoEstudo:
                 premissas=cfg.premissas,
                 topologia_kit=cfg.topologia_kit or "splitphase",
                 semente=cfg.semente,
+                # A taxa efetiva do motor rigoroso, e não a tarifa nominal.
+                #
+                # Creditar toda a geração à tarifa cheia dava payback 3,0 para o
+                # mesmo cenário em que o balanço horário — com autoconsumo,
+                # injeção e custo de disponibilidade — dá 4,6. Dois números
+                # conflitantes no mesmo documento não são duas leituras: são um
+                # erro à espera de quem confie no mais bonito. Ancorada na taxa
+                # efetiva, a estimativa reproduz o cenário do documento e escala
+                # os outros dois de forma consistente.
+                tarifa_brl_kwh=_taxa_efetiva(cenarios, cfg, kwp, serie),
             )
             avisos.extend(uso.avisos)
         except Exception as exc:  # noqa: BLE001 — leitura extra não derruba estudo

@@ -52,6 +52,7 @@ __all__ = [
     "capex_de_kit",
     "composicao_de_kit",
     "fora_da_tabela",
+    "revisao_defasada",
     "potencia_maxima",
     "preco_kit",
     "preco_kit_com_bateria",
@@ -60,7 +61,7 @@ __all__ = [
 
 #: Quando a tabela foi apurada. Preço de kit muda toda semana; sem a data, o
 #: número vira uma verdade permanente que ele não é.
-APURADO_EM = date(2026, 9, 7)
+APURADO_EM = date(2026, 9, 8)
 
 FONTE = "Tabela de kit fotovoltaico do distribuidor, faixa até 40 kWp"
 
@@ -121,33 +122,34 @@ TOPOLOGIAS: dict[str, str] = {
 #: um traço: o traço não é zero nem "consulte" — é a topologia não existir
 #: naquela potência, e interpolar por cima dele inventaria um produto.
 TABELA_KIT: dict[float, tuple[int, dict[str, float | None]]] = {
-    5.0:  (8,  {"mono_bifasico": 16_485.0, "microinversor": 17_088.0,
-                "splitphase": 25_227.0, "trifasico": None, "com_bateria": 34_508.0}),
-    7.5:  (12, {"mono_bifasico": 22_883.0, "microinversor": 23_472.0,
-                "splitphase": 29_918.0, "trifasico": None, "com_bateria": 39_883.0}),
-    10.0: (16, {"mono_bifasico": 29_438.0, "microinversor": 31_744.0,
-                "splitphase": 37_332.0, "trifasico": None, "com_bateria": 47_480.0}),
-    12.5: (20, {"mono_bifasico": 35_380.0, "microinversor": 39_031.0,
-                "splitphase": 43_427.0, "trifasico": None, "com_bateria": 53_194.0}),
-    15.0: (24, {"mono_bifasico": 41_944.0, "microinversor": 46_495.0,
-                "splitphase": 51_028.0, "trifasico": None, "com_bateria": 60_956.0}),
-    17.5: (28, {"mono_bifasico": 51_821.0, "microinversor": 55_183.0,
-                "splitphase": 58_320.0, "trifasico": None, "com_bateria": 68_291.0}),
-    20.0: (32, {"mono_bifasico": 55_834.0, "microinversor": 60_474.0,
-                "splitphase": 62_354.0, "trifasico": 56_244.0, "com_bateria": 72_314.0}),
-    25.0: (40, {"mono_bifasico": 69_584.0, "microinversor": 76_073.0,
-                "splitphase": 76_038.0, "trifasico": 68_866.0, "com_bateria": 84_130.0}),
-    30.0: (48, {"mono_bifasico": 81_450.0, "microinversor": 90_300.0,
-                "splitphase": 87_714.0, "trifasico": 81_466.0, "com_bateria": 95_756.0}),
-    35.0: (56, {"mono_bifasico": 94_556.0, "microinversor": 103_913.0,
-                "splitphase": 101_071.0, "trifasico": 91_734.0, "com_bateria": 109_025.0}),
-    40.0: (64, {"mono_bifasico": 107_037.0, "microinversor": 117_558.0,
-                "splitphase": 115_112.0, "trifasico": 106_800.0, "com_bateria": 122_997.0}),
-    # A partir daqui só o trifásico continua: acima de 40 kWp a entrada da
-    # instalação é trifásica, e as outras topologias deixam de existir no
-    # catálogo do distribuidor. As colunas vazias são `None` de propósito --
-    # `_interpolar` trabalha coluna a coluna, então cada uma tem o seu próprio
-    # alcance e nenhuma é estendida por causa das vizinhas.
+    5.0:  (8,  {"mono_bifasico": 19_802.0, "microinversor": 20_550.0,
+                "splitphase": 30_653.0, "trifasico": None, "com_bateria": 41_918.0}),
+    7.5:  (12, {"mono_bifasico": 27_498.0, "microinversor": 28_230.0,
+                "splitphase": 36_232.0, "trifasico": None, "com_bateria": 48_346.0}),
+    10.0: (16, {"mono_bifasico": 35_397.0, "microinversor": 38_260.0,
+                "splitphase": 45_196.0, "trifasico": None, "com_bateria": 57_538.0}),
+    12.5: (20, {"mono_bifasico": 42_542.0, "microinversor": 47_074.0,
+                "splitphase": 52_531.0, "trifasico": None, "com_bateria": 64_398.0}),
+    15.0: (24, {"mono_bifasico": 50_465.0, "microinversor": 56_113.0,
+                "splitphase": 61_741.0, "trifasico": None, "com_bateria": 73_808.0}),
+    17.5: (28, {"mono_bifasico": 62_505.0, "microinversor": 66_679.0,
+                "splitphase": 70_574.0, "trifasico": None, "com_bateria": 82_695.0}),
+    20.0: (32, {"mono_bifasico": 67_274.0, "microinversor": 73_034.0,
+                "splitphase": 75_367.0, "trifasico": 67_527.0, "com_bateria": 87_475.0}),
+    25.0: (40, {"mono_bifasico": 83_649.0, "microinversor": 91_703.0,
+                "splitphase": 91_660.0, "trifasico": 82_756.0, "com_bateria": 101_705.0}),
+    30.0: (48, {"mono_bifasico": 97_952.0, "microinversor": 108_938.0,
+                "splitphase": 105_728.0, "trifasico": 97_972.0, "com_bateria": 115_711.0}),
+    35.0: (56, {"mono_bifasico": 113_808.0, "microinversor": 125_423.0,
+                "splitphase": 121_895.0, "trifasico": 110_305.0, "com_bateria": 131_768.0}),
+    40.0: (64, {"mono_bifasico": 128_901.0, "microinversor": 141_960.0,
+                "splitphase": 138_924.0, "trifasico": 128_607.0, "com_bateria": 148_713.0}),
+    # ---- revisão anterior, não reenviada -----------------------------------
+    # A coluna trifásica de 20 a 40 kWp subiu 20% na revisão nova (R$ 56.244
+    # para R$ 67.527 em 20 kWp), então estas linhas certamente também. Aplicar
+    # o reajuste médio a elas seria inventar cotação, e por isso elas ficam
+    # como estão, marcadas em `POTENCIA_REVISADA_ATE`: o estudo avisa quando
+    # as usa. Reenviada a tabela de 50 a 125 kWp, é só substituir aqui.
     50.0:  (80,  {"mono_bifasico": None, "microinversor": None,
                   "splitphase": None, "trifasico": 131_623.0, "com_bateria": None}),
     60.0:  (96,  {"mono_bifasico": None, "microinversor": None,
@@ -167,6 +169,14 @@ TABELA_KIT: dict[float, tuple[int, dict[str, float | None]]] = {
     125.0: (202, {"mono_bifasico": None, "microinversor": None,
                   "splitphase": None, "trifasico": 313_681.0, "com_bateria": None}),
 }
+
+#: Até onde a tabela é da revisão atual. Acima disso os preços são da anterior.
+#:
+#: A revisão nova subiu 20,3% de forma uniforme, degrau a degrau — assinatura
+#: de reajuste de lista, e não de mudança de produto. As linhas acima deste
+#: limite não foram reenviadas e estão, portanto, defasadas na mesma ordem de
+#: grandeza. O estudo avisa quando as usa em vez de calar.
+POTENCIA_REVISADA_ATE = 40.0
 
 #: Acima disto nenhuma coluna fala, e a curva de escala volta a valer.
 #:
@@ -328,6 +338,26 @@ def preco_da_bateria(
     sistema com bateria.
     """
     return blocos_de_bateria(energia_kwh, bloco_kwh) * max(0.0, float(bloco_brl))
+
+
+def revisao_defasada(potencia_kwp: float, topologia: str) -> str | None:
+    """
+    O aviso de quem caiu nas linhas que não foram reenviadas.
+
+    Acima de :data:`POTENCIA_REVISADA_ATE` a tabela é da revisão anterior. A
+    revisão nova subiu 20,3% de forma uniforme na faixa que foi reenviada, e
+    não há razão para supor que a faixa de cima tenha ficado parada. Aplicar o
+    reajuste médio a ela seria inventar cotação; avisar é o que resta.
+    """
+    if not topologia or potencia_kwp <= POTENCIA_REVISADA_ATE:
+        return None
+    return (
+        f"O sistema tem {potencia_kwp:.1f} kWp, acima dos "
+        f"{POTENCIA_REVISADA_ATE:.0f} kWp até onde a tabela de kit foi atualizada. "
+        "Os preços desta faixa são da revisão anterior, e a faixa reenviada subiu "
+        "20% entre uma revisão e outra — o investimento deste estudo está, "
+        "portanto, provavelmente subestimado. Confirme a cotação antes da proposta."
+    )
 
 
 def fora_da_tabela(potencia_kwp: float, topologia: str) -> str | None:

@@ -47,9 +47,10 @@ def test_entre_degraus_interpola_em_linha_reta():
     A reta entre os vizinhos não inventa desconto de escala que a tabela não
     mostra, e não arredonda o cliente para cima.
     """
-    meio = preco_kit(13.75, "mono_bifasico")
-    assert meio == pytest.approx((35_380.0 + 41_944.0) / 2)
-    assert 35_380.0 < preco_kit(13.0, "mono_bifasico") < 41_944.0
+    baixo = TABELA_KIT[12.5][1]["mono_bifasico"]
+    alto = TABELA_KIT[15.0][1]["mono_bifasico"]
+    assert preco_kit(13.75, "mono_bifasico") == pytest.approx((baixo + alto) / 2)
+    assert baixo < preco_kit(13.0, "mono_bifasico") < alto
 
 
 def test_acima_da_tabela_nao_extrapola():
@@ -81,9 +82,10 @@ def test_o_traco_da_fonte_nao_vira_preco():
     Interpolar por cima dele inventaria um produto que a fonte diz não existir.
     """
     assert TABELA_KIT[10.0][1]["trifasico"] is None
-    assert preco_kit(10.0, "trifasico") == pytest.approx(56_244.0), (
-        "abaixo do primeiro degrau da coluna vale o piso dela, que é o de 20 kWp")
-    assert preco_kit(25.0, "trifasico") == pytest.approx(68_866.0)
+    assert preco_kit(10.0, "trifasico") == pytest.approx(
+        TABELA_KIT[20.0][1]["trifasico"]
+    ), "abaixo do primeiro degrau da coluna vale o piso dela, que é o de 20 kWp"
+    assert preco_kit(25.0, "trifasico") == pytest.approx(TABELA_KIT[25.0][1]["trifasico"])
 
 
 def test_topologia_desconhecida_e_recusada():
@@ -192,7 +194,7 @@ def test_a_coluna_com_bateria_fica_fora_do_capex_solar():
     """
     assert "com_bateria" not in TOPOLOGIAS
     referencia = preco_kit_com_bateria(10.0)
-    assert referencia == pytest.approx(47_480.0)
+    assert referencia == pytest.approx(TABELA_KIT[10.0][1]["com_bateria"])
     assert referencia > preco_kit(10.0, "splitphase")
 
 
@@ -212,19 +214,52 @@ def test_a_coluna_com_bateria_e_o_splitphase_mais_um_bloco():
     """
     A hipótese que valida o modelo inteiro, conferida linha a linha.
 
-    Se "Split + 5kWh" é o kit split-phase mais um banco de 5 kWh, então o
-    preço do bloco sai da própria tabela — e a regra de campo ("a cada 5 kWh,
-    +R$ 10 mil") deixa de ser palpite e vira leitura. A diferença é de
-    R$ 9.900 até 20 kWp e cai para R$ 7.900 acima disso, que é desconto de
-    volume sobre o mesmo bloco.
+    "Split + 5kWh" é o kit split-phase mais um banco de 5 kWh, e a diferença
+    entre as duas colunas é o próprio bloco — é isso que faz o preço do banco
+    sair da tabela em vez de sair de um R$/kWh genérico.
     """
-    from aurum.pv.kits import BATERIA_BLOCO_KWH, preco_da_bateria
+    from aurum.pv.kits import BATERIA_BLOCO_KWH
 
-    for kwp in (5.0, 10.0, 15.0, 20.0, 30.0, 40.0):
-        reconstruido = preco_kit(kwp, "splitphase") + preco_da_bateria(BATERIA_BLOCO_KWH)
-        da_tabela = preco_kit_com_bateria(kwp)
-        assert reconstruido == pytest.approx(da_tabela, rel=0.03), (
-            f"{kwp} kWp: reconstruído {reconstruido:,.0f} contra {da_tabela:,.0f}")
+    for potencia, (_, valores) in TABELA_KIT.items():
+        split, com = valores["splitphase"], valores["com_bateria"]
+        if split is None or com is None:
+            continue
+        bloco = com - split
+        assert bloco > 0, f"{potencia} kWp: a coluna com bateria não é mais cara"
+        # A faixa é larga porque o desconto de volume é real: o mesmo bloco de
+        # 5 kWh sai por menos num sistema de 40 kWp do que num de 5 kWp.
+        assert 8_000.0 <= bloco <= 14_000.0, (
+            f"{potencia} kWp: bloco implícito de R$ {bloco:,.0f} — fora da faixa "
+            "esperada para um módulo de 5 kWh")
+
+
+def test_o_bloco_adotado_acompanha_o_que_a_tabela_implica():
+    """
+    A distância entre a regra de campo e a tabela, medida e travada.
+
+    A tabela traz impressa a regra "a cada 5 kWh, adicionar + ~R$ 10 mil", e é
+    ela que o módulo adota — é a declaração do fornecedor, e contrariá-la seria
+    substituir o dado por uma dedução nossa. Mas a diferença entre as colunas,
+    na faixa residencial, está em torno de R$ 11.900 desde a revisão de
+    setembro: 19% acima da regra.
+
+    Enquanto a distância for essa, adotar a regra é conservador de menos e
+    consciente. Se ela crescer, as duas se separaram de vez e o valor adotado
+    precisa mudar — é isso que este teste vigia.
+    """
+    from aurum.pv.kits import BATERIA_BLOCO_BRL
+
+    implicitos = [
+        v["com_bateria"] - v["splitphase"]
+        for potencia, (_, v) in TABELA_KIT.items()
+        if v["splitphase"] and v["com_bateria"] and potencia <= 20.0
+    ]
+    mediana = sorted(implicitos)[len(implicitos) // 2]
+    distancia = mediana / BATERIA_BLOCO_BRL - 1.0
+    assert 0.0 <= distancia <= 0.30, (
+        f"o bloco adotado (R$ {BATERIA_BLOCO_BRL:,.0f}) está a {distancia:.0%} da "
+        f"mediana implícita pela tabela (R$ {mediana:,.0f}) — revise o valor adotado"
+    )
 
 
 def test_a_bateria_e_cobrada_em_blocos_inteiros():

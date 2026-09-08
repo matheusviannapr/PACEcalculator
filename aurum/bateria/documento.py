@@ -197,12 +197,15 @@ def _resumo_dos_cenarios(estudo: ResultadoEstudo) -> str:
             _n(cenario.potencia_fv_kwp, 1, "kWp"),
             _n(cenario.banco_kwh, 1, "kWh"),
             _brl(cenario.capex_com_bateria_brl),
+            _brl(cenario.economia_anual_brl) if cenario.economia_anual_brl else "--",
+            _n(cenario.payback_anos, 1, "anos") if cenario.payback_anos else "--",
         ))
     return "\n\n".join([
         tabela(
-            ["Nível de uso", "Consumo", "Por mês", "Solar", "Banco", "Investimento"],
+            ["Nível de uso", "Consumo", "Por mês", "Solar", "Banco", "Investimento",
+             "Economia/ano", "Retorno"],
             linhas,
-            alinhamento="p{4.2cm}rrrrr",
+            alinhamento="p{3.4cm}rrrrrrr",
             tamanho_fonte="scriptsize",
             legenda=(
                 "Os três níveis de uso e o sistema de cada um — em negrito, o "
@@ -561,7 +564,7 @@ def _secao_cenarios_de_uso(estudo: ResultadoEstudo, figuras: dict[str, Path]) ->
 
     partes.append(tabela(
         ["Cenário", "Consumo", "Pico P95", "Solar", "Geração", "Banco",
-         "Autonomia", "Investimento"],
+         "Investimento", "Economia/ano", "Retorno"],
         [
             (
                 c.nome,
@@ -570,12 +573,13 @@ def _secao_cenarios_de_uso(estudo: ResultadoEstudo, figuras: dict[str, Path]) ->
                 _n(c.potencia_fv_kwp, 1, "kWp"),
                 _n(c.geracao_anual_kwh, 0, "kWh/ano"),
                 _n(c.banco_kwh, 1, "kWh"),
-                _n(c.autonomia_h, 0, "h"),
                 _brl(c.capex_com_bateria_brl),
+                _brl(c.economia_anual_brl) if c.economia_anual_brl else "--",
+                _n(c.payback_anos, 1, "anos") if c.payback_anos else "--",
             )
             for c in uso.cenarios
         ],
-        alinhamento="p{4.0cm}rrrrrrr",
+        alinhamento="p{3.2cm}rrrrrrrr",
         tamanho_fonte="scriptsize",
         legenda="Os três cenários de uso, cada um com o sistema que exige",
     ))
@@ -608,6 +612,16 @@ def _secao_cenarios_de_uso(estudo: ResultadoEstudo, figuras: dict[str, Path]) ->
                 "é o cliente."
             )
         partes.append(caixa("O que separa os três", texto, cor="amarelopace"))
+
+    partes.append(nota(
+        "A economia e o retorno desta tabela são estimativa direta: a geração "
+        "substitui compra, à tarifa informada, até o limite do que a casa consome. "
+        "A conta rigorosa — balanço horário, autoconsumo, injeção e custo de "
+        "disponibilidade — está na seção de análise econômica, e vale para o "
+        "cenário sobre o qual este documento foi calculado. As duas convivem "
+        "porque respondem a perguntas diferentes: esta compara os três, aquela "
+        "sustenta a proposta."
+    ))
 
     partes.append(nota(
         "Os três foram conferidos contra a curva residencial de referência da base: "

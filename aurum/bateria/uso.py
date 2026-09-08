@@ -79,6 +79,15 @@ class CenarioDeUso:
     autonomia_h: float = 0.0
     capex_sem_bateria_brl: float = 0.0
     capex_com_bateria_brl: float = 0.0
+    #: Economia anual estimada e retorno, à tarifa informada.
+    #:
+    #: Estimativa direta: a geração substitui compra, ao preço da tarifa, até
+    #: o limite do que a casa consome. A conta rigorosa — balanço horário,
+    #: autoconsumo, injeção, custo de disponibilidade — fica na seção de
+    #: economia, para o cenário sobre o qual o documento foi calculado. Duas
+    #: contas convivem desde que se saiba qual é qual.
+    economia_anual_brl: float = 0.0
+    payback_anos: float | None = None
     conjunto: ConjuntoArmazenamento | None = None
     avisos: list[str] = field(default_factory=list)
 
@@ -103,6 +112,8 @@ class CenarioDeUso:
             "autonomia_h": round(self.autonomia_h, 1),
             "capex_solar_brl": round(self.capex_sem_bateria_brl, 0),
             "capex_com_bateria_brl": round(self.capex_com_bateria_brl, 0),
+            "economia_ano_brl": round(self.economia_anual_brl, 0),
+            "payback_anos": round(self.payback_anos, 1) if self.payback_anos else None,
         }
 
 
@@ -209,6 +220,7 @@ def comparar_cenarios_de_uso(
     bloco_brl: float = BATERIA_BLOCO_BRL,
     semente: int = 20260902,
     estudos: Sequence[str] | None = None,
+    tarifa_brl_kwh: float = 0.0,
 ) -> ComparacaoDeUso:
     """
     Mede os três cenários e dimensiona solar e bateria para cada um.
@@ -312,6 +324,14 @@ def comparar_cenarios_de_uso(
             )
         banco.capex_sem_bateria_brl = float(sem_bateria or 0.0)
         banco.capex_com_bateria_brl = float(com_bateria or 0.0)
+
+        # O dinheiro de cada cenário. Sem ele a tabela responde "quanto custa"
+        # e não responde "vale a pena", que é a pergunta que se faz.
+        if tarifa_brl_kwh > 0:
+            aproveitada = min(banco.geracao_anual_kwh, banco.consumo_anual_kwh)
+            banco.economia_anual_brl = aproveitada * float(tarifa_brl_kwh)
+            if banco.economia_anual_brl > 0:
+                banco.payback_anos = banco.capex_com_bateria_brl / banco.economia_anual_brl
 
         avisos.extend(banco.avisos)
         resultados.append(banco)
