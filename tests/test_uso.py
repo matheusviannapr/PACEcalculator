@@ -203,3 +203,73 @@ def test_o_dia_de_pouco_uso_ainda_almoca_e_janta():
     micro = ajustado.comodos["Cozinha"].iloc[1]["intervalo"]
     assert " e " in micro, "duas refeições, duas janelas"
     assert micro.startswith(ocupacao._hhmm(ocupacao._ALMOCO[0]))
+
+
+# ----------------------------------------------------------------------------
+# Sem solar
+# ----------------------------------------------------------------------------
+@pytest.fixture(scope="module")
+def sem_solar():
+    return comparar_cenarios_de_uso(
+        _casa(),
+        serie_sintetica(-25.4, -49.3, 0.0, 20.0, 14.0, anos=(2020, 2020)),
+        carregar_catalogo(),
+        malha=MalhaApagao(duracoes_h=(1.0, 2.0, 4.0, 6.0), amostras=30),
+        autonomia_alvo_h=4.0, simulacoes=50,
+        tarifa_brl_kwh=1.50, considerar_solar=False,
+    )
+
+
+def test_sem_solar_nenhum_cenario_inventa_painel(sem_solar):
+    """
+    O dimensionamento de solar aqui é ``consumo_anual / produtividade``, e essa
+    conta roda mesmo num estudo que não tem fotovoltaico nenhum.
+
+    Num estudo declarado sem solar o documento saía dizendo, na mesma página,
+    que a única composição avaliada é rede mais bateria com economia zero — e,
+    três tabelas adiante, que cada cenário tem 16 a 22 kWp, gera 25 MWh por ano
+    e se paga em 2,5 anos. Não são duas leituras do mesmo caso: uma delas é de
+    outro estudo.
+    """
+    for c in sem_solar.cenarios:
+        assert c.potencia_fv_kwp == 0.0
+        assert c.geracao_anual_kwh == 0.0
+        assert c.capex_sem_bateria_brl == 0.0
+
+
+def test_sem_solar_nao_ha_economia_de_conta_a_mostrar(sem_solar):
+    """
+    Um banco sozinho, em tarifa única, não arbitra nada.
+
+    A economia desta tabela é a da energia que o painel deixa de comprar; sem
+    painel ela é zero, e o zero precisa vir explicado — senão a tabela parece
+    quebrada em vez de honesta. O retorno do banco está na resiliência.
+    """
+    for c in sem_solar.cenarios:
+        assert c.economia_anual_brl == 0.0
+        assert c.payback_anos is None
+    assert any("resiliência" in a for a in sem_solar.avisos)
+
+
+def test_sem_solar_o_investimento_e_o_do_banco(sem_solar):
+    """
+    O mesmo banco tem de custar o mesmo aqui e na seção de economia.
+
+    Precificar por `capex_de_kit` com 0 kWp daria só os blocos, sem o inversor
+    híbrido — que, não havendo kit fotovoltaico, ninguém pagou. O banco
+    apareceria mais barato nesta tabela do que na de escopos, para o mesmo
+    equipamento.
+    """
+    from aurum.bateria.economia import PremissasBateria, _capex
+
+    premissas = PremissasBateria()
+    for c in sem_solar.cenarios:
+        if c.conjunto is None:
+            continue
+        assert c.capex_com_bateria_brl == pytest.approx(_capex(c.conjunto, premissas)[0])
+        assert c.capex_com_bateria_brl > 0
+
+
+def test_com_solar_o_caminho_antigo_continua(comparacao):
+    """A rota com fotovoltaico não muda: é a de todos os estudos até aqui."""
+    assert all(c.potencia_fv_kwp > 0 for c in comparacao.cenarios)

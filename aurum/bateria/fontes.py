@@ -858,9 +858,17 @@ def comparar_fontes(
             base = cenario
 
     assert base is not None, "o cenário de referência é sempre montado primeiro"
-    if premissas.custo_interrupcao_brl_kwh <= 0:
+    # As duas unidades contam. O custo por evento existe porque o por kWh serve
+    # mal em residência — quanto melhor o recorte de criticidade, menor o
+    # quadro, menos energia falta, e menor o valor que o modelo dá à bateria —,
+    # e olhar só para o segundo fazia o aviso disparar exatamente em quem usa o
+    # modelo bom, dizendo que a resiliência não entra em payback nenhum
+    # enquanto o payback ao lado tinha sido calculado com ela dentro.
+    if (premissas.custo_interrupcao_brl_kwh <= 0
+            and premissas.custo_interrupcao_brl_evento <= 0):
         avisos.append(
-            "O custo da interrupção foi deixado em zero, então o valor da resiliência não "
+            "O custo da interrupção foi deixado em zero, nas duas unidades — por kWh "
+            "não suprido e por evento evitado —, então o valor da resiliência não "
             "entra em nenhum payback. Com tarifa simples é ele que paga a bateria: sem "
             "informá-lo, o quadro compara apenas economia de conta, e a bateria aparece "
             "pior do que é para quem não pode ficar sem energia."

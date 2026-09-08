@@ -544,6 +544,18 @@ def _secao_solar(estudo: ResultadoEstudo, figuras: dict[str, Path]) -> str:
     return "\n\n".join(p for p in partes if p)
 
 
+def _tarifa_do_estudo(estudo: ResultadoEstudo) -> float:
+    """
+    A tarifa que o estudo usou, para a conta de luz de cada cenário.
+
+    Sai da fatura informada, que é a mesma que alimenta a análise econômica —
+    ler daqui e de lá dois números diferentes é como a conta de luz de um
+    cenário deixaria de bater com a do documento.
+    """
+    fatura = getattr(getattr(estudo, "configuracao", None), "fatura", None)
+    return float(getattr(fatura, "tarifa_brl_kwh", 0.0) or 0.0)
+
+
 def _secao_cenarios_de_uso(estudo: ResultadoEstudo, figuras: dict[str, Path]) -> str:
     """
     Os três cenários de uso, cada um com o sistema que exige.
@@ -559,14 +571,24 @@ def _secao_cenarios_de_uso(estudo: ResultadoEstudo, figuras: dict[str, Path]) ->
     if uso is None or len(getattr(uso, "cenarios", ())) < 2:
         return ""
 
+    # Sem solar a seção compara outra coisa, e o texto tem de acompanhar: falar
+    # de gerador fotovoltaico ao lado de uma coluna de zeros é o mesmo defeito
+    # de número que não conversa, virado do avesso.
+    com_solar = any(c.potencia_fv_kwp > 0 for c in uso.cenarios)
+
     partes = [
-        secao("Três cenários de uso, três sistemas"),
+        secao("Três cenários de uso, três sistemas" if com_solar
+              else "Três cenários de uso"),
         "Uma residência não tem uma curva de carga: tem um nível de uso, e o nível "
         "muda com quem mora e com a rotina. O estudo não escolhe entre eles — "
         "apresenta os três, com o sistema de cada um, e a escolha vira uma conversa "
-        "com números na mesa em vez de uma premissa escondida no começo. O gerador "
-        "fotovoltaico é dimensionado pela energia do ano de cada cenário; o banco, "
-        "pelo pior dia dele.",
+        "com números na mesa em vez de uma premissa escondida no começo. "
+        + ("O gerador fotovoltaico é dimensionado pela energia do ano de cada "
+           "cenário; o banco, pelo pior dia dele."
+           if com_solar else
+           "Este estudo não tem geração própria, então o que muda entre os três é "
+           "a conta de luz e o pico — o banco é dimensionado pelo pior dia de cada "
+           "um."),
         "A janela que a vistoria levantou não é um dos três. Ela é recortada pelo "
         "que o morador lembra de responder — quase sempre a noite, quase nunca o "
         "almoço, e o horário comercial quando o formulário o sugere —, e por isso é "
@@ -574,16 +596,16 @@ def _secao_cenarios_de_uso(estudo: ResultadoEstudo, figuras: dict[str, Path]) ->
         "que foi reescrito e por quê.",
     ]
 
-    partes.append(tabela(
+    if com_solar:
         # Oito colunas, e não nove: a geração é a potência vezes a
         # produtividade que o texto declara acima, e era ela que fazia a
         # tabela passar da margem.
         # Sem "Banco": é o mesmo nos três cenários — o quadro de backup é
         # refrigeração e rede, que não sabem se a casa está cheia — e aparece
         # inteiro na seção de armazenamento.
-        ["Cenário", "Consumo", "Pico P95", "Solar",
-         "Investimento", "Economia/ano", "Retorno"],
-        [
+        cabecalho = ["Cenário", "Consumo", "Pico P95", "Solar",
+                     "Investimento", "Economia/ano", "Retorno"]
+        linhas = [
             (
                 c.nome,
                 f"{_n(c.energia_diaria_kwh, 1, 'kWh/dia')}",
@@ -594,10 +616,37 @@ def _secao_cenarios_de_uso(estudo: ResultadoEstudo, figuras: dict[str, Path]) ->
                 _n(c.payback_anos, 1, "anos") if c.payback_anos else "--",
             )
             for c in uso.cenarios
-        ],
-        alinhamento="p{3.7cm}rrrrrr",
+        ]
+        alinhamento = "p{3.7cm}rrrrrr"
+    else:
+        # "Solar", "Economia" e "Retorno" saem: as três seriam zero, traço e
+        # traço, e três colunas vazias numa tabela sugerem dado faltando em
+        # vez de grandeza que não existe neste estudo. Entram o banco e a
+        # conta de luz, que é o que de fato separa os cenários aqui.
+        # Sem "Autonomia": ela é a mesma nos três, como o banco, e sai inteira
+        # na seção de armazenamento. Seis colunas cabem na margem; sete não.
+        cabecalho = ["Cenário", "Consumo", "Pico P95", "Banco",
+                     "Conta/ano", "Investimento"]
+        linhas = [
+            (
+                c.nome,
+                f"{_n(c.energia_diaria_kwh, 1, 'kWh/dia')}",
+                _n(c.pico_p95_kw, 2, "kW"),
+                _n(c.banco_kwh, 1, "kWh"),
+                _brl(c.consumo_anual_kwh * _tarifa_do_estudo(estudo)),
+                _brl(c.capex_com_bateria_brl),
+            )
+            for c in uso.cenarios
+        ]
+        alinhamento = "p{3.6cm}rrrrr"
+
+    partes.append(tabela(
+        cabecalho, linhas,
+        alinhamento=alinhamento,
         tamanho_fonte="scriptsize",
-        legenda="Os três cenários de uso, cada um com o sistema que exige",
+        legenda=("Os três cenários de uso, cada um com o sistema que exige"
+                 if com_solar else
+                 "Os três cenários de uso, e o que cada um custa de conta e de banco"),
     ))
 
     if figuras.get("cenarios_de_uso"):
@@ -606,21 +655,38 @@ def _secao_cenarios_de_uso(estudo: ResultadoEstudo, figuras: dict[str, Path]) ->
             "À esquerda, a carga de cada cenário ao longo do dia — não é a mesma "
             "casa em escala: o dia levantado em campo é quase todo noturno, e a "
             "casa cheia enche o meio do dia. À direita, o que isso cobra em "
-            "equipamento.",
+            "equipamento."
+            if com_solar else
+            "À esquerda, a carga de cada cenário ao longo do dia — não é a mesma "
+            "casa em escala: o dia levantado em campo é quase todo noturno, e a "
+            "casa cheia enche o meio do dia. À direita, o banco que cada um "
+            "exige: as três barras são iguais, e é essa igualdade que a seção "
+            "afirma.",
             largura="1.0",
         ))
 
     amplitude = uso.amplitude()
     if amplitude.get("consumo"):
         meio = uso.intermediario
-        texto = (
-            f"Entre o cenário mais leve e o mais pesado, o consumo varia "
-            f"{amplitude['consumo']:.1f} vez(es) e a potência solar acompanha. O "
-            f"investimento varia menos — {amplitude.get('capex', float('nan')):.1f} "
-            "vez(es) — porque o banco quase não muda entre os cenários: o quadro "
-            "de backup é feito de refrigeração e rede, que não sabem se a casa "
-            "está cheia. É a conta de luz que muda, e não a continuidade."
-        )
+        if com_solar:
+            texto = (
+                f"Entre o cenário mais leve e o mais pesado, o consumo varia "
+                f"{amplitude['consumo']:.1f} vez(es) e a potência solar acompanha. O "
+                f"investimento varia menos — {amplitude.get('capex', float('nan')):.1f} "
+                "vez(es) — porque o banco quase não muda entre os cenários: o quadro "
+                "de backup é feito de refrigeração e rede, que não sabem se a casa "
+                "está cheia. É a conta de luz que muda, e não a continuidade."
+            )
+        else:
+            texto = (
+                f"Entre o cenário mais leve e o mais pesado, o consumo varia "
+                f"{amplitude['consumo']:.1f} vez(es) — e o investimento, quase nada. "
+                "Sem geração própria, o cenário de uso decide a conta de luz e não "
+                "decide o equipamento: o quadro de backup é feito de refrigeração, "
+                "bombas e rede, que consomem o mesmo com a casa cheia ou vazia. "
+                "Escolher o cenário errado aqui erra a previsão de conta; não erra "
+                "o banco."
+            )
         if meio is not None:
             texto += (
                 f" O cenário do meio — {esc(meio.nome)} — é onde a maioria das "
@@ -628,6 +694,17 @@ def _secao_cenarios_de_uso(estudo: ResultadoEstudo, figuras: dict[str, Path]) ->
                 "é o cliente."
             )
         partes.append(caixa("O que separa os três", texto, cor="amarelopace"))
+
+    if not com_solar:
+        partes.append(nota(
+            "Sem geração própria não há economia de conta a comparar entre os "
+            "cenários: um banco de baterias desloca energia comprada da rede, e em "
+            "tarifa única deslocar não gera desconto. O que sustenta o investimento "
+            "é a continuidade — o que vale não passar pela falta —, e essa conta "
+            "está na seção de resiliência. O investimento desta tabela é o do banco "
+            "e do inversor híbrido, o mesmo número da seção de armazenamento."
+        ))
+        return "\n\n".join(partes)
 
     partes.append(nota(
         "A economia e o retorno desta tabela são estimativa direta: a geração "

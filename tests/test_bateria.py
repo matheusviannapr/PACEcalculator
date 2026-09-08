@@ -534,3 +534,97 @@ def test_estudo_sem_comodo_essencial_valido_falha_com_a_lista():
     )
     with pytest.raises(ValueError, match="disponíveis"):
         executar_estudo(cfg)
+
+
+# ----------------------------------------------------------------------------
+# A poda de candidatos, e o preço do banco quando não há kit solar
+# ----------------------------------------------------------------------------
+def test_a_poda_guarda_o_banco_que_a_meta_exige():
+    """
+    Podar por índice não olha para a carga, e por isso pula a resposta.
+
+    Com 23 bancos em bloco e teto de 8, a amostragem uniforme saltou o de 2
+    blocos — 9,3 kWh úteis, R\u00a037.500, que cumpre a meta de 6 h — e ofereceu o
+    de 3, R\u00a012.000 mais caro. O estudo recomendou o maior porque o menor
+    nunca chegou a ser avaliado, e a seção de escopos, que não poda nada,
+    encontrou o menor: o mesmo documento passou a trazer dois bancos para a
+    mesma casa e a mesma meta.
+    """
+    from aurum.bateria.catalogo import candidatos_em_blocos
+    from aurum.bateria.estudo import _podar_perto_do_alvo
+
+    candidatos = candidatos_em_blocos(carregar_catalogo())
+    assert len(candidatos) > 8, "o caso de poda precisa de mais candidatos que o teto"
+    candidatos.sort(key=lambda c: (c.modulos, c.potencia_descarga_kw))
+
+    alvo = 5.75  # o que 0,96 kW de carga essencial exigem em 6 h
+    podados = _podar_perto_do_alvo(candidatos, 8, alvo)
+    assert len(podados) == 8
+
+    # O menor que passa do alvo tem de sobreviver: é ele que a meta compra.
+    acima = [c for c in candidatos if c.energia_util_kwh >= alvo]
+    menor_que_serve = min(acima, key=lambda c: c.energia_util_kwh)
+    assert any(
+        c.energia_util_kwh == menor_que_serve.energia_util_kwh for c in podados
+    ), "a poda jogou fora justamente o banco que cumpre a meta"
+
+    # As pontas continuam: o menor mostra o que basta, o maior mostra o teto.
+    assert podados[0] is candidatos[0]
+    assert podados[-1] is candidatos[-1]
+
+
+def test_sem_alvo_a_poda_volta_a_ser_uniforme():
+    """Sem saber o que se procura, espalhar pela faixa é o melhor disponível."""
+    from aurum.bateria.catalogo import candidatos_em_blocos
+    from aurum.bateria.estudo import _podar_perto_do_alvo
+
+    candidatos = sorted(candidatos_em_blocos(carregar_catalogo()),
+                        key=lambda c: (c.modulos, c.potencia_descarga_kw))
+    podados = _podar_perto_do_alvo(candidatos, 5, 0.0)
+    assert len(podados) == 5
+    assert podados[0] is candidatos[0] and podados[-1] is candidatos[-1]
+
+
+def test_a_poda_nao_toca_em_lista_que_cabe_no_teto():
+    from aurum.bateria.catalogo import candidatos_em_blocos
+    from aurum.bateria.estudo import _podar_perto_do_alvo
+
+    candidatos = candidatos_em_blocos(carregar_catalogo())
+    assert _podar_perto_do_alvo(candidatos, 999, 5.0) == candidatos
+
+
+def test_o_bloco_de_bateria_nao_depende_de_haver_kit_solar():
+    """
+    O preço do banco e a existência de um kit fotovoltaico são independentes.
+
+    Quem compra só bateria compra o mesmo módulo de 5 kWh, pelo mesmo preço,
+    sem comprar painel nenhum. A herança do bloco estava presa a
+    ``topologia_kit == "splitphase"``; num estudo sem solar não há topologia a
+    declarar, e o banco caía no modelo genérico — R$/kWh de catálogo mais
+    inversor, tudo vezes 1,35 de instalação. Além de mais caro, isso cobra
+    instalação de um módulo que já vem instalado.
+    """
+    from aurum.bateria.economia import PremissasBateria, _capex
+    from aurum.pv.kits import BATERIA_BLOCO_BRL, BATERIA_BLOCO_KWH
+
+    catalogo = carregar_catalogo()
+    conjunto = next(
+        c for c in catalogo.combinacoes(modulos=(2,))
+        if c.energia_util_kwh > 0
+    )
+
+    generico = _capex(conjunto, PremissasBateria())[0]
+    em_blocos = _capex(conjunto, PremissasBateria(
+        bloco_bateria_kwh=BATERIA_BLOCO_KWH,
+        bloco_bateria_brl=BATERIA_BLOCO_BRL,
+        inversor_no_kit_fv=False,
+    ))[0]
+    assert em_blocos != generico, "o bloco tem de mudar o preço, senão não serve"
+
+    # Sem kit, o inversor é compra à parte e entra na conta.
+    com_kit = _capex(conjunto, PremissasBateria(
+        bloco_bateria_kwh=BATERIA_BLOCO_KWH,
+        bloco_bateria_brl=BATERIA_BLOCO_BRL,
+        inversor_no_kit_fv=True,
+    ))[0]
+    assert em_blocos > com_kit, "sem kit fotovoltaico o inversor não está pago"

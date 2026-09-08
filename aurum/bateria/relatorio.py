@@ -730,11 +730,18 @@ def _grafico_cenarios_de_uso(uso, destino: Path) -> Path:
     eixos[0].legend(fontsize=7.5, frameon=False)
 
     posicoes = np.arange(len(cenarios))
-    largura = 0.38
-    eixos[1].bar(posicoes - largura / 2, [c.potencia_fv_kwp for c in cenarios],
-                 largura, color=_SEM["geracao"], label="solar (kWp)")
-    eixos[1].bar(posicoes + largura / 2, [c.banco_kwh for c in cenarios],
-                 largura, color=marca.APOIO["azul"], label="banco (kWh úteis)")
+    # Sem solar, a barra de kWp seria uma linha no zero em todos os cenários —
+    # e uma legenda de "solar" num estudo sem solar. Fica só o banco, centrado.
+    com_solar = any(c.potencia_fv_kwp > 0 for c in cenarios)
+    largura = 0.38 if com_solar else 0.5
+    if com_solar:
+        eixos[1].bar(posicoes - largura / 2, [c.potencia_fv_kwp for c in cenarios],
+                     largura, color=_SEM["geracao"], label="solar (kWp)")
+        eixos[1].bar(posicoes + largura / 2, [c.banco_kwh for c in cenarios],
+                     largura, color=marca.APOIO["azul"], label="banco (kWh úteis)")
+    else:
+        eixos[1].bar(posicoes, [c.banco_kwh for c in cenarios],
+                     largura, color=marca.APOIO["azul"], label="banco (kWh úteis)")
     for i, cenario in enumerate(cenarios):
         eixos[1].annotate(
             f"{cenario.energia_diaria_kwh:.0f} kWh/dia",
@@ -746,7 +753,8 @@ def _grafico_cenarios_de_uso(uso, destino: Path) -> Path:
     # no eixo se sobrepõem.
     eixos[1].set_xticklabels(
         [chr(10).join(_quebrar(c.nome, 16)) for c in cenarios], fontsize=7.0)
-    eixos[1].set_title("O sistema que cada um exige")
+    eixos[1].set_title("O sistema que cada um exige" if com_solar
+                       else "O banco que cada um exige")
     eixos[1].legend(fontsize=8, frameon=False)
 
     return _salvar(fig, destino, "cenarios_de_uso")

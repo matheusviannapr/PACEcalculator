@@ -496,6 +496,51 @@ def _dimensionar_fv(cfg: ConfiguracaoEstudo, ensemble: EnsembleCarga, serie: Ser
     return kwp, [aviso]
 
 
+def _podar_perto_do_alvo(
+    candidatos: list[ConjuntoArmazenamento],
+    teto: int,
+    energia_alvo_kwh: float,
+) -> list[ConjuntoArmazenamento]:
+    """
+    Reduz a lista ao teto pedido **sem jogar fora a resposta**.
+
+    A poda anterior amostrava uniformemente por índice ao longo da faixa. É uma
+    escolha que não olha para a carga e, por isso, não tem motivo nenhum para
+    preservar o banco que a meta exige. Num caso real ela saltou o banco de 2
+    blocos — que cumpre a autonomia alvo e custa R$ 12.000 a menos — e o estudo
+    recomendou o de 3, porque o de 2 nunca foi avaliado.
+
+    As pontas continuam entrando: o menor mostra o que basta e o maior mostra
+    onde aumentar deixou de resolver. O miolo passa a ser preenchido por
+    proximidade à energia que a meta exige, que é onde a resposta mora. Sem
+    alvo declarado, a poda uniforme volta a valer — é o melhor que se pode
+    fazer sem saber o que se procura.
+    """
+    if teto <= 0 or len(candidatos) <= teto:
+        return candidatos
+    if energia_alvo_kwh <= 0:
+        passo = (len(candidatos) - 1) / (teto - 1) if teto > 1 else 1
+        indices = sorted({int(round(i * passo)) for i in range(teto)})
+        return [candidatos[i] for i in indices]
+
+    guardados = {0, len(candidatos) - 1}
+    # Por distância ao alvo, e o desempate é o mais barato de energia igual:
+    # dois inversores servem cada contagem de blocos, e o menor deles é o que
+    # a carga costuma pedir.
+    ordem = sorted(
+        range(len(candidatos)),
+        key=lambda i: (
+            abs(candidatos[i].energia_util_kwh - energia_alvo_kwh),
+            candidatos[i].potencia_descarga_kw,
+        ),
+    )
+    for i in ordem:
+        if len(guardados) >= teto:
+            break
+        guardados.add(i)
+    return [candidatos[i] for i in sorted(guardados)]
+
+
 def _selecionar_candidatos(
     cfg: ConfiguracaoEstudo,
     base: BaseBaterias,
@@ -522,12 +567,8 @@ def _selecionar_candidatos(
             # rodar a varredura de apagões mais vezes do que se pediu.
             filtrados.sort(key=lambda c: (c.modulos, c.potencia_descarga_kw))
             if len(filtrados) > cfg.max_candidatos > 0:
-                # Amostra ao longo da faixa, guardando as pontas: o menor banco
-                # é o que costuma bastar, e o maior é o que prova que aumentar
-                # deixou de resolver.
-                passo = (len(filtrados) - 1) / (cfg.max_candidatos - 1) if cfg.max_candidatos > 1 else 1
-                indices = sorted({int(round(i * passo)) for i in range(cfg.max_candidatos)})
-                filtrados = [filtrados[i] for i in indices]
+                filtrados = _podar_perto_do_alvo(
+                    filtrados, cfg.max_candidatos, energia_alvo_kwh)
             return filtrados, []
 
     aprovados = set(diagnostico.loc[diagnostico["aprovado"], "modelo"].str.lower())
@@ -705,17 +746,29 @@ def executar_estudo(cfg: ConfiguracaoEstudo, progresso=None) -> ResultadoEstudo:
             )
             cfg = replace(cfg, topologia_kit=TOPOLOGIA_COM_BATERIA)
 
-    # As premissas econômicas herdam o bloco de bateria quando o kit é
-    # split-phase: sem isso, o mesmo banco aparecia com um preço na tabela de
-    # cenários e outro na análise econômica, no mesmo documento.
-    if cfg.topologia_kit == "splitphase" and cfg.premissas.bloco_bateria_brl <= 0:
+    # As premissas econômicas herdam o bloco de bateria quando o estudo conta o
+    # banco em blocos. Sem isso, o mesmo banco aparecia com um preço na tabela
+    # de cenários e outro na análise econômica, no mesmo documento.
+    #
+    # A condição já foi `topologia_kit == "splitphase"`, e isso amarrava o preço
+    # do banco à existência de um kit **solar**. As duas coisas são
+    # independentes: quem compra só bateria compra o mesmo módulo de 5 kWh, pelo
+    # mesmo preço, sem comprar painel nenhum. Num estudo sem solar não há
+    # topologia de kit a declarar, e o banco caía no modelo genérico — R$/kWh de
+    # catálogo mais inversor, tudo vezes 1,35 de instalação —, que além de mais
+    # caro cobra instalação de um módulo que já vem instalado. Um banco de
+    # 13,9 kWh saía a R$ 78.300 no lugar de R$ 49.500.
+    if (cfg.banco_em_blocos or cfg.topologia_kit == "splitphase") \
+            and cfg.premissas.bloco_bateria_brl <= 0:
         from ..pv.kits import BATERIA_BLOCO_BRL, BATERIA_BLOCO_KWH
 
         cfg = replace(cfg, premissas=replace(
             cfg.premissas,
             bloco_bateria_kwh=BATERIA_BLOCO_KWH,
             bloco_bateria_brl=BATERIA_BLOCO_BRL,
-            inversor_no_kit_fv=bool(cfg.considerar_solar),
+            # O inversor só está pago quando existe um kit fotovoltaico onde ele
+            # possa ter vindo. Sem solar, ou sem kit, ele é compra à parte.
+            inversor_no_kit_fv=bool(cfg.considerar_solar and cfg.topologia_kit),
         ))
 
     # 1. carga -------------------------------------------------------------
@@ -951,6 +1004,13 @@ def executar_estudo(cfg: ConfiguracaoEstudo, progresso=None) -> ResultadoEstudo:
                 # efetiva, a estimativa reproduz o cenário do documento e escala
                 # os outros dois de forma consistente.
                 tarifa_brl_kwh=_taxa_efetiva(cenarios, cfg, kwp, serie),
+                # Sem solar a tabela dos três cenários parava de conversar com o
+                # resto do documento: dimensionava painel por conta própria —
+                # `consumo_anual / produtividade` roda mesmo sem haver estudo
+                # fotovoltaico — e anunciava 18 kWp com retorno em 2,5 anos ao
+                # lado de um quadro de arranjos cuja única composição é rede
+                # mais bateria, com economia zero.
+                considerar_solar=cfg.considerar_solar,
             )
             avisos.extend(uso.avisos)
         except Exception as exc:  # noqa: BLE001 — leitura extra não derruba estudo

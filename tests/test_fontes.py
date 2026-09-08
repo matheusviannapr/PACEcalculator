@@ -266,3 +266,32 @@ def test_gerador_recarrega_o_banco_com_a_folga_de_potencia(conjunto):
     )
     assert com.soc_final_frac[0] > sem.soc_final_frac[0]
     assert com.energia_recarregada_kwh[0] > 0.0
+
+
+def test_o_aviso_de_resiliencia_enxerga_as_duas_unidades():
+    """
+    O custo por evento existe porque o por kWh serve mal em residência.
+
+    Quanto melhor o recorte de criticidade, menor o quadro, menos energia
+    falta, e menor o valor que o modelo por kWh dá à bateria — o recorte
+    bem-feito acaba punido. A condição do aviso olhava só para o por kWh, então
+    disparava exatamente em quem usa o modelo bom, afirmando que a resiliência
+    não entra em payback nenhum enquanto o payback ao lado tinha sido calculado
+    com ela dentro.
+    """
+    from aurum.bateria.economia import PremissasBateria
+
+    zerada = PremissasBateria()
+    assert zerada.custo_interrupcao_brl_kwh <= 0
+    assert zerada.custo_interrupcao_brl_evento <= 0
+
+    por_evento = PremissasBateria(custo_interrupcao_brl_evento=600.0)
+    assert por_evento.custo_interrupcao_brl_kwh <= 0
+    # A condição do aviso, tal como ela é lida em `comparar_fontes`.
+    def calaria(p):
+        return not (p.custo_interrupcao_brl_kwh <= 0
+                    and p.custo_interrupcao_brl_evento <= 0)
+
+    assert not calaria(zerada), "sem nenhuma das duas, o aviso tem de sair"
+    assert calaria(por_evento), "com custo por evento, o aviso é falso"
+    assert calaria(PremissasBateria(custo_interrupcao_brl_kwh=5.0))

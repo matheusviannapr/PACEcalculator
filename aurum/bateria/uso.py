@@ -234,13 +234,26 @@ def comparar_cenarios_de_uso(
     estudos: Sequence[str] | None = None,
     tarifa_brl_kwh: float = 0.0,
     ajustes_sazonais: dict | None = None,
+    considerar_solar: bool = True,
 ) -> ComparacaoDeUso:
     """
-    Mede os três cenários e dimensiona solar e bateria para cada um.
+    Mede os três cenários e dimensiona bateria — e solar, quando há solar.
 
     Cada perfil é simulado **uma vez**, e os cenários se servem dessa medida:
     o de fim de semana e o de casa cheia compartilham o perfil ``casa_cheia``,
     e refazer a simulação para os dois custaria o dobro sem mudar nada.
+
+    Com ``considerar_solar=False`` os três cenários continuam medindo consumo,
+    pico e banco, e param de inventar painel. A diferença não é cosmética: o
+    dimensionamento de solar aqui é ``consumo_anual / produtividade``, que roda
+    mesmo sem haver estudo fotovoltaico nenhum, e o investimento sai da tabela
+    de kit. Num estudo sem solar isso punha no documento um sistema de 18 kWp
+    que se paga em 2,5 anos, ao lado do quadro de arranjos dizendo que a única
+    composição avaliada é rede mais bateria, com economia zero.
+
+    Sem solar o investimento do cenário passa a ser o do próprio banco, pela
+    mesma função que a seção de economia e a de escopos usam — que é como os
+    três números do banco voltam a ser um só.
     """
     premissas = premissas or PremissasBateria()
     malha = malha or MalhaApagao()
@@ -275,7 +288,11 @@ def comparar_cenarios_de_uso(
         medida = medidos[dimensionante]
 
         consumo_anual = diaria * 365.0
-        kwp = consumo_anual / produtividade if produtividade > 0 else 0.0
+        kwp = (
+            consumo_anual / produtividade
+            if considerar_solar and produtividade > 0
+            else 0.0
+        )
 
         # A curva do cenário é a **média ponderada** dos perfis que o compõem,
         # e não a do perfil que dimensiona. As duas coisas são diferentes e a
@@ -324,28 +341,52 @@ def comparar_cenarios_de_uso(
                 "não há como saber o que o quadro de backup deveria atender."
             )
 
-        sem_bateria = capex_de_kit(
-            kwp, topologia_kit or "splitphase",
-            mao_de_obra_brl_kwp, material_ca_brl_kwp)
-        com_bateria = capex_de_kit(
-            kwp, topologia_kit or "splitphase",
-            mao_de_obra_brl_kwp, material_ca_brl_kwp,
-            bateria_kwh=banco.banco_kwh, bloco_kwh=bloco_kwh, bloco_brl=bloco_brl)
-        if sem_bateria is None or com_bateria is None:
-            banco.avisos.append(
-                f"A tabela de kit não cobre {kwp:.1f} kWp nessa topologia; o "
-                "investimento deste cenário ficou de fora da comparação."
+        if not considerar_solar:
+            # Sem kit fotovoltaico, o inversor híbrido não veio pago em lugar
+            # nenhum e o banco custa o que a seção de economia diz que custa.
+            # Precificar por `capex_de_kit` aqui daria só os blocos, e o mesmo
+            # banco apareceria mais barato nesta tabela do que na de escopos.
+            from .economia import _capex
+
+            sem_bateria = 0.0
+            com_bateria = (
+                _capex(banco.conjunto, premissas)[0]
+                if banco.conjunto is not None else 0.0
             )
+        else:
+            sem_bateria = capex_de_kit(
+                kwp, topologia_kit or "splitphase",
+                mao_de_obra_brl_kwp, material_ca_brl_kwp)
+            com_bateria = capex_de_kit(
+                kwp, topologia_kit or "splitphase",
+                mao_de_obra_brl_kwp, material_ca_brl_kwp,
+                bateria_kwh=banco.banco_kwh, bloco_kwh=bloco_kwh, bloco_brl=bloco_brl)
+            if sem_bateria is None or com_bateria is None:
+                banco.avisos.append(
+                    f"A tabela de kit não cobre {kwp:.1f} kWp nessa topologia; o "
+                    "investimento deste cenário ficou de fora da comparação."
+                )
         banco.capex_sem_bateria_brl = float(sem_bateria or 0.0)
         banco.capex_com_bateria_brl = float(com_bateria or 0.0)
 
         # O dinheiro de cada cenário. Sem ele a tabela responde "quanto custa"
         # e não responde "vale a pena", que é a pergunta que se faz.
-        if tarifa_brl_kwh > 0:
+        if tarifa_brl_kwh > 0 and considerar_solar:
             aproveitada = min(banco.geracao_anual_kwh, banco.consumo_anual_kwh)
             banco.economia_anual_brl = aproveitada * float(tarifa_brl_kwh)
             if banco.economia_anual_brl > 0:
                 banco.payback_anos = banco.capex_com_bateria_brl / banco.economia_anual_brl
+        elif not considerar_solar:
+            # A economia desta coluna é a da energia que o painel deixa de
+            # comprar. Sem painel ela é zero, e não por falta de dado: um banco
+            # sozinho, em tarifa única, não arbitra nada. O que sustenta o
+            # investimento é a resiliência, que tem seção própria.
+            banco.avisos.append(
+                "Sem solar, este cenário não tem economia de conta a mostrar: o "
+                "banco desloca energia comprada da rede e, em tarifa única, "
+                "deslocar não gera desconto. O retorno do banco está na seção de "
+                "resiliência."
+            )
 
         avisos.extend(banco.avisos)
         resultados.append(banco)
