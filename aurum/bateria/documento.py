@@ -193,19 +193,21 @@ def _resumo_dos_cenarios(estudo: ResultadoEstudo) -> str:
         linhas.append((
             Raw(rf"\textbf{{{esc(cenario.nome)}}}") if atual else cenario.nome,
             _n(cenario.energia_diaria_kwh, 1, "kWh/dia"),
-            _n(cenario.energia_diaria_kwh * 30.0, 0, "kWh/mês"),
             _n(cenario.potencia_fv_kwp, 1, "kWp"),
-            _n(cenario.banco_kwh, 1, "kWh"),
             _brl(cenario.capex_com_bateria_brl),
             _brl(cenario.economia_anual_brl) if cenario.economia_anual_brl else "--",
             _n(cenario.payback_anos, 1, "anos") if cenario.payback_anos else "--",
         ))
     return "\n\n".join([
         tabela(
-            ["Nível de uso", "Consumo", "Por mês", "Solar", "Banco", "Investimento",
+            # Seis colunas, e não oito. "Por mês" é o consumo diário vezes
+            # trinta, e "banco" é o mesmo nos três cenários e aparece inteiro
+            # na seção própria: as duas custavam a largura que fazia a tabela
+            # estourar a página, e nenhuma trazia informação nova.
+            ["Nível de uso", "Consumo", "Solar", "Investimento",
              "Economia/ano", "Retorno"],
             linhas,
-            alinhamento="p{3.4cm}rrrrrrr",
+            alinhamento="p{4.0cm}rrrrr",
             tamanho_fonte="scriptsize",
             legenda=(
                 "Os três níveis de uso e o sistema de cada um — em negrito, o "
@@ -563,7 +565,13 @@ def _secao_cenarios_de_uso(estudo: ResultadoEstudo, figuras: dict[str, Path]) ->
     ]
 
     partes.append(tabela(
-        ["Cenário", "Consumo", "Pico P95", "Solar", "Geração", "Banco",
+        # Oito colunas, e não nove: a geração é a potência vezes a
+        # produtividade que o texto declara acima, e era ela que fazia a
+        # tabela passar da margem.
+        # Sem "Banco": é o mesmo nos três cenários — o quadro de backup é
+        # refrigeração e rede, que não sabem se a casa está cheia — e aparece
+        # inteiro na seção de armazenamento.
+        ["Cenário", "Consumo", "Pico P95", "Solar",
          "Investimento", "Economia/ano", "Retorno"],
         [
             (
@@ -571,15 +579,13 @@ def _secao_cenarios_de_uso(estudo: ResultadoEstudo, figuras: dict[str, Path]) ->
                 f"{_n(c.energia_diaria_kwh, 1, 'kWh/dia')}",
                 _n(c.pico_p95_kw, 2, "kW"),
                 _n(c.potencia_fv_kwp, 1, "kWp"),
-                _n(c.geracao_anual_kwh, 0, "kWh/ano"),
-                _n(c.banco_kwh, 1, "kWh"),
                 _brl(c.capex_com_bateria_brl),
                 _brl(c.economia_anual_brl) if c.economia_anual_brl else "--",
                 _n(c.payback_anos, 1, "anos") if c.payback_anos else "--",
             )
             for c in uso.cenarios
         ],
-        alinhamento="p{3.2cm}rrrrrrrr",
+        alinhamento="p{3.7cm}rrrrrr",
         tamanho_fonte="scriptsize",
         legenda="Os três cenários de uso, cada um com o sistema que exige",
     ))
@@ -683,13 +689,14 @@ def _secao_ocupacao(estudo: ResultadoEstudo, figuras: dict[str, Path]) -> str:
 
     if tabela_perfis is not None and len(tabela_perfis):
         partes.append(tabela(
-            ["Perfil", "Acordado", "Refeições", "Uso diurno", "Dias/sem.",
+            # Sem "Refeições": a faixa é a mesma nas duas linhas e está no
+            # texto desta seção. Era ela que fazia a tabela passar da margem.
+            ["Perfil", "Acordado", "Uso diurno", "Dias/sem.",
              "Pico P95", "Consumo"],
             [
                 (
                     linha["perfil"],
                     linha["acordado"],
-                    linha["refeicoes"] or "--",
                     linha["uso_diurno"],
                     _n(linha["dias_por_semana"], 0),
                     _n(linha.get("pico_p95_kw", float("nan")), 2, "kW"),
@@ -697,7 +704,7 @@ def _secao_ocupacao(estudo: ResultadoEstudo, figuras: dict[str, Path]) -> str:
                 )
                 for _, linha in tabela_perfis.iterrows()
             ],
-            alinhamento="p{3.1cm}p{2.0cm}p{2.6cm}p{2.0cm}rrr",
+            alinhamento="p{3.6cm}p{2.4cm}p{2.4cm}rrr",
             tamanho_fonte="scriptsize",
             legenda="Os perfis de ocupação simulados, e o que cada um produz",
         ))
@@ -1398,12 +1405,13 @@ def _secao_escopos(estudo: ResultadoEstudo, figuras: dict[str, Path]) -> str:
     ]
 
     partes.append(tabela(
-        ["Quadro", "Níveis", "Equip.", "Instalada", "Consumo", "Pico P95",
+        # Sem "Instalada": a potência de placa não entra em decisão nenhuma
+        # aqui. O que decide é o consumo, o pico e o banco que eles exigem.
+        ["Quadro", "Níveis", "Equip.", "Consumo", "Pico P95",
          "Banco", "Autonomia", "Investimento"],
         [
             (
                 m.escopo.nome, m.escopo.rotulo_dos_niveis, _n(m.equipamentos, 0),
-                _n(m.potencia_instalada_w / 1000.0, 2, "kW"),
                 _n(m.energia_diaria_kwh, 1, "kWh/dia"),
                 _n(m.pico_p95_kw, 2, "kW"),
                 _n(m.energia_util_kwh, 1, "kWh"),
@@ -1412,7 +1420,7 @@ def _secao_escopos(estudo: ResultadoEstudo, figuras: dict[str, Path]) -> str:
             )
             for m in escopos.medidas
         ],
-        alinhamento="p{3.0cm}p{1.7cm}rrrrrrr",
+        alinhamento="p{2.8cm}p{1.5cm}rrrrrr",
         tamanho_fonte="scriptsize",
         legenda="O quadro essencial e o ampliado, cada um com o banco que exige",
     ))
@@ -1551,25 +1559,11 @@ def _secao_armazenamento(estudo: ResultadoEstudo, figuras: dict[str, Path]) -> s
             "Estado de carga do banco durante a falta mais longa simulada, com faixa P5–P95.",
         ))
 
-    partes.append(secao("Alternativas avaliadas", nivel=2))
-    partes.append(tabela_longa(
-        ["Conjunto", "kWh", "kW", "Hoje", "Ano 10", "Investimento", "Meta"],
-        [
-            (
-                _sem_parenteses(_rotulo_do_ranking(linha.conjunto, estudo)),
-                _n(linha.energia_util_kwh, 1), _n(linha.potencia_kw, 1),
-                _n(linha.autonomia_garantida_h, 0, "h"),
-                _n(linha.autonomia_ano10_h, 0, "h"),
-                _brl(linha.capex_brl), "sim" if linha.atende_meta else "não",
-            )
-            for linha in estudo.ranking.itertuples()
-        ],
-        alinhamento="p{6cm}rrrrrl",
-        legenda=(
-            "Conjuntos avaliados. 'kWh' é a energia útil do banco; 'Hoje' e 'Ano 10', "
-            "a autonomia garantida agora e depois de dez anos de degradação"
-        ),
-    ))
+    # A lista de alternativas avaliadas saiu do documento a pedido. Ela
+    # enumera o que foi **descartado**, e quem lê a proposta quer o que foi
+    # escolhido: a justificativa da escolha já está no texto e na tabela de
+    # desempenho do conjunto recomendado. O ranking continua no pacote de
+    # dados, para quem quiser auditar a varredura.
     # A fronteira de dimensionamento saiu do documento a pedido: o que ela
     # mostra — que a partir de certo ponto mais energia não aumenta a
     # autonomia, porque o limite passa a ser a potência do inversor — já está
@@ -2095,39 +2089,21 @@ def _secao_economia(estudo: ResultadoEstudo) -> str:
             "perde produção, carga refrigerada ou faturamento durante a falta, esse "
             "costuma ser o maior dos três benefícios, e a análise acima o subestima."
         ))
-    if premissas is not None:
-        partes.append(tabela(
-            ["Premissa", "Valor"],
-            [
-                ("Tarifa fora de ponta", f"{_brl(premissas.tarifa_fora_ponta_brl_kwh)}/kWh"),
-                ("Tarifa de ponta", f"{_brl(premissas.tarifa_ponta_brl_kwh)}/kWh"),
-                ("Valor da energia injetada", f"{_brl(premissas.valor_injecao_brl_kwh)}/kWh"),
-                ("Demanda contratada",
-                 f"{_brl(premissas.tarifa_demanda_brl_kw_mes, 2)}/kW·mês"),
-                ("Custo da interrupção",
-                 f"{_brl(premissas.custo_interrupcao_brl_kwh, 2)}/kWh"),
-                ("Interrupções por ano", _n(premissas.interrupcoes_por_ano, 0)),
-                ("Reserva de backup", _pct(premissas.reserva_backup_frac)),
-                ("Taxa de desconto", _pct(premissas.taxa_desconto_ano, 1)),
-                ("Escalada tarifária", _pct(premissas.escalada_tarifaria_ano, 1)),
-                ("Horizonte de análise", _n(premissas.anos_analise, 0, "anos")),
-            ],
-            alinhamento="lr", largura_primeira_coluna="7cm",
-            legenda="Premissas econômicas adotadas",
-        ))
-        partes.append(tabela_longa(
-            ["Ano", "Retenção", "Benefício tarifário", "Resiliência", "OPEX", "Troca", "Fluxo"],
-            [
-                (
-                    _n(linha.ano, 0), _pct(linha.retencao, 1),
-                    _brl(linha.beneficio_tarifario_brl), _brl(linha.beneficio_resiliencia_brl),
-                    _brl(-linha.opex_brl), _brl(-linha.troca_brl) if linha.troca_brl else "—",
-                    _brl(linha.fluxo_brl),
-                )
-                for linha in economico.fluxo.itertuples()
-            ],
-            alinhamento="lrrrrrr", legenda="Fluxo de caixa do armazenamento",
-        ))
+    # A tabela de premissas econômicas e a de fluxo de caixa saíram do
+    # documento a pedido.
+    #
+    # A de premissas mostrava a tarifa das premissas, que não era a mesma que
+    # os números do documento usavam — a da fatura informada. Duas tarifas no
+    # mesmo estudo, e a tabela anunciando justamente a que não estava sendo
+    # usada. O desacordo foi corrigido na origem (ver `executar_estudo`), e não
+    # some com a tabela: ele contaminava a economia do banco e o valor
+    # presente.
+    #
+    # A de fluxo de caixa é ano a ano, e a decisão que este documento sustenta
+    # não é tomada linha a linha — o valor presente e o retorno já a resumem.
+    # Continua no pacote de dados, em CSV, para quem for montar a proposta
+    # comercial.
+
     return "\n\n".join(p for p in partes if p)
 
 

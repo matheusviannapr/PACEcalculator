@@ -630,6 +630,30 @@ def executar_estudo(cfg: ConfiguracaoEstudo, progresso=None) -> ResultadoEstudo:
 
     avisos: list[str] = []
 
+    # Uma tarifa só no documento inteiro.
+    #
+    # As premissas econômicas carregavam a própria tarifa, com padrão de
+    # R$ 0,78/kWh, enquanto a comparação de arranjos usava a da fatura
+    # informada. Duas tarifas no mesmo estudo: a economia do banco saía de uma
+    # e a dos cenários de outra, e a tabela de premissas anunciava justamente a
+    # que não estava sendo usada nos números que o cliente lê.
+    #
+    # A da fatura vence porque é a que o cliente reconhece — está na conta
+    # dele. Quem quiser tarifa diferente para a arbitragem informa a sua nas
+    # premissas, e este bloco sai do caminho.
+    if cfg.fatura is not None and cfg.fatura.tarifa_brl_kwh > 0:
+        padrao = PremissasBateria()
+        se_nao_mexeram = (
+            cfg.premissas.tarifa_fora_ponta_brl_kwh == padrao.tarifa_fora_ponta_brl_kwh
+            and cfg.premissas.tarifa_ponta_brl_kwh == padrao.tarifa_ponta_brl_kwh
+        )
+        if se_nao_mexeram:
+            cfg = replace(cfg, premissas=replace(
+                cfg.premissas,
+                tarifa_fora_ponta_brl_kwh=cfg.fatura.tarifa_brl_kwh,
+                tarifa_ponta_brl_kwh=cfg.fatura.tarifa_brl_kwh,
+            ))
+
     # A climatização varia com a estação, e sem isso as quatro saem iguais —
     # o verão subestimado, que é quando o pico acontece, e o inverno
     # superestimado, que é quando o sol rende menos. Preenchido aqui quando
