@@ -36,6 +36,8 @@ from .cenario import Cenario
 
 __all__ = [
     "ESTUDOS",
+    "SAZONALIDADE_CLIMATIZACAO",
+    "sazonalidade_de_climatizacao",
     "PERFIS",
     "PerfilOcupacao",
     "aplicar",
@@ -306,6 +308,70 @@ ORDEM_DOS_ESTUDOS = ("pouco_uso", "uso_comum", "muito_uso")
 #: três e não escolhe —, é só a posição dele na ordem, útil para o texto do
 #: relatório dizer qual fica entre os outros dois.
 ESTUDO_DO_MEIO = "uso_comum"
+
+
+#: Como a climatização varia ao longo do ano, em variação percentual sobre o
+#: fator de demanda.
+#:
+#: O ar-condicionado não roda igual em janeiro e em julho, e o motor sempre
+#: aceitou dizer isso — só ninguém preenchia. Com as quatro estações iguais, o
+#: verão sai subestimado (que é quando o pico acontece) e o inverno
+#: superestimado (que é quando o sol rende menos): os dois erros empurram o
+#: dimensionamento na mesma direção, e o banco que parece suficiente em
+#: fevereiro não é.
+#:
+#: Os valores são para o Sudeste. Primavera acompanha o verão de longe porque
+#: setembro e outubro já pedem ar à tarde; o inverno cai mais que o outono
+#: porque em julho o aparelho passa dias sem ligar.
+SAZONALIDADE_CLIMATIZACAO: dict[str, float] = {
+    "verão": 35.0,
+    "primavera": 15.0,
+    "outono": -25.0,
+    "inverno": -45.0,
+}
+
+#: O que conta como climatização, pelo nome do equipamento.
+#:
+#: Por nome porque é o que a vistoria traz — não há campo de categoria no
+#: backup. Ventilador entra junto: ele segue a mesma estação do ar, e numa
+#: casa que tem os dois é o ventilador que absorve a meia-estação.
+_MARCAS_DE_CLIMATIZACAO = (
+    "ar-condicionado", "ar condicionado", "split", "climatiz",
+    "ventilador", "self-contained", "chiller",
+)
+
+
+def e_climatizacao(equipamento: str) -> bool:
+    """O equipamento é de climatização?"""
+    nome = str(equipamento or "").lower()
+    return any(marca in nome for marca in _MARCAS_DE_CLIMATIZACAO)
+
+
+def sazonalidade_de_climatizacao(
+    cenario: Cenario, percentuais: dict[str, float] | None = None,
+) -> dict[str, dict]:
+    """
+    O ajuste sazonal de todo equipamento de climatização do cenário.
+
+    Devolve o dicionário no formato que
+    :func:`aurum.demanda.nucleo.aplicar_ajuste_sazonal` espera —
+    ``"Cômodo::Equipamento"`` apontando para as variações por estação.
+
+    Só climatização. Geladeira também trabalha mais no verão, mas bem menos, e
+    é carga contínua: mexer nela mudaria a base do quadro de backup em troca de
+    pouca energia. Chuveiro vai no sentido oposto, e quem quiser incluí-lo
+    passa o dicionário pronto — a função existe para o caso comum, não para
+    todos.
+    """
+    percentuais = percentuais or SAZONALIDADE_CLIMATIZACAO
+    ajustes: dict[str, dict] = {}
+    for nome, tabela in cenario.comodos.items():
+        if "Equipamento" not in tabela.columns:
+            continue
+        for equipamento in tabela["Equipamento"]:
+            if e_climatizacao(equipamento):
+                ajustes[f"{nome}::{equipamento}"] = {"ativo": True, **percentuais}
+    return ajustes
 
 
 # ----------------------------------------------------------------------------

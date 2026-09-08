@@ -176,13 +176,24 @@ class ComparacaoDeUso:
 # ----------------------------------------------------------------------------
 def _medir_perfil(
     cenario: Cenario, identificador: str, simulacoes: int, semente: int,
+    ajustes_sazonais: dict | None = None,
 ) -> dict[str, Any]:
-    """Simula um perfil uma vez e guarda o que os três cenários vão reusar."""
+    """
+    Simula um perfil uma vez e guarda o que os três cenários vão reusar.
+
+    O ajuste sazonal **precisa** chegar aqui. A função o recebia no chamador e
+    não o repassava, e o efeito era das piores: a tabela dos três cenários
+    ignorava a estação enquanto o resto do documento a aplicava, e o mesmo
+    cenário aparecia com 32,0 kWh/dia numa página e 31,5 na outra. Diferença
+    pequena o bastante para passar por ruído de Monte Carlo, e ninguém lendo
+    um relatório consegue distinguir uma coisa da outra.
+    """
     perfil = ocupacao.PERFIS[identificador]
     ajustado = ocupacao.aplicar(cenario, perfil)
     ajustado.criticidades_essenciais = cenario.criticidades_essenciais
     ensemble = simular_ensemble(
-        ajustado.para_comodos(), ajustado.instancias_de(), simulacoes, semente=semente)
+        ajustado.para_comodos(), ajustado.instancias_de(), simulacoes,
+        ajustes_sazonais, semente=semente)
     suave = ensemble.reamostrar(15) if ensemble.passo_min == 1 else ensemble
     geral = ensemble.resumo()["geral"]
 
@@ -192,7 +203,8 @@ def _medir_perfil(
         comodos = ajustado.para_comodos(True)
         if comodos:
             backup = simular_ensemble(
-                comodos, ajustado.instancias_de(True), simulacoes, semente=semente)
+                comodos, ajustado.instancias_de(True), simulacoes,
+                ajustes_sazonais, semente=semente)
     return {
         "perfil": perfil,
         "ensemble": ensemble,
@@ -221,6 +233,7 @@ def comparar_cenarios_de_uso(
     semente: int = 20260902,
     estudos: Sequence[str] | None = None,
     tarifa_brl_kwh: float = 0.0,
+    ajustes_sazonais: dict | None = None,
 ) -> ComparacaoDeUso:
     """
     Mede os três cenários e dimensiona solar e bateria para cada um.
@@ -240,7 +253,8 @@ def comparar_cenarios_de_uso(
         for identificador in ocupacao.ESTUDOS[chave]["perfis"]
     }
     medidos = {
-        identificador: _medir_perfil(cenario, identificador, simulacoes, semente)
+        identificador: _medir_perfil(
+            cenario, identificador, simulacoes, semente, ajustes_sazonais)
         for identificador in necessarios
     }
 

@@ -97,14 +97,14 @@ TOPOLOGIA_COM_BATERIA = "splitphase"
 #:
 #: Vem da própria tabela. A coluna "Split + 5kWh" é o kit split-phase mais um
 #: banco de 5 kWh, e a diferença entre as duas colunas, linha a linha, é de
-#: R$ 9.900 até 20 kWp e cai para R$ 7.900 acima disso — desconto de volume
-#: sobre o mesmo bloco. R$ 10.000 é a referência de campo e o padrão aqui;
-#: quem tiver a cotação do dia deve trocá-la.
+#: R$ 11.900 até 20 kWp e cai para R$ 9.800 acima disso — desconto de volume
+#: sobre o mesmo bloco. R$ 12.000 é a cotação de expansão em vigor e o padrão
+#: aqui; quem tiver a do dia deve trocá-la.
 #:
 #: Bloco, e não R$/kWh contínuo, porque é assim que se compra: bateria vem em
 #: módulo, e meio módulo não existe.
 BATERIA_BLOCO_KWH = 5.0
-BATERIA_BLOCO_BRL = 10_000.0
+BATERIA_BLOCO_BRL = 12_000.0
 
 #: As topologias da tabela, na ordem em que a fonte as apresenta.
 #:

@@ -2071,9 +2071,15 @@ def _secao_economia(estudo: ResultadoEstudo) -> str:
                 ("Valor presente líquido", _brl(economico.vpl_brl)),
                 ("Taxa interna de retorno",
                  _pct(economico.tir, 1) if economico.tir is not None else "não converge"),
-                ("Retorno do investimento",
+                # O rótulo diz **do banco**, e não "do investimento". Os dois
+                # apareciam com o mesmo nome — 4,8 anos no resumo e "não se
+                # paga" aqui —, e são coisas diferentes: o resumo fala do
+                # sistema inteiro, esta seção do armazenamento sozinho. Bateria
+                # sem arbitragem tarifária não se paga mesmo; ela compra
+                # continuidade, e continuidade não aparece na conta de luz.
+                ("Retorno do banco, isolado do solar",
                  _n(economico.payback_anos, 1, "anos") if economico.payback_anos
-                 else "não se paga no horizonte"),
+                 else "não se paga — o banco compra continuidade, não economia"),
                 ("Custo nivelado do armazenamento",
                  f"{_brl(economico.custo_nivelado_brl_kwh, 2)}/kWh"
                  if economico.custo_nivelado_brl_kwh else "—"),

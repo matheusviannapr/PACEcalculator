@@ -630,6 +630,39 @@ def executar_estudo(cfg: ConfiguracaoEstudo, progresso=None) -> ResultadoEstudo:
 
     avisos: list[str] = []
 
+    # A climatização varia com a estação, e sem isso as quatro saem iguais —
+    # o verão subestimado, que é quando o pico acontece, e o inverno
+    # superestimado, que é quando o sol rende menos. Preenchido aqui quando
+    # ninguém preencheu, e anunciado, porque muda o número: quem quiser outra
+    # sazonalidade passa a sua em `ajustes_sazonais` e este bloco sai do
+    # caminho.
+    if not cfg.ajustes_sazonais and cfg.tabelas_cenario:
+        from ..demanda.cenario import Cenario
+        from ..demanda.ocupacao import (
+            SAZONALIDADE_CLIMATIZACAO,
+            sazonalidade_de_climatizacao,
+        )
+
+        provisorio = Cenario(
+            nome=cfg.nome, segmento="residencia",
+            comodos=dict(cfg.tabelas_cenario),
+            instancias=dict(cfg.instancias_por_comodo or {}),
+        )
+        sazonal = sazonalidade_de_climatizacao(provisorio)
+        if sazonal:
+            cfg = replace(cfg, ajustes_sazonais=sazonal)
+            variacao = ", ".join(
+                f"{estacao} {valor:+.0f}%"
+                for estacao, valor in SAZONALIDADE_CLIMATIZACAO.items()
+            )
+            avisos.append(
+                f"{len(sazonal)} equipamento(s) de climatização receberam variação "
+                f"sazonal ({variacao}). Sem ela as quatro estações sairiam iguais, "
+                "com o ar-condicionado rodando tanto em julho quanto em janeiro — "
+                "o que subestima o pico do verão e superestima o consumo do "
+                "inverno, os dois na direção de um banco menor do que o necessário."
+            )
+
     # Bateria implica inversor híbrido, e híbrido no varejo é split-phase.
     # Precificar um estudo com bateria pela coluna mono/bifásico ou
     # microinversor sai 30% abaixo do real, porque essas colunas não trazem
@@ -859,10 +892,20 @@ def executar_estudo(cfg: ConfiguracaoEstudo, progresso=None) -> ResultadoEstudo:
                 base_uso, serie, base, malha=cfg.malha,
                 autonomia_alvo_h=cfg.autonomia_alvo_h,
                 confiabilidade=cfg.confiabilidade_alvo,
-                simulacoes=max(60, cfg.simulacoes // 2),
+                # As mesmas rodadas do estudo, e não metade. Com metade, o
+                # cenário deste documento aparecia com 32,0 kWh/dia na tabela
+                # dos três e 31,5 no resumo — o mesmo cenário, dois números.
+                # Ninguém consegue distinguir ruído de Monte Carlo de erro de
+                # cálculo lendo um relatório, e não deveria precisar.
+                simulacoes=cfg.simulacoes,
                 premissas=cfg.premissas,
                 topologia_kit=cfg.topologia_kit or "splitphase",
                 semente=cfg.semente,
+                # A mesma sazonalidade do resto do estudo. Sem ela, a tabela
+                # dos três cenários saía das quatro estações iguais enquanto o
+                # documento aplicava a variação — e o mesmo cenário aparecia
+                # com 32,0 kWh/dia numa página e 31,5 na outra.
+                ajustes_sazonais=cfg.ajustes_sazonais,
                 # A taxa efetiva do motor rigoroso, e não a tarifa nominal.
                 #
                 # Creditar toda a geração à tarifa cheia dava payback 3,0 para o
