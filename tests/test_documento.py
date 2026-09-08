@@ -214,9 +214,19 @@ def test_secao_do_telhado_traz_area_e_modulos(estudo_com_telhado):
 
 
 def test_sem_telhado_o_documento_diz_que_nao_verificou(estudo_sem_telhado):
+    """
+    A ressalva que impede o estudo de prometer o que não verificou.
+
+    Sem telhado marcado, "O telhado" e "O sistema fotovoltaico" viraram uma
+    seção só: as duas diziam variações de "não se aplica", em oito e quatro
+    linhas, e duas entradas no sumário para isso interrompem a leitura entre a
+    demanda e o armazenamento. O que não pode sumir é a ressalva — e é ela que
+    este teste guarda, e não o título.
+    """
     tex = montar_documento(estudo_sem_telhado)
-    assert "\\section{O telhado}" in tex
-    assert "não afirma que o sistema cabe" in tex or "não foi marcada" in tex.lower()
+    assert "\\section{O telhado e o sistema fotovoltaico}" in tex
+    assert "\\section{O telhado}" not in tex, "sem telhado, as duas viram uma"
+    assert "não afirma que o sistema cabe" in tex
 
 
 def test_secao_de_procedencia_separa_datasheet_de_estimativa(estudo_com_telhado):

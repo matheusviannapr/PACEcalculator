@@ -417,14 +417,24 @@ def _secao_telhado(estudo: ResultadoEstudo, figuras: dict[str, Path]) -> str:
     telhado = estudo.configuracao.telhado
     layout = estudo.configuracao.layout
     if telhado is None or layout is None:
+        # Uma seção só, e não duas. Sem telhado marcado, "O telhado" e "O
+        # sistema fotovoltaico" diziam variações de "não se aplica" em oito e
+        # quatro linhas: duas entradas no sumário para isso interrompem a
+        # leitura entre a demanda e o armazenamento, e a ressalva que importa —
+        # o estudo não afirma que o sistema cabe na cobertura — se dilui por
+        # ser dita duas vezes em vez de uma.
         return "\n\n".join([
-            secao("O telhado"),
-            "Não foi marcada uma área de cobertura para este estudo. A potência "
-            "fotovoltaica foi definida pelo consumo, e o documento não afirma que "
-            "o sistema cabe fisicamente na edificação.",
-            nota("Marcar o telhado no mapa permite medir a área real, derivar a "
-                 "orientação e contar quantos módulos cabem — passando de uma "
-                 "estimativa de compensação para um projeto verificável."),
+            secao("O telhado e o sistema fotovoltaico"),
+            f"O gerador foi dimensionado em {_n(estudo.potencia_fv_kwp, 1, 'kWp')} a "
+            "partir do consumo anual estimado. Não foi marcada uma área de cobertura, "
+            "e por isso este estudo não afirma que o sistema cabe fisicamente na "
+            "edificação — a potência é a que compensa a conta, não a que o telhado "
+            "comporta.",
+            nota("Marcar o telhado no mapa muda a natureza do documento: permite "
+                 "medir a área real, derivar a orientação de cada água, contar "
+                 "quantos módulos cabem e calcular a geração de cada orientação em "
+                 "separado. É a diferença entre uma estimativa de compensação e um "
+                 "projeto verificável, e é o único passo que falta aqui."),
         ])
 
     partes = [
@@ -1003,6 +1013,10 @@ def _analise_completa(analise, figuras: dict[str, Path]) -> list[str]:
 
 def _secao_fotovoltaico(estudo: ResultadoEstudo) -> str:
     layout = estudo.configuracao.layout
+    if layout is None:
+        # Sem arranjo não há o que dizer aqui: a potência e a ressalva de área
+        # já foram ditas na seção do telhado, que nesse caso as reúne.
+        return ""
     partes = [secao("O sistema fotovoltaico")]
     if layout is not None:
         modulo = layout.modulo
@@ -1650,18 +1664,26 @@ def _secao_cenarios(estudo: ResultadoEstudo, figuras: dict[str, Path]) -> str:
             "posto tarifário e demanda contratada não entram nesta comparação.",
         ),
         tabela_longa(
-            ["Arranjo", "Investimento", "Economia", "Autonomia", "Sem energia", "VPL", "Payback"],
+            # "Resiliência" no lugar de "Sem energia": o payback é calculado
+            # sobre economia mais resiliência, e sem a segunda na página quem
+            # dividisse investimento por economia chegava a 5,0 anos e lia 3,4
+            # ao lado. A energia que falta num evento médio, que saiu daqui, é
+            # 0,0 kWh em todo arranjo com bateria — o caso em que alguém a
+            # leria — e o que ela diz já está na coluna de autonomia.
+            ["Arranjo", "Investimento", "Economia", "Resiliência", "Autonomia",
+             "VPL", "Payback"],
             [
                 (
                     cenario.nome.replace("Rede + ", "").capitalize(),
                     _brl(cenario.capex_brl) if cenario.capex_brl > 0 else "—",
                     _brl(cenario.economia_anual_brl) if cenario.economia_anual_brl > 0 else "—",
+                    _brl(cenario.valor_resiliencia_brl_ano)
+                    if cenario.valor_resiliencia_brl_ano > 0 else "—",
                     (
                         _n(cenario.autonomia_garantida_h, 0, "h")
                         if cenario.autonomia_garantida_h > 0
                         else "0 h"
                     ),
-                    _n(cenario.ens_por_evento_kwh, 1, "kWh"),
                     _brl(cenario.vpl_brl),
                     _n(cenario.payback_anos, 1, "anos") if cenario.payback_anos else "—",
                 )
@@ -1669,7 +1691,9 @@ def _secao_cenarios(estudo: ResultadoEstudo, figuras: dict[str, Path]) -> str:
             ],
             alinhamento="p{3.9cm}rrrrrr", tamanho_fonte="scriptsize",
             legenda=(
-                "Cada arranjo de fontes contra a conta de hoje. 'Economia' é por ano; "
+                "Cada arranjo de fontes contra a conta de hoje. 'Economia' e "
+            "'Resiliência' são por ano e somam no payback — a primeira aparece na "
+            "conta de luz, a segunda não. 'Economia' é por ano; "
                 "'Autonomia', a maior falta atravessada em 95% dos casos no pior par de "
                 "estação e hora; 'Sem energia', o que falta à carga essencial numa "
                 "interrupção média"
@@ -1721,14 +1745,35 @@ def _secao_cenarios(estudo: ResultadoEstudo, figuras: dict[str, Path]) -> str:
             )
         partes.append(frase)
 
-    if comparacao.premissas.custo_interrupcao_brl_kwh > 0:
+    premissas = comparacao.premissas
+    por_evento = getattr(premissas, "custo_interrupcao_brl_evento", 0.0) or 0.0
+    frequencia = (
+        f"{_n(premissas.interrupcoes_por_ano, 1)} interrupções por ano de "
+        f"{_n(premissas.duracao_media_interrupcao_h, 1, 'h')} em média"
+    )
+    if por_evento > 0:
+        # A unidade em que o cliente pensa.
+        partes.append(nota(
+            f"O valor da resiliência entra por evento: {_brl(por_evento)} por "
+            f"interrupção que o banco atravessa inteira, com {frequencia}. Ninguém "
+            "diz “a falta de luz me custou tanto por kWh”; diz “fiquei três horas no "
+            "escuro”. É o parâmetro mais sensível de toda a análise e o único que "
+            "não se estima de fora: ele vem do cliente."
+        ))
+    elif premissas.custo_interrupcao_brl_kwh > 0:
+        # Valorar por energia pune o recorte bem-feito, e quem lê precisa saber
+        # disso antes de concluir que o banco não vale a pena.
         partes.append(nota(
             f"O valor da resiliência entra a "
-            f"{_brl(comparacao.premissas.custo_interrupcao_brl_kwh, 2)} por kWh não suprido, "
-            f"com {_n(comparacao.premissas.interrupcoes_por_ano, 1)} interrupções por ano "
-            f"de {_n(comparacao.premissas.duracao_media_interrupcao_h, 1, 'h')} em média. "
-            "É o parâmetro mais sensível de toda a análise e o único que não se estima "
-            "de fora: ele vem do cliente."
+            f"{_brl(premissas.custo_interrupcao_brl_kwh, 2)} por kWh não suprido, com "
+            f"{frequencia}. Valorar por energia mede bem onde a falta para produção — "
+            "indústria, frigorífico, clínica — e mede mal em residência, onde o quadro "
+            "crítico é pequeno por construção: quanto melhor a criticidade separa o "
+            "essencial, menos energia deixa de faltar, e menor o valor que este "
+            "cálculo atribui à bateria. Um número baixo aqui não diz que a "
+            "continuidade vale pouco; diz que ela não cabe nesta unidade. É o "
+            "parâmetro mais sensível de toda a análise e o único que não se estima de "
+            "fora: ele vem do cliente."
         ))
     else:
         partes.append(caixa(
@@ -2059,10 +2104,15 @@ def _secao_economia(estudo: ResultadoEstudo) -> str:
                 ("Energia descarregada pelo banco",
                  _n(operacao.descarga_bateria_kwh, 0, "kWh/ano")),
                 ("Ciclos equivalentes por ano", _n(operacao.ciclos_equivalentes, 0)),
-                ("Economia tarifária no primeiro ano", _brl(economico.economia_ano1_brl)),
+                ("Economia tarifária do banco no primeiro ano",
+                 _brl(economico.economia_ano1_brl)),
                 ("Valor da resiliência no primeiro ano",
                  _brl(economico.valor_resiliencia_ano1_brl)),
-                ("Valor presente líquido", _brl(economico.vpl_brl)),
+                # "do banco, isolado do solar" pelo mesmo motivo do retorno: o
+                # quadro de arranjos traz o VPL do arranjo inteiro, e os dois
+                # números diferem por serem de coisas diferentes.
+                ("Valor presente líquido do banco, isolado do solar",
+                 _brl(economico.vpl_brl)),
                 ("Taxa interna de retorno",
                  _pct(economico.tir, 1) if economico.tir is not None else "não converge"),
                 # O rótulo diz **do banco**, e não "do investimento". Os dois

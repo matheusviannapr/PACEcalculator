@@ -99,7 +99,27 @@ class PremissasBateria:
     # -- resiliência -------------------------------------------------------
     #: Quanto vale para o cliente 1 kWh que faltou. É o parâmetro mais
     #: sensível do modelo e o único que não se estima de fora: pergunte.
+    #:
+    #: Serve bem onde a falta se mede em produção parada — indústria,
+    #: frigorífico, clínica. Serve mal em residência, e a razão é estrutural:
+    #: quanto melhor o recorte de criticidade, menor o quadro, menos energia
+    #: deixa de faltar, e menor o valor que o modelo atribui à bateria. O
+    #: recorte bem-feito acaba punido. Ver
+    #: :attr:`custo_interrupcao_brl_evento`.
     custo_interrupcao_brl_kwh: float = 0.0
+    #: Quanto vale **não passar** por uma interrupção, seja qual for a energia
+    #: que ela teria consumido.
+    #:
+    #: É a unidade em que o cliente pensa. Ninguém diz "a falta de luz me
+    #: custou R$ 18 este ano"; diz "fiquei três horas no escuro com criança em
+    #: casa". Num caso real, valorar por kWh dava R$ 18 por ano de resiliência
+    #: para um banco de R$ 12.000 — para ele se pagar só por aí, o kWh não
+    #: suprido teria de valer R$ 457, número que ninguém escreveria num
+    #: formulário. É esse absurdo que denuncia a unidade errada.
+    #:
+    #: Quando informado, vence o custo por kWh. Zero mantém o comportamento
+    #: antigo.
+    custo_interrupcao_brl_evento: float = 0.0
     #: Frequência e duração das faltas. Os padrões são a ordem de grandeza dos
     #: limites de DEC/FEC da ANEEL para área urbana; use os índices reais do
     #: alimentador quando houver.
@@ -417,6 +437,32 @@ def _capex(conjunto: ConjuntoArmazenamento, premissas: PremissasBateria) -> tupl
     return equipamento * (1.0 + premissas.instalacao_percent_do_equipamento), baterias
 
 
+def _eventos_evitados_por_ano(
+    resiliencia: ResultadoResiliencia | None,
+    premissas: PremissasBateria,
+) -> float:
+    """
+    Quantas interrupções por ano o banco atravessa inteiras.
+
+    Não é a frequência de interrupções: é quantas delas o cliente **não
+    sente**. Uma interrupção atravessada pela metade continua sendo uma
+    interrupção sentida, e por isso o que se conta é a probabilidade de
+    atendimento na duração média — não a fração de energia suprida.
+
+    Sem banco, zero: é o que dá sentido à subtração implícita, já que o
+    benefício é sempre em relação a não ter bateria nenhuma.
+    """
+    if resiliencia is None:
+        return 0.0
+    duracoes = resiliencia.tabela["duracao_h"].to_numpy()
+    if not len(duracoes):
+        return 0.0
+    alvo = duracoes[np.argmin(np.abs(duracoes - premissas.duracao_media_interrupcao_h))]
+    recorte = resiliencia.tabela[np.isclose(resiliencia.tabela["duracao_h"], alvo)]
+    prob = float(recorte["prob_atendimento"].mean()) if len(recorte) else 0.0
+    return max(0.0, min(1.0, prob)) * premissas.interrupcoes_por_ano
+
+
 def _energia_nao_suprida_evitada_kwh(
     resiliencia: ResultadoResiliencia | None,
     premissas: PremissasBateria,
@@ -472,6 +518,7 @@ def avaliar_economia(
     capex_total, capex_baterias = _capex(conjunto, premissas)
     vida = modelo.vida_util_anos(operacao.ciclos_equivalentes)
     ens_evitada = _energia_nao_suprida_evitada_kwh(resiliencia, premissas, ensemble)
+    eventos_evitados = _eventos_evitados_por_ano(resiliencia, premissas)
 
     trajetoria = trajetoria_de_vida(
         modelo, operacao.ciclos_equivalentes, conjunto.energia_util_kwh, premissas.anos_analise
@@ -501,9 +548,18 @@ def avaliar_economia(
         beneficio_tarifario = (
             economia_ponta - custo_recarga + ganho_autoconsumo + ganho_demanda
         ) * retencao * inflacao
-        beneficio_resiliencia = (
-            ens_evitada * premissas.custo_interrupcao_brl_kwh * retencao * inflacao
-        )
+        # Por evento quando informado, por kWh quando não. A retenção pesa nos
+        # dois: um banco degradado atravessa menos horas, e atravessar menos
+        # horas é atravessar menos eventos inteiros.
+        if premissas.custo_interrupcao_brl_evento > 0:
+            beneficio_resiliencia = (
+                eventos_evitados * premissas.custo_interrupcao_brl_evento
+                * retencao * inflacao
+            )
+        else:
+            beneficio_resiliencia = (
+                ens_evitada * premissas.custo_interrupcao_brl_kwh * retencao * inflacao
+            )
         opex = capex_total * premissas.opex_percent_do_capex_ano
 
         troca = 0.0

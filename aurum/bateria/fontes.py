@@ -773,7 +773,24 @@ def comparar_fontes(
             ens_evento = ens_sem_nada
             ger_evento = 0.0
         evitada_ano = max(0.0, ens_sem_nada - ens_evento) * premissas.interrupcoes_por_ano
-        valor_resiliencia = evitada_ano * premissas.custo_interrupcao_brl_kwh
+        # Por evento quando informado, por kWh quando não — a mesma regra da
+        # análise econômica. Sem esta linha, o quadro de arranjos continuava
+        # valorando por energia enquanto a seção econômica valorava por evento,
+        # e o mesmo banco aparecia com R$ 18 numa página e R$ 4.730 na outra.
+        if premissas.custo_interrupcao_brl_evento > 0:
+            # A fração do evento que o backup cobre é a fração de energia que
+            # ele supre: atravessar metade do apagão evita metade do
+            # transtorno, e não o transtorno inteiro.
+            fracao = (
+                max(0.0, ens_sem_nada - ens_evento) / ens_sem_nada
+                if ens_sem_nada > 0 else 0.0
+            )
+            valor_resiliencia = (
+                fracao * premissas.interrupcoes_por_ano
+                * premissas.custo_interrupcao_brl_evento
+            )
+        else:
+            valor_resiliencia = evitada_ano * premissas.custo_interrupcao_brl_kwh
         combustivel_apagao = (
             float(np.nan_to_num(ger_evento))
             * premissas.interrupcoes_por_ano
