@@ -1,10 +1,11 @@
 """
-Testes da tabela de preço de kit até 40 kWp.
+Testes da tabela de preço de kit, de 5 a 125 kWp.
 
 O que se garante aqui é que a tabela é lida como tabela — com degraus, com
-buracos e com limite — e não como se fosse mais uma curva. Os três erros que
-custariam caro: extrapolar acima de 40 kWp, inventar preço onde a fonte traz
-um traço, e somar a bateria duas vezes.
+buracos e com limite por coluna — e não como se fosse mais uma curva. Os erros
+que custariam caro: extrapolar acima do teto da coluna, inventar preço onde a
+fonte traz um traço, somar a bateria duas vezes, e apresentar como cotação um
+banco que acima de 40 kWp o fornecedor monta caso a caso.
 """
 from __future__ import annotations
 
@@ -66,7 +67,7 @@ def test_acima_da_tabela_nao_extrapola():
     assert preco_kit(80.0, "mono_bifasico") is None
     # O trifásico vai mais longe, e o teto global é o dele.
     assert potencia_maxima("trifasico") == POTENCIA_MAXIMA_KWP == 125.0
-    assert preco_kit(125.0, "trifasico") == pytest.approx(313_681.0)
+    assert preco_kit(125.0, "trifasico") == pytest.approx(377_744.0)
     assert preco_kit(125.1, "trifasico") is None
 
 
@@ -316,3 +317,48 @@ def test_toda_topologia_explica_para_que_serve():
     for chave in TOPOLOGIAS:
         assert len(DESCRICAO_TOPOLOGIA.get(chave, "")) > 40, chave
     assert TOPOLOGIA_COM_BATERIA in TOPOLOGIAS, "bateria exige híbrido, e híbrido é split-phase"
+
+
+def test_a_faixa_alta_e_a_mesma_revisao_da_baixa():
+    """
+    A tabela deixou de estar pela metade, e a razão entre as revisões prova.
+
+    Por um tempo os preços até 40 kWp eram de setembro e os de 50 a 125 kWp da
+    revisão anterior — 20% mais baratos, num estudo que apresentaria
+    investimento subestimado. O reajuste é de lista, não de produto: sobe
+    uniforme degrau a degrau e não mexe na contagem de módulos. Se um dia a
+    faixa alta ficar para trás de novo, é este teste que acusa.
+    """
+    from aurum.pv.kits import POTENCIA_REVISADA_ATE, revisao_defasada
+
+    anterior = {50.0: 131_623.0, 60.0: 155_461.0, 70.0: 178_123.0,
+                80.0: 207_966.0, 90.0: 231_000.0, 100.0: 258_568.0,
+                110.0: 281_468.0, 125.0: 313_681.0}
+    for kwp, velho in anterior.items():
+        razao = TABELA_KIT[kwp][1]["trifasico"] / velho
+        assert 1.18 < razao < 1.22, f"{kwp} kWp fora do reajuste uniforme"
+
+    assert TABELA_KIT[125.0][0] == 202, "reajuste de lista não mexe em módulo"
+    assert POTENCIA_REVISADA_ATE == POTENCIA_MAXIMA_KWP
+    assert revisao_defasada(125.0, "trifasico") is None, "nada mais está defasado"
+
+
+def test_bateria_de_tabela_para_em_40_kwp():
+    """
+    Acima de 40 kWp o kit com bateria é montado caso a caso, e a fonte diz isso.
+
+    O banco continua dimensionado — quanta energia a carga essencial exige não
+    depende do tamanho do sistema. O que não vale é apresentar o preço dele como
+    cotação: um banco trifásico de 90 kWp não é o split-phase residencial
+    multiplicado por blocos de R$ 12 mil.
+    """
+    from aurum.pv.kits import BATERIA_EM_TABELA_ATE, bateria_caso_a_caso
+
+    assert BATERIA_EM_TABELA_ATE == 40.0
+    assert preco_kit_com_bateria(40.0) is not None
+    assert preco_kit_com_bateria(50.0) is None, "a coluna com bateria para em 40"
+
+    assert bateria_caso_a_caso(30.0) is None
+    assert bateria_caso_a_caso(90.0, tem_bateria=False) is None, "sem banco, sem ruído"
+    aviso = bateria_caso_a_caso(90.0)
+    assert aviso and "caso a caso" in aviso and "cotação" in aviso

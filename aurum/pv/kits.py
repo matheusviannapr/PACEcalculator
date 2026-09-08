@@ -53,6 +53,8 @@ __all__ = [
     "composicao_de_kit",
     "fora_da_tabela",
     "revisao_defasada",
+    "bateria_caso_a_caso",
+    "BATERIA_EM_TABELA_ATE",
     "potencia_maxima",
     "preco_kit",
     "preco_kit_com_bateria",
@@ -63,7 +65,7 @@ __all__ = [
 #: número vira uma verdade permanente que ele não é.
 APURADO_EM = date(2026, 9, 8)
 
-FONTE = "Tabela de kit fotovoltaico do distribuidor, faixa até 40 kWp"
+FONTE = "Tabela de kit fotovoltaico do distribuidor, de 5 a 125 kWp"
 
 #: Para que serve cada topologia, na linguagem de quem vende.
 #:
@@ -144,39 +146,52 @@ TABELA_KIT: dict[float, tuple[int, dict[str, float | None]]] = {
                 "splitphase": 121_895.0, "trifasico": 110_305.0, "com_bateria": 131_768.0}),
     40.0: (64, {"mono_bifasico": 128_901.0, "microinversor": 141_960.0,
                 "splitphase": 138_924.0, "trifasico": 128_607.0, "com_bateria": 148_713.0}),
-    # ---- revisão anterior, não reenviada -----------------------------------
-    # A coluna trifásica de 20 a 40 kWp subiu 20% na revisão nova (R$ 56.244
-    # para R$ 67.527 em 20 kWp), então estas linhas certamente também. Aplicar
-    # o reajuste médio a elas seria inventar cotação, e por isso elas ficam
-    # como estão, marcadas em `POTENCIA_REVISADA_ATE`: o estudo avisa quando
-    # as usa. Reenviada a tabela de 50 a 125 kWp, é só substituir aqui.
+    # ---- faixa alta: só trifásico, e sem bateria de tabela -----------------
+    # Acima de 40 kWp a entrada é trifásica e as outras três colunas somem do
+    # catálogo. A coluna com bateria some junto, e não por esquecimento: a
+    # fonte diz que kit acima de 40 kWp com bateria é montado caso a caso.
+    # Ver `BATERIA_EM_TABELA_ATE`.
     50.0:  (80,  {"mono_bifasico": None, "microinversor": None,
-                  "splitphase": None, "trifasico": 131_623.0, "com_bateria": None}),
+                  "splitphase": None, "trifasico": 158_531.0, "com_bateria": None}),
     60.0:  (96,  {"mono_bifasico": None, "microinversor": None,
-                  "splitphase": None, "trifasico": 155_461.0, "com_bateria": None}),
+                  "splitphase": None, "trifasico": 187_232.0, "com_bateria": None}),
     70.0:  (112, {"mono_bifasico": None, "microinversor": None,
-                  "splitphase": None, "trifasico": 178_123.0, "com_bateria": None}),
+                  "splitphase": None, "trifasico": 214_467.0, "com_bateria": None}),
     80.0:  (128, {"mono_bifasico": None, "microinversor": None,
-                  "splitphase": None, "trifasico": 207_966.0, "com_bateria": None}),
+                  "splitphase": None, "trifasico": 250_615.0, "com_bateria": None}),
     90.0:  (144, {"mono_bifasico": None, "microinversor": None,
-                  "splitphase": None, "trifasico": 231_000.0, "com_bateria": None}),
+                  "splitphase": None, "trifasico": 278_312.0, "com_bateria": None}),
     100.0: (160, {"mono_bifasico": None, "microinversor": None,
-                  "splitphase": None, "trifasico": 258_568.0, "com_bateria": None}),
+                  "splitphase": None, "trifasico": 311_636.0, "com_bateria": None}),
     110.0: (176, {"mono_bifasico": None, "microinversor": None,
-                  "splitphase": None, "trifasico": 281_468.0, "com_bateria": None}),
+                  "splitphase": None, "trifasico": 339_166.0, "com_bateria": None}),
     120.0: (192, {"mono_bifasico": None, "microinversor": None,
-                  "splitphase": None, "trifasico": 305_731.0, "com_bateria": None}),
+                  "splitphase": None, "trifasico": 361_641.0, "com_bateria": None}),
     125.0: (202, {"mono_bifasico": None, "microinversor": None,
-                  "splitphase": None, "trifasico": 313_681.0, "com_bateria": None}),
+                  "splitphase": None, "trifasico": 377_744.0, "com_bateria": None}),
 }
 
-#: Até onde a tabela é da revisão atual. Acima disso os preços são da anterior.
+#: Até onde a tabela é da revisão atual. Acima disso os preços seriam de outra.
 #:
-#: A revisão nova subiu 20,3% de forma uniforme, degrau a degrau — assinatura
-#: de reajuste de lista, e não de mudança de produto. As linhas acima deste
-#: limite não foram reenviadas e estão, portanto, defasadas na mesma ordem de
-#: grandeza. O estudo avisa quando as usa em vez de calar.
-POTENCIA_REVISADA_ATE = 40.0
+#: Hoje a tabela inteira é da revisão de setembro. A faixa alta chegou depois da
+#: baixa, e no intervalo o estudo avisava que estava usando cotação vencida. Que
+#: as duas metades são a mesma revisão se lê na razão entre elas: 20,4% de 50 a
+#: 125 kWp contra os 20,3% medidos até 40 kWp, com a contagem de módulos intacta
+#: em toda linha — reajuste de lista, e não mudança de produto.
+#:
+#: O mecanismo fica de pé porque a próxima revisão pode de novo chegar pela
+#: metade, e é justamente nesse intervalo que alguém fecha proposta com preço
+#: vencido sem saber.
+POTENCIA_REVISADA_ATE = max(TABELA_KIT)
+
+#: Até onde existe kit de tabela **com bateria**. Acima disso é caso a caso.
+#:
+#: A coluna "Split + 5kWh" para em 40 kWp, e a fonte é explícita sobre o motivo:
+#: acima disso, kit com bateria se monta um a um. Não é dizer que não se faz —
+#: é dizer que o preço não sai de tabela. Um banco trifásico de 90 kWp não é o
+#: split-phase residencial multiplicado, e somar blocos de R$ 12 mil como se
+#: fosse entregaria um total com cara de cotação e origem de extrapolação.
+BATERIA_EM_TABELA_ATE = 40.0
 
 #: Acima disto nenhuma coluna fala, e a curva de escala volta a valer.
 #:
@@ -285,8 +300,9 @@ def preco_kit(potencia_kwp: float, topologia: str = "mono_bifasico") -> float | 
     """
     Preço do **kit** — equipamento posto, sem obra — na potência pedida.
 
-    Devolve ``None`` acima de 40 kWp, onde a tabela não fala, e para topologia
-    que não existe na faixa (o trifásico só começa em 20 kWp). ``None`` é a
+    Devolve ``None`` acima do teto **da coluna** — 40 kWp no mono/bifásico, no
+    microinversor e no split-phase; 125 kWp no trifásico — e para topologia que
+    não existe na faixa pedida (o trifásico só começa em 20 kWp). ``None`` é a
     resposta certa nesses casos: quem chama volta para a curva de escala em vez
     de receber um número extrapolado que parece cotação.
     """
@@ -357,6 +373,31 @@ def revisao_defasada(potencia_kwp: float, topologia: str) -> str | None:
         "Os preços desta faixa são da revisão anterior, e a faixa reenviada subiu "
         "20% entre uma revisão e outra — o investimento deste estudo está, "
         "portanto, provavelmente subestimado. Confirme a cotação antes da proposta."
+    )
+
+
+def bateria_caso_a_caso(potencia_kwp: float, tem_bateria: bool = True) -> str | None:
+    """
+    O aviso de quem pediu bateria acima de onde a tabela a precifica.
+
+    Até 40 kWp o armazenamento tem preço de prateleira: a coluna "Split + 5kWh"
+    existe, e o bloco de expansão é o degrau entre as duas colunas. Acima disso
+    a fonte diz que o conjunto é montado caso a caso — inversor híbrido
+    trifásico, banco em tensão maior e proteção própria não são o produto
+    residencial multiplicado.
+
+    O estudo continua dimensionando o banco, porque a pergunta técnica — quanta
+    energia a carga essencial exige — não muda com o tamanho do sistema. O que
+    muda é a confiança do preço, e é só isso que o aviso diz.
+    """
+    if not tem_bateria or potencia_kwp <= BATERIA_EM_TABELA_ATE:
+        return None
+    return (
+        f"O sistema tem {potencia_kwp:.1f} kWp com bateria, e a tabela de kit só "
+        f"precifica armazenamento até {BATERIA_EM_TABELA_ATE:.0f} kWp. Acima disso o "
+        "fornecedor monta o conjunto caso a caso, e o custo do banco aqui é uma "
+        "extrapolação do bloco residencial. O dimensionamento do banco vale; o preço "
+        "dele precisa de cotação."
     )
 
 

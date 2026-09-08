@@ -867,6 +867,17 @@ def executar_estudo(cfg: ConfiguracaoEstudo, progresso=None) -> ResultadoEstudo:
             "autonomia entre os avaliados, já que nenhum cumpre a meta. Serve para "
             "medir o que uma bateria acrescenta; não é recomendação de compra."
         )
+    # Acima de 40 kWp a tabela de kit não precifica armazenamento: o fornecedor
+    # monta o conjunto caso a caso. O banco vale; o preço dele é extrapolado do
+    # bloco residencial, e o estudo diz isso em vez de apresentar o total como
+    # cotação.
+    if cfg.topologia_kit and cfg.capex_fv_brl is None:
+        from ..pv.kits import bateria_caso_a_caso
+
+        aviso_banco = bateria_caso_a_caso(kwp, conjunto_dos_cenarios is not None)
+        if aviso_banco:
+            avisos.append(aviso_banco)
+
     cenarios = _comparar_fontes(
         cfg, ensemble_total, ensemble_backup_passo, serie, kwp, conjunto_dos_cenarios,
     )
