@@ -77,6 +77,65 @@ def test_le_o_que_as_planilhas_jogam_fora():
     assert v.cenario.tem_criticidade
 
 
+def test_a_duracao_do_modo_fixo_atravessa_a_leitura():
+    """
+    ``FIXO_DURACAO_INTERVALAR`` existe para o que tem janela e não a ocupa toda.
+
+    A televisão está disponível das 18 h às 23 h e é assistida três dessas cinco
+    horas; é essa diferença que o modo declara, e a duração é o dado que o
+    separa de ``FIXO_100%``.
+
+    A leitura, porém, só copiava a duração de itens de intervalo **dinâmico**,
+    o que tornava o modo inalcançável por este caminho: todo televisor,
+    notebook e computador vindo de vistoria passava a ficar ligado a janela
+    inteira. `Cenario.validar()` avisava — e não havia como atender ao aviso,
+    porque o dado tinha sido descartado uma camada antes. O erro é sempre para
+    cima, e só na energia.
+    """
+    pacote = _backup()
+    notebook = next(i for i in pacote["itens"] if i["equipamento"] == "Notebook")
+    notebook["durMin"], notebook["durMax"] = 1.0, 4.0
+
+    linha = ler_backup(pacote).cenario.comodos["Sala"].set_index("Equipamento").loc["Notebook"]
+    assert linha["modo_fixo"] == "FIXO_DURACAO_INTERVALAR"
+    assert linha["duracao_min"] == 1.0 and linha["duracao_max"] == 4.0
+
+    avisos = [
+        p for p in ler_backup(pacote).cenario.validar()
+        if p.campo == "modo_fixo" and p.equipamento == "Notebook"
+    ]
+    assert not avisos, "com duração declarada, o modo deixa de virar FIXO_100%"
+
+
+def test_o_modo_fixo_sem_duracao_continua_avisando():
+    """
+    Sem duração o aviso tem de permanecer: é ele que denuncia o erro para cima.
+
+    O aplicativo de vistoria hoje grava este modo com duração nula, e o estudo
+    precisa dizer que, nesse caso, o equipamento foi simulado ligado a janela
+    inteira.
+    """
+    achados = ler_backup(_backup()).cenario.validar()
+    assert any(
+        p.campo == "modo_fixo" and p.equipamento == "Notebook" for p in achados
+    ), "o Notebook do backup padrão não tem duração"
+
+
+def test_o_intervalo_fixo_comum_nao_ganha_duracao():
+    """
+    ``FIXO_100%`` ignora duração, e deixá-la passar mudaria o sentido do modo.
+
+    Quem declara 100% está dizendo que o equipamento fica ligado a janela toda
+    — o roteador das 00:00 às 23:59 é exatamente isso.
+    """
+    pacote = _backup()
+    roteador = next(i for i in pacote["itens"] if i["equipamento"] == "Roteador")
+    roteador["durMin"], roteador["durMax"] = 1.0, 2.0
+
+    linha = ler_backup(pacote).cenario.comodos["Sala"].set_index("Equipamento").loc["Roteador"]
+    assert linha["duracao_min"] is None or linha["duracao_min"] != linha["duracao_min"]
+
+
 def test_a_ordem_dos_ambientes_e_a_da_vistoria():
     """O vistoriador percorreu a casa numa ordem; o relatório a preserva."""
     assert list(ler_backup(_backup()).cenario.comodos) == ["Sala", "Cozinha"]

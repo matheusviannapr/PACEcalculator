@@ -71,6 +71,14 @@ DESCRICAO_CRITICIDADE: dict[str, str] = {
 }
 
 #: Coluna que o cenário passa a carregar, além das dez do D².
+#: O modo fixo que **usa** a duração declarada.
+#:
+#: Um equipamento de intervalo fixo pode ter janela e não ocupar a janela toda:
+#: a televisão está disponível das 18 h às 23 h e é assistida três dessas cinco
+#: horas. Quem declara este modo está dizendo exatamente isso, e a duração é o
+#: dado que o torna diferente de ``FIXO_100%``.
+MODO_COM_DURACAO = "FIXO_DURACAO_INTERVALAR"
+
 COLUNA_CRITICIDADE = "criticidade"
 COLUNA_COMODO = "comodo"
 COLUNA_FATOR_PARTIDA = "fator_partida"
@@ -176,6 +184,13 @@ def _linha_do_item(item: dict[str, Any]) -> dict[str, Any] | None:
         return None
 
     tipo = _normalizar_tipo(_texto(item.get("tipoInt")) or "fixo")
+    modo = _texto(item.get("modo")) or None
+    # A duração vale para o intervalo dinâmico e para o modo fixo que a
+    # consome. Restringi-la ao dinâmico tornava `FIXO_DURACAO_INTERVALAR`
+    # inalcançável: toda televisão e todo computador vindos de vistoria
+    # passavam a ficar ligados 100% da janela declarada, e a validação avisava
+    # disso sem que houvesse como atender ao aviso.
+    usa_duracao = tipo == "dinâmico" or (modo or "").upper() == MODO_COM_DURACAO
     linha: dict[str, Any] = {
         "Equipamento": _texto(item.get("equipamento")) or "sem nome",
         "Potência": float(potencia),
@@ -184,9 +199,9 @@ def _linha_do_item(item: dict[str, Any]) -> dict[str, Any] | None:
         "intervalo": _texto(item.get("intervalo")),
         "probabilidade": _num(item.get("prob")),
         "FD": _num(item.get("fd")),
-        "duracao_min": _num(item.get("durMin")) if tipo == "dinâmico" else None,
-        "duracao_max": _num(item.get("durMax")) if tipo == "dinâmico" else None,
-        "modo_fixo": _texto(item.get("modo")) or None,
+        "duracao_min": _num(item.get("durMin")) if usa_duracao else None,
+        "duracao_max": _num(item.get("durMax")) if usa_duracao else None,
+        "modo_fixo": modo,
         COLUNA_CRITICIDADE: (_texto(item.get("criticidade")) or "NC").upper(),
         COLUNA_COMODO: _texto(item.get("comodo")),
         # O fator de partida não entra na simulação de energia, mas entra na
@@ -407,6 +422,8 @@ def ler_inventario(caminho: str | Path, cliente: str = "instalação") -> DadosV
             descartados.append(f"{comodo} · {nome}: sem potência")
             continue
         tipo = _normalizar_tipo(_texto(linha.get("Tipo de intervalo")) or "fixo")
+        modo = _texto(linha.get("modo_fixo")) or None
+        usa_duracao = tipo == "dinâmico" or (modo or "").upper() == MODO_COM_DURACAO
         por_comodo.setdefault(comodo, []).append({
             "Equipamento": nome,
             "Potência": float(potencia),
@@ -415,9 +432,9 @@ def ler_inventario(caminho: str | Path, cliente: str = "instalação") -> DadosV
             "intervalo": _texto(linha.get("intervalo")),
             "probabilidade": _num(linha.get("probabilidade")),
             "FD": _num(linha.get("FD")),
-            "duracao_min": _num(linha.get("duracao_min")) if tipo == "dinâmico" else None,
-            "duracao_max": _num(linha.get("duracao_max")) if tipo == "dinâmico" else None,
-            "modo_fixo": _texto(linha.get("modo_fixo")) or None,
+            "duracao_min": _num(linha.get("duracao_min")) if usa_duracao else None,
+            "duracao_max": _num(linha.get("duracao_max")) if usa_duracao else None,
+            "modo_fixo": modo,
             COLUNA_CRITICIDADE: (_texto(linha.get(COLUNA_CRITICIDADE)) or "NC").upper(),
             COLUNA_COMODO: comodo,
             COLUNA_FATOR_PARTIDA: _num(linha.get(COLUNA_FATOR_PARTIDA)) or 1.0,
