@@ -99,6 +99,8 @@ _PADROES: dict[str, Any] = {
     "e_modo_carga": "modelo",
     "e_cenario": None,
     "e_vistoria": None,
+    #: O pacote da coleta residencial, quando a origem foi o aplicativo.
+    "e_coleta": None,
     "e_conta_kwh": 5000.0,
     "e_dias_operacao": 30,
     "e_ensemble_total": None,
@@ -390,6 +392,17 @@ def _vistoria_na_primeira_tela() -> None:
     Continua sendo opcional, e continua disponível no passo de cargas — quem
     não tem vistoria não é obrigado a passar por aqui.
     """
+    coleta = st.session_state.get("e_coleta")
+    if coleta is not None:
+        st.success(
+            f"✅ Coleta de **{coleta.cliente}** carregada — "
+            f"{coleta.cenario.total_de_equipamentos()} equipamentos, "
+            f"{coleta.local or 'local não informado'}"
+            + (", telhado desenhado pelo cliente" if coleta.telhado_geojson else "")
+            + ". Os campos abaixo já vieram dela."
+        )
+        return
+
     if st.session_state.get("e_vistoria") is not None:
         vistoria = st.session_state["e_vistoria"]
         st.success(
@@ -399,6 +412,16 @@ def _vistoria_na_primeira_tela() -> None:
             "Os campos abaixo já vieram dela."
         )
         return
+
+    with st.expander("Tenho a coleta residencial do cliente (.json)"):
+        st.caption(
+            "O aplicativo de coleta roda no celular do cliente e entrega um "
+            "arquivo com cadastro, a coordenada da casa, o contorno do telhado "
+            "desenhado sobre a imagem de satélite, a conta de luz e o "
+            "levantamento de cargas. Carregando-o aqui, o estudo já nasce com "
+            "tudo isso — inclusive o telhado medido e o arranjo de módulos."
+        )
+        _cargas_da_coleta()
 
     with st.expander("Tenho o backup de uma vistoria técnica (.json)"):
         st.caption(
@@ -628,6 +651,7 @@ def _passo_cliente() -> None:
 # Passo 2 — cargas
 # ============================================================================
 _OPCOES_CARGA = {
+    "coleta": "Tenho a coleta residencial (app do cliente)",
     "vistoria": "Tenho uma vistoria técnica",
     "modelo": "Usar o rascunho do modelo",
     "planilha": "Tenho a planilha do D²",
@@ -649,6 +673,8 @@ def _passo_cargas() -> None:
     if escolha == "conta":
         _cargas_pela_conta()
         return
+    if escolha == "coleta":
+        _cargas_da_coleta()
     if escolha == "vistoria":
         _cargas_da_vistoria()
     if escolha == "planilha":
@@ -664,6 +690,124 @@ def _passo_cargas() -> None:
 
     _painel_da_vistoria()
     _editor_de_cargas(cenario)
+
+
+def _cargas_da_coleta() -> None:
+    """
+    Recebe o pacote do aplicativo de coleta residencial e preenche o estudo.
+
+    O pacote traz mais que cargas: cadastro, a coordenada que o cliente
+    confirmou sobre a própria casa e o contorno do telhado que ele desenhou
+    sobre a imagem de satélite. Até aqui tudo isso era validado e descartado —
+    a conversão devolvia só a planilha —, e a tela pedia de novo o que já
+    estava no arquivo.
+
+    A coordenada da coleta vence a geocodificação por endereço: o cliente
+    apontou a própria casa, e endereço depende do que o geocodificador entende.
+    """
+    import json
+
+    from .coleta import ler_pacote
+
+    arquivo = st.file_uploader(
+        "Pacote da coleta residencial (.json)", type=["json"],
+        help="O arquivo que o aplicativo de coleta baixa no fim, com nome "
+             "começando em 'pace-'. Traz cadastro, localização confirmada, "
+             "contorno do telhado, conta de luz e o levantamento de cargas.",
+    )
+    if arquivo is None:
+        st.caption(
+            "O aplicativo roda no celular do cliente e entrega este arquivo. "
+            "Carregando-o aqui, o estudo já nasce com o cliente, a coordenada da "
+            "casa, o telhado desenhado e as cargas por ambiente — nada disso "
+            "precisa ser redigitado."
+        )
+        return
+
+    try:
+        dados = ler_pacote(json.loads(arquivo.getvalue().decode("utf-8-sig")))
+    except (ValueError, KeyError, json.JSONDecodeError) as erro:
+        st.error(f"Não consegui ler este pacote: {erro}")
+        return
+
+    st.success(
+        f"**{dados.cliente}** · {dados.local or 'endereço não informado'} · "
+        f"{dados.cenario.total_de_equipamentos()} equipamentos em "
+        f"{len(dados.cenario.comodos)} ambientes"
+        + (" · telhado desenhado" if dados.telhado_geojson else "")
+    )
+    for aviso in dados.avisos:
+        st.caption(aviso)
+
+    if not st.button("Importar esta coleta", type="primary", width="stretch"):
+        return
+
+    cenario = dados.cenario
+    cenario.criticidades_essenciais = ("MC", "C")
+    st.session_state.update({
+        "e_cenario": cenario,
+        "e_coleta": dados,
+        "e_nome": dados.cliente,
+        "e_segmento": "residencia",
+        "e_ensemble_backup": None,
+        "e_assinatura_carga": None,
+    })
+    if dados.tem_coordenada:
+        _fixar_local({
+            "lat": dados.latitude, "lon": dados.longitude,
+            "nome": dados.local or "coordenada confirmada pelo cliente",
+        })
+    if dados.telhado_geojson:
+        _telhado_da_coleta(dados)
+    st.rerun()
+
+
+def _telhado_da_coleta(dados) -> None:
+    """
+    Transforma o contorno desenhado pelo cliente em telhado medido e arranjo.
+
+    É o passo que mais economiza trabalho, e o que mais se perdia: sem ele,
+    alguém no escritório redesenhava no mapa uma casa que nunca viu, enquanto o
+    cliente já havia contornado a própria.
+
+    Inclinação e montagem não vêm do desenho — não há como deduzi-las de uma
+    projeção em planta — e entram com o padrão de telhado brasileiro, que a
+    tela do telhado deixa ajustar. Falhar aqui não é motivo para recusar a
+    coleta: o estudo roda sem telhado, apenas sem afirmar que o sistema cabe.
+    """
+    from .pv.equipment import EquipmentError, carregar_base
+    from .pv.telhado import dimensionar_no_telhado, telhado_de_geojson
+
+    try:
+        telhado = telhado_de_geojson(
+            {"type": "Feature", "geometry": dados.telhado_geojson},
+            nome="Água 1", montagem="coplanar",
+            inclinacao_deg=20.0, fator_obstaculos=0.90,
+        )
+        layout = dimensionar_no_telhado(telhado, carregar_base())
+    except (ValueError, EquipmentError) as erro:
+        st.warning(
+            f"O contorno veio na coleta, mas não consegui medi-lo: {erro}. "
+            "O estudo segue sem telhado — marque-o no passo 4 se quiser a "
+            "verificação de área."
+        )
+        return
+    if layout is None or layout.quantidade == 0:
+        st.warning(
+            "O contorno da coleta é pequeno demais para caber um módulo com os "
+            "recuos de borda. Confira o desenho no passo 4."
+        )
+        return
+
+    from .pv.edicao import EdicaoLayout, croqui_editavel
+
+    st.session_state["e_aguas"] = [{
+        "nome": telhado.nome, "telhado": telhado,
+        "layout_base": layout, "layout": layout,
+        "edicao": EdicaoLayout(), "croqui": croqui_editavel(layout, telhado, None),
+    }]
+    _ativar_agua(0)
+    st.session_state["e_geracao_aguas"] = None
 
 
 def _cargas_da_vistoria() -> None:

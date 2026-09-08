@@ -1,4 +1,19 @@
-"""Ponte da coleta HTML para o cenário PACE, sem executar simulações.
+"""
+Ponte da coleta residencial PACE para o cenário, sem executar simulações.
+
+O aplicativo de coleta roda no celular do cliente e devolve um pacote JSON
+(``pace-coleta/1``) com cadastro, localização confirmada no mapa, contorno do
+telhado desenhado por cima da própria casa, conta de luz e o levantamento de
+equipamentos por ambiente.
+
+Duas portas de entrada, e a diferença entre elas importa:
+
+* :func:`converter` devolve só o cenário de cargas. É o caminho antigo, do
+  ``--destino``, que grava planilha e anexos numa pasta.
+* :func:`ler_pacote` devolve **tudo que o pacote sabe**. É o que a calculadora
+  usa, porque o resto — coordenada e telhado, principalmente — era validado e
+  descartado, e a tela pedia os dois de novo à mão. O contorno do telhado é o
+  dado mais caro de obter: quem o desenhou estava na frente da casa.
 
 Uso: python -m aurum.coleta pacote.json --destino outputs/coleta-cliente
 """
@@ -9,7 +24,9 @@ import base64
 import json
 import math
 import re
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 
@@ -109,6 +126,107 @@ def converter(pacote: dict) -> Cenario:
     if erros:
         raise ValueError('Revise os parâmetros do levantamento: ' + '; '.join(erros))
     return cenario
+
+
+@dataclass
+class DadosColeta:
+    """Tudo que o pacote da coleta residencial sabe."""
+
+    cenario: Cenario
+    cliente: str
+    contato: str = ""
+    endereco: str = ""
+    cidade: str = ""
+    uf: str = ""
+    #: Coordenada confirmada pelo cliente no mapa, sobre a própria casa.
+    latitude: float | None = None
+    longitude: float | None = None
+    #: Contorno do telhado em GeoJSON, quando o cliente o desenhou.
+    #:
+    #: É o dado mais caro do pacote: quem o traçou estava na frente da casa,
+    #: com a imagem de satélite na mão. Redesenhá-lo no escritório é pior e
+    #: mais lento. É a **projeção em planta** — não mede inclinação, área útil
+    #: nem sombreamento, e o estudo diz isso onde usa.
+    telhado_geojson: dict | None = None
+    telhado_confirmado_em: str = ""
+    conta_nome: str = ""
+    conta_tipo: str = ""
+    avisos: list[str] = field(default_factory=list)
+
+    @property
+    def local(self) -> str:
+        return ", ".join(x for x in (self.endereco, self.cidade, self.uf) if x)
+
+    @property
+    def tem_coordenada(self) -> bool:
+        return self.latitude is not None and self.longitude is not None
+
+    def resumo(self) -> dict[str, Any]:
+        return {
+            "cliente": self.cliente,
+            "local": self.local,
+            "coordenada": (self.latitude, self.longitude),
+            "telhado": bool(self.telhado_geojson),
+            "comodos": len(self.cenario.comodos),
+            "equipamentos": self.cenario.total_de_equipamentos(),
+        }
+
+
+def ler_pacote(caminho: str | Path | dict) -> DadosColeta:
+    """
+    Lê o pacote da coleta residencial inteiro, e não só as cargas.
+
+    Aceita o caminho do arquivo ou o dicionário já carregado. A validação é a
+    mesma de :func:`converter` — cadastro completo, localização confirmada,
+    aceite de uso dos dados e contorno fechado — porque uma coleta que não
+    passa nela não descreve um imóvel de verdade.
+    """
+    if isinstance(caminho, dict):
+        pacote = caminho
+    else:
+        pacote = json.loads(Path(caminho).read_text(encoding="utf-8-sig"))
+
+    cenario = converter(pacote)
+    v = pacote["vistoria"]
+    loc = v.get("localizacao") or {}
+    telhado = v.get("telhado") or {}
+    conta = v.get("conta") or {}
+
+    avisos: list[str] = []
+    if not telhado.get("geojson"):
+        avisos.append(
+            "A coleta não traz contorno do telhado. O sistema será dimensionado "
+            "pelo consumo, e o estudo não afirmará que ele cabe na cobertura."
+        )
+    else:
+        avisos.append(
+            "O contorno do telhado é a projeção em planta desenhada pelo cliente "
+            "sobre a imagem de satélite. Não mede inclinação, área útil nem "
+            "sombreamento — confira antes de tratar o dimensionamento como final."
+        )
+    if not conta.get("dataUrl"):
+        avisos.append("A coleta não traz a conta de luz; a tarifa terá de ser informada.")
+
+    # O nome do cenário vem do cliente, e o segmento é residência: o aplicativo
+    # de coleta só existe para esse segmento, e assumir outro faria a curva de
+    # referência da conferência ser a errada.
+    cenario.segmento = "residencia"
+
+    return DadosColeta(
+        cenario=cenario,
+        cliente=str(v.get("cliente") or "").strip(),
+        contato=str(v.get("contato") or "").strip(),
+        endereco=str(v.get("endereco") or "").strip(),
+        cidade=str(v.get("cidade") or "").strip(),
+        uf=str(v.get("uf") or "").strip(),
+        latitude=float(loc["latitude"]) if loc.get("latitude") is not None else None,
+        longitude=float(loc["longitude"]) if loc.get("longitude") is not None else None,
+        telhado_geojson=telhado.get("geojson") or None,
+        telhado_confirmado_em=str(telhado.get("confirmadoEm") or ""),
+        conta_nome=str(conta.get("nome") or ""),
+        conta_tipo=str(conta.get("tipo") or ""),
+        avisos=avisos,
+    )
 
 
 def ler_conta(pacote: dict) -> tuple[str, bytes]:
