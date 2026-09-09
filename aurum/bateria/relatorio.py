@@ -651,7 +651,34 @@ def _grafico_perfis_ocupacao(estudo: ResultadoEstudo, destino: Path) -> Path:
 
     fig, eixo = _figura(10.0, 5.4)
 
-    # A geração primeiro, ao fundo: é a área, e as curvas passam por cima.
+    # A faixa de todos os arranjos de horário, no fundo de tudo.
+    #
+    # Sem ela o gráfico mostra dois dias em UM arranjo cada, e o leitor entende
+    # que a casa vive entre aquelas duas linhas. Ela não vive: a varredura mede
+    # dezenas de arranjos, e a faixa entre eles é bem mais larga que a distância
+    # entre as duas curvas. Desenhar só as curvas é dizer "é isto" quando o que
+    # se sabe é "está em algum lugar aqui dentro".
+    arranjos = 0
+    envelope = getattr(estudo, "envelope_rotina", None)
+    if envelope is not None and len(envelope):
+        from ..demanda.rotina import banda_do_envelope
+
+        banda = banda_do_envelope(envelope)
+        if banda is not None:
+            passos = len(banda["minimo"])
+            horas_banda = np.arange(passos) * (24.0 / passos)
+            arranjos = int(banda["arranjos"][0])
+            eixo.fill_between(
+                horas_banda, banda["minimo"] / 1000.0, banda["maximo"] / 1000.0,
+                color=marca.APOIO["azul"], alpha=0.13, zorder=0, linewidth=0,
+                label=f"faixa de {arranjos} arranjos de horário",
+            )
+            eixo.fill_between(
+                horas_banda, banda["p10"] / 1000.0, banda["p90"] / 1000.0,
+                color=marca.APOIO["azul"], alpha=0.18, zorder=0, linewidth=0,
+            )
+
+    # A geração depois, ao fundo: é a área, e as curvas passam por cima.
     if estudo.com_solar:
         media = np.mean(
             [estudo.serie.janela_media_por_hora(e) for e in estudo.ensemble_total.estacoes],
@@ -687,10 +714,17 @@ def _grafico_perfis_ocupacao(estudo: ResultadoEstudo, destino: Path) -> Path:
     eixo.set_xlim(0, 24)
     eixo.set_ylim(bottom=0)
     eixo.set_xticks(range(0, 25, 3))
-    eixo.set_title(
-        "Os dois dias da mesma casa, e o sol por cima deles" if len(curvas) > 1
-        else "O dia desta casa, e o sol por cima dele"
-    )
+    # O título dizia "e o sol por cima" mesmo num estudo sem solar, onde não há
+    # curva de sol nenhuma no desenho. Texto e figura discordando é o mesmo
+    # defeito de sempre, e aqui a frase era simplesmente falsa.
+    dias = "Os dois dias da mesma casa" if len(curvas) > 1 else "O dia desta casa"
+    if estudo.com_solar:
+        titulo = f"{dias}, e o sol por cima"
+    elif arranjos:
+        titulo = f"{dias}, dentro da faixa de {arranjos} arranjos de horário"
+    else:
+        titulo = dias
+    eixo.set_title(titulo)
     eixo.legend(fontsize=8, ncol=2, frameon=False)
     return _salvar(fig, destino, "perfis_ocupacao")
 

@@ -54,6 +54,7 @@ __all__ = [
     "ROTINA_ALTO_PADRAO",
     "Rotina",
     "ancora_da_janela",
+    "banda_do_envelope",
     "deslocar",
     "envelope_de_rotina",
     "resumo_do_envelope",
@@ -552,6 +553,36 @@ def envelope_de_rotina(
             **medidas,
         })
     return pd.DataFrame(linhas)
+
+
+def banda_do_envelope(
+    envelope: pd.DataFrame, coluna: str = "curva_w",
+) -> dict[str, np.ndarray] | None:
+    """
+    A faixa que a curva de carga ocupa ao longo de toda a varredura.
+
+    Devolve o mínimo, o máximo e os decis de cada passo do dia, para o gráfico
+    poder desenhar "em algum lugar aqui dentro" em vez de duas linhas que o
+    leitor toma pela faixa inteira.
+
+    Devolve ``None`` quando a medição não guardou curvas — o envelope serve
+    também para grandezas escalares, e nesse caso não há o que desenhar.
+    """
+    if coluna not in envelope.columns or envelope.empty:
+        return None
+    curvas = [np.asarray(c, dtype=float) for c in envelope[coluna] if c is not None]
+    if not curvas:
+        return None
+    tamanho = min(len(c) for c in curvas)
+    matriz = np.vstack([c[:tamanho] for c in curvas])
+    return {
+        "minimo": matriz.min(axis=0),
+        "maximo": matriz.max(axis=0),
+        "p10": np.percentile(matriz, 10, axis=0),
+        "p90": np.percentile(matriz, 90, axis=0),
+        "mediana": np.median(matriz, axis=0),
+        "arranjos": np.array([len(curvas)]),
+    }
 
 
 def resumo_do_envelope(

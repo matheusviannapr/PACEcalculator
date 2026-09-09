@@ -347,6 +347,41 @@ def e_climatizacao(equipamento: str) -> bool:
     return any(marca in nome for marca in _MARCAS_DE_CLIMATIZACAO)
 
 
+#: O que uma pessoa deixa ligado ao ir dormir.
+#:
+#: É a lista de quem **fica**, e não de quem dura. A distinção importa porque o
+#: filtro anterior era a duração da utilização, e duração é proxy ruim: um
+#: computador usado de 2 a 5 h passa, e ninguém dorme com o computador em jogo;
+#: uma tomada de uso geral com duração máxima de 1 h empata com o limiar e passa
+#: também. Num levantamento real, dezoito equipamentos ganhavam madrugada, a
+#: maioria deles coisas que se desliga antes de deitar.
+#:
+#: Climatização entra por :func:`e_climatizacao`. Aqui ficam os demais que
+#: continuam funcionando sozinhos depois que a casa dorme.
+_MARCAS_DE_ARRASTO = (
+    "purificador de ar", "umidificador", "desumidificador",
+    "aquecedor", "cobertor", "aquário", "aquario",
+    "ruído branco", "ruido branco", "cpap", "bipap",
+    "concentrador de oxigênio", "concentrador de oxigenio",
+    "carregador", "babá", "baba eletr",
+)
+
+
+def atravessa_a_noite_por_natureza(equipamento: str) -> bool:
+    """
+    O equipamento é do tipo que fica ligado depois que a casa dorme?
+
+    Pergunta o que ele **é**, e não quanto tempo dura uma utilização. A pergunta
+    pela duração deixava passar computador, televisor e tomada de uso geral, e
+    era o que fazia a curva da casa cheia ter o maior valor do dia à 1 h da
+    manhã.
+    """
+    nome = str(equipamento or "").lower()
+    if e_climatizacao(nome):
+        return True
+    return any(marca in nome for marca in _MARCAS_DE_ARRASTO)
+
+
 def sazonalidade_de_climatizacao(
     cenario: Cenario, percentuais: dict[str, float] | None = None,
 ) -> dict[str, dict]:
@@ -436,17 +471,29 @@ def _atravessa_a_noite(
     """
     O item estava ligado na hora de dormir, e é do tipo que não desliga?
 
-    Dois filtros, e os dois são necessários. O primeiro pergunta se a janela
-    termina junto com a hora de dormir — se termina, o item estava ligado ali.
-    O segundo pergunta se ele tem duração longa por utilização: climatização e
-    refrigeração atravessam a noite, lâmpada e televisor não. Sem o segundo, a
-    luz da sala passaria a acender às 3 h da manhã.
+    Três filtros, e a ordem deles é o que a versão anterior errava.
+
+    O primeiro pergunta se a janela termina junto com a hora de dormir — se
+    termina, o item estava ligado ali. O segundo pergunta **o que o equipamento
+    é**: climatização, aquecimento e o punhado de coisas que continuam
+    funcionando com a casa dormindo. O terceiro, a duração, ficou como guarda
+    final.
+
+    Antes, a duração era o único filtro depois do horário, e duração é proxy
+    ruim para "fica ligado a noite toda": num levantamento real ela deixou
+    passar computador (2 a 5 h), televisor, notebook, monitor, bomba de recalque
+    e tomadas de uso geral — dezoito equipamentos, a maioria deles coisas que se
+    desliga antes de deitar. O docstring prometia que "a luz da sala não passaria
+    a acender às 3 h da manhã", e era exatamente o que acontecia, só que com o
+    computador no lugar da luz.
     """
     if perfil.arrasto_noturno <= 0:
         return False
     fim_da_noite = perfil.janela_acordado[1]
     # Termina na última hora e meia da vigília — foi dormir com aquilo ligado.
     if not (fim_da_noite - 1.5 <= faixa[1] <= fim_da_noite + 0.5):
+        return False
+    if not atravessa_a_noite_por_natureza(linha.get("Equipamento")):
         return False
     duracao = linha.get("duracao_max")
     if duracao is None or pd.isna(duracao):
@@ -543,10 +590,22 @@ def aplicar(cenario: Cenario, perfil: PerfilOcupacao | str) -> Cenario:
                 nova.at[indice, "intervalo"] = _janela_das_refeicoes(faixa, perfil)
 
             # 2b. A madrugada de quem foi dormir com o ar ligado.
+            #
+            # O fim da janela é **estendido**, e não acrescentado. Escrever
+            # "00:00 as X e <janela>" dava duas janelas, e cada janela declarada
+            # rende uma utilização própria no gerador: o equipamento passava a
+            # ser usado duas vezes por noite, uma delas inteira na madrugada. O
+            # arrasto deixava de deslocar carga e passava a criá-la — era o que
+            # punha o maior valor do dia à 1 h da manhã.
+            #
+            # Estendendo, a utilização continua sendo uma só e a duração
+            # sorteada é colocada dentro da janela maior: algumas noites
+            # terminam cedo, outras de madrugada. É o que a frase descreve.
             elif _atravessa_a_noite(faixa, linha, perfil):
-                ate = perfil.hora_de_acordar * perfil.arrasto_noturno
-                atual = str(nova.at[indice, "intervalo"])
-                nova.at[indice, "intervalo"] = f"00:00 as {_hhmm(ate)} e {atual}"
+                ate = 24.0 + perfil.hora_de_acordar * perfil.arrasto_noturno
+                nova.at[indice, "intervalo"] = (
+                    f"{_hhmm(faixa[0])} as {_hhmm(ate % 24.0)}"
+                )
 
             # 3. A intensidade. O fator diurno pesa pela fração da janela que
             #    cai no expediente: um equipamento das 8 às 18 leva o fator

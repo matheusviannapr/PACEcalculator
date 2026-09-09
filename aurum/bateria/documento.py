@@ -811,14 +811,38 @@ def _secao_ocupacao(estudo: ResultadoEstudo, figuras: dict[str, Path]) -> str:
         ))
 
     if figuras.get("perfis_ocupacao"):
-        legenda = (
-            "O padrão de ocupação e a geração solar no mesmo eixo. O que a bateria "
-            "precisa guardar é o que sobra da carga depois do sol."
-            if um_perfil else
-            "Os dois padrões de ocupação e a geração solar no mesmo eixo. O que a "
-            "bateria precisa guardar é o que sobra da carga depois do sol -- e é aí "
-            "que os dois dias mais diferem."
-        )
+        # A legenda falava de sol mesmo num estudo sem solar, e falava de duas
+        # curvas como se elas fossem a faixa. As duas coisas eram falsas, e a
+        # segunda é a que engana: a casa não vive entre aquelas duas linhas.
+        envelope = getattr(estudo, "envelope_rotina", None)
+        tem_faixa = envelope is not None and len(envelope) > 0
+        quantos = len(envelope) if tem_faixa else 0
+        if estudo.com_solar:
+            legenda = (
+                "O padrão de ocupação e a geração solar no mesmo eixo. O que a "
+                "bateria precisa guardar é o que sobra da carga depois do sol."
+                if um_perfil else
+                "Os dois padrões de ocupação e a geração solar no mesmo eixo. O que "
+                "a bateria precisa guardar é o que sobra da carga depois do sol -- e "
+                "é aí que os dois dias mais diferem."
+            )
+        else:
+            legenda = (
+                "O padrão de ocupação da casa. Sem geração própria, o que a bateria "
+                "guarda é energia comprada da rede, e o que ela entrega é "
+                "continuidade."
+                if um_perfil else
+                "Os dois padrões de ocupação da casa. Sem geração própria, o que a "
+                "bateria guarda é energia comprada da rede, e a diferença entre os "
+                "dois dias é a conta de luz, não o tamanho do banco."
+            )
+        if tem_faixa:
+            legenda += (
+                f" A faixa ao fundo é onde a carga cai em {quantos} arranjos de "
+                "horário, do dia seis horas mais cedo ao dia seis horas mais tarde: "
+                "as curvas desenhadas são dois pontos dentro dela, e não os seus "
+                "limites."
+            )
         partes.append(_figura(figuras.get("perfis_ocupacao"), legenda, largura="1.0"))
 
     if dimensionante and not um_perfil:
@@ -1700,7 +1724,9 @@ def _secao_escopos(estudo: ResultadoEstudo, figuras: dict[str, Path]) -> str:
             )
             for m in escopos.medidas
         ],
-        alinhamento="p{2.8cm}p{1.5cm}rrrrrr",
+        # 2,6 cm e nao 2,8: com o quadro ampliado passando de R$ 100 mil a
+        # coluna de investimento ganha um digito e a tabela estoura.
+        alinhamento="p{2.6cm}p{1.4cm}rrrrrr",
         tamanho_fonte="scriptsize",
         legenda="O quadro essencial e o ampliado, cada um com o banco que exige",
     ))

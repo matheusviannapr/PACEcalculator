@@ -454,3 +454,177 @@ def test_o_resumo_separa_amplitude_de_vies():
     assert r["vies_percentual"] == pytest.approx(-0.2), (
         "o declarado está 20% abaixo do pior caso"
     )
+
+
+# ----------------------------------------------------------------------------
+# O arrasto noturno: deslocar carga, e não criá-la
+# ----------------------------------------------------------------------------
+def _com_janela(equipamento: str, intervalo: str, **ajustes):
+    """Um cenário de um item só, com a janela que o teste quer examinar."""
+    from aurum.demanda.biblioteca import COLUNAS, linha_de_planilha
+    from aurum.demanda.cenario import Cenario
+
+    tabela = pd.DataFrame(
+        [linha_de_planilha(equipamento, 1, criticidade="P",
+                           intervalo=intervalo, **ajustes)],
+        columns=COLUNAS,
+    )
+    cenario = Cenario(nome="Casa", segmento="residencia",
+                      comodos={"Quarto": tabela}, instancias={"Quarto": 1})
+    cenario.criticidades_essenciais = ("MC", "C")
+    return cenario
+
+
+def test_o_arrasto_estende_a_janela_em_vez_de_acrescentar_outra():
+    """
+    "Foi dormir com o aparelho ligado" é uma utilização que continua, não duas.
+
+    O código escrevia ``"00:00 as 03:36 e <janela original>"``, e cada janela
+    declarada rende uma utilização própria no gerador: o equipamento passava a
+    ser usado **duas vezes por noite**, uma delas inteiramente na madrugada. O
+    arrasto deixava de deslocar carga e passava a criá-la — era o que punha o
+    maior valor do dia à 1 h da manhã, acima do jantar, na curva de uma
+    residência.
+    """
+    from aurum.demanda import ocupacao
+
+    cenario = _com_janela("Ar-condicionado split 12.000 BTU", "21:00 as 23:30",
+                          duracao_min=3.0, duracao_max=6.0)
+    cheia = ocupacao.aplicar(cenario, "casa_cheia")
+    janela = str(cheia.comodos["Quarto"].iloc[0]["intervalo"])
+
+    assert " e " not in janela, "uma utilização, e não duas"
+    assert janela.startswith("21:00"), "o início não se move: ele foi observado"
+    fim = janela.split(" as ")[1]
+    assert fim < "21:00", "o fim atravessa a meia-noite"
+
+
+def test_o_arrasto_pergunta_o_que_o_equipamento_e():
+    """
+    Duração é proxy ruim para "fica ligado a noite toda".
+
+    O filtro anterior era a duração da utilização, e num levantamento real ele
+    deixou passar computador (2 a 5 h), televisor, notebook, monitor, bomba de
+    recalque e — pior — tomadas de uso geral, cuja duração máxima de 1 h empata
+    com o limiar. Dezoito equipamentos ganhavam madrugada, a maioria deles
+    coisas que se desliga antes de deitar.
+    """
+    from aurum.demanda import ocupacao
+
+    fica = _com_janela("Ar-condicionado split 12.000 BTU", "21:00 as 23:30",
+                       duracao_min=3.0, duracao_max=6.0)
+    assert " as " in str(
+        ocupacao.aplicar(fica, "casa_cheia").comodos["Quarto"].iloc[0]["intervalo"])
+
+    # O computador tem duração longa e mesmo assim não atravessa a noite.
+    sai = _com_janela("Computador desktop", "16:00 as 23:30",
+                      duracao_min=2.0, duracao_max=5.0)
+    janela = str(ocupacao.aplicar(sai, "casa_cheia").comodos["Quarto"].iloc[0]["intervalo"])
+    assert janela.endswith("23:30") or "23:" in janela, (
+        "ninguém dorme com o computador em jogo"
+    )
+
+
+def test_o_arrasto_nao_muda_a_energia_do_dia():
+    """
+    A promessa que separa deslocar de criar.
+
+    Estender a janela dá mais lugares onde a utilização pode cair, e não mais
+    utilizações. Se a energia subir, o arrasto voltou a inventar consumo — e o
+    número maior pareceria "casa cheia consome mais", que é plausível e falso.
+    """
+    import dataclasses
+
+    from aurum.demanda import ocupacao, simular_ensemble
+
+    # Janela que comporta a duração declarada: é onde a promessa pode ser
+    # verificada. Com janela estreita demais o motor aplica clamp, e estender a
+    # janela solta o clamp — efeito real, medido no teste seguinte.
+    cenario = _com_janela("Ar-condicionado split 12.000 BTU", "20:00 as 23:30",
+                          duracao_min=1.0, duracao_max=3.0, probabilidade=1.0)
+    sem = dataclasses.replace(ocupacao.PERFIS["casa_cheia"], arrasto_noturno=0.0)
+
+    def energia(perfil):
+        ajustado = ocupacao.aplicar(cenario, perfil)
+        e = simular_ensemble(ajustado.para_comodos(), ajustado.instancias_de(),
+                             150, semente=3)
+        return float(e.perfis().sum(axis=1).mean())
+
+    com_arrasto = energia("casa_cheia")
+    sem_arrasto = energia(sem)
+    assert abs(com_arrasto / sem_arrasto - 1.0) < 0.15, (
+        "estender a janela não pode multiplicar a energia do equipamento"
+    )
+
+
+def test_estender_a_janela_solta_o_clamp_de_duracao():
+    """
+    O efeito colateral do arrasto, documentado em vez de descoberto por acaso.
+
+    Quando a janela declarada é mais estreita que a duração declarada, o motor
+    encurta a utilização para caber. Estender a janela solta esse aperto, e a
+    utilização passa a durar o que a vistoria disse — num caso construído, 80%
+    mais energia.
+
+    Isso não é o arrasto criando carga: é a janela e a duração se contradizerem
+    no levantamento, e o arrasto revelar a contradição. O resultado maior é o
+    mais fiel ao que foi declarado. Vale saber que acontece, porque um item
+    assim muda de energia ao trocar de perfil de ocupação, e sem esta explicação
+    a diferença pareceria erro.
+    """
+    import dataclasses
+
+    from aurum.demanda import ocupacao, simular_ensemble
+
+    apertado = _com_janela("Ar-condicionado split 12.000 BTU", "21:00 as 23:30",
+                           duracao_min=3.0, duracao_max=6.0, probabilidade=1.0)
+    sem = dataclasses.replace(ocupacao.PERFIS["casa_cheia"], arrasto_noturno=0.0)
+
+    def energia(perfil):
+        ajustado = ocupacao.aplicar(apertado, perfil)
+        e = simular_ensemble(ajustado.para_comodos(), ajustado.instancias_de(),
+                             150, semente=3)
+        return float(e.perfis().sum(axis=1).mean())
+
+    assert energia("casa_cheia") > energia(sem) * 1.3, (
+        "a janela estreita apertava a duração declarada, e estendê-la a solta"
+    )
+
+
+# ----------------------------------------------------------------------------
+# A faixa que vai para o gráfico
+# ----------------------------------------------------------------------------
+def test_a_banda_cobre_as_curvas_que_a_geraram():
+    """
+    A faixa existe para o gráfico não afirmar mais do que sabe.
+
+    Duas curvas desenhadas sem ela dizem "é isto"; o que o estudo sabe é "está
+    em algum lugar aqui dentro". Se a faixa não contivesse as próprias curvas
+    medidas, ela estaria mentindo na direção contrária.
+    """
+    from aurum.demanda.rotina import banda_do_envelope
+
+    env = pd.DataFrame({
+        "declarado": [True, False, False],
+        "curva_w": [
+            np.array([100.0, 200.0, 300.0]),
+            np.array([150.0, 100.0, 500.0]),
+            np.array([50.0, 400.0, 250.0]),
+        ],
+    })
+    banda = banda_do_envelope(env)
+    assert banda is not None
+    assert list(banda["minimo"]) == [50.0, 100.0, 250.0]
+    assert list(banda["maximo"]) == [150.0, 400.0, 500.0]
+    assert int(banda["arranjos"][0]) == 3
+    for chave in ("p10", "p90", "mediana"):
+        assert np.all(banda["minimo"] <= banda[chave])
+        assert np.all(banda[chave] <= banda["maximo"])
+
+
+def test_sem_curvas_nao_ha_faixa_a_desenhar():
+    """O envelope serve também a grandezas escalares, e aí não há o que pintar."""
+    from aurum.demanda.rotina import banda_do_envelope
+
+    env = pd.DataFrame({"declarado": [True], "pico_kw": [3.0]})
+    assert banda_do_envelope(env) is None
