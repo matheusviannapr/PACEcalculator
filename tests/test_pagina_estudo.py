@@ -683,6 +683,28 @@ def _coleta_pronta(at: AppTest) -> AppTest:
     at.session_state["e_segmento"] = "residencia"
     at.session_state["e_lat"] = dados.latitude
     at.session_state["e_lon"] = dados.longitude
+    # As águas, como `_telhado_da_coleta` as monta na importação: o contorno do
+    # cliente vira telhado medido e arranjo de módulos. Montadas aqui com as
+    # mesmas peças públicas, porque o assunto destes testes é a tela e não a
+    # importação — que tem cobertura própria em test_coleta_na_calculadora.
+    if dados.telhado_geojson:
+        from aurum.pv.edicao import EdicaoLayout, croqui_editavel
+        from aurum.pv.equipment import carregar_base
+        from aurum.pv.telhado import dimensionar_no_telhado, telhado_de_geojson
+
+        telhado = telhado_de_geojson(
+            {"type": "Feature", "geometry": dados.telhado_geojson},
+            nome="Água 1", montagem="coplanar",
+            inclinacao_deg=20.0, fator_obstaculos=0.90,
+        )
+        layout = dimensionar_no_telhado(telhado, carregar_base())
+        at.session_state["e_aguas"] = [{
+            "nome": telhado.nome, "telhado": telhado,
+            "layout_base": layout, "layout": layout,
+            "edicao": EdicaoLayout(),
+            "croqui": croqui_editavel(layout, telhado, None),
+        }]
+
     at.session_state["e_via_rapida"] = True
     return at.run()
 
@@ -799,3 +821,76 @@ def test_corte_vazio_responde_com_frase_e_nao_com_traceback():
     # Sem nível nenhum, o botão de calcular nem fica disponível.
     calcular = _por_rotulo(at.button, "Calcular o estudo")
     assert calcular.disabled, "calcular com quadro vazio derrubaria a tela"
+
+
+def test_o_telhado_da_coleta_e_conferido_antes_de_calcular():
+    """
+    O dado mais caro do pacote estava sendo aceito de olhos fechados.
+
+    O contorno que o cliente desenhou e o arranjo que saiu dele decidem os dois
+    números que sustentam o estudo — área aproveitável e potência instalada. Um
+    desenho de celular erra de formas que só o olho pega: o dedo fecha o
+    polígono além da platibanda, inclui a caixa d'água, pega o telhado do
+    vizinho. O número resultante é plausível, e é a plausibilidade que o torna
+    perigoso — 12 kWp onde cabem 8 não parece errado em tabela nenhuma.
+    """
+    at = _coleta_pronta(_abrir())
+    assert at.session_state["e_aguas"], "a fixture tem contorno"
+
+    texto = " ".join(m.value for m in at.markdown)
+    assert "Confira o telhado" in texto
+
+    conferido = _por_rotulo(at.checkbox, "contorno do telhado")
+    assert conferido.value is False, (
+        "marcada por padrão não é confirmação: é aceite tácito com um clique a mais"
+    )
+    calcular = _por_rotulo(at.button, "Calcular o estudo")
+    assert calcular.disabled, "sem conferir o telhado, o estudo não roda"
+
+
+def test_conferido_o_telhado_o_calculo_libera():
+    at = _coleta_pronta(_abrir())
+    _por_rotulo(at.checkbox, "contorno do telhado").set_value(True).run()
+    assert not at.exception, at.exception
+    assert not _por_rotulo(at.button, "Calcular o estudo").disabled
+
+
+def test_o_aviso_diz_o_que_falta():
+    """
+    Um aviso que não aponta a saída obriga o operador a adivinhar qual dos seis
+    campos estava errado — e são seis justamente para não precisar adivinhar.
+    """
+    at = _coleta_pronta(_abrir())
+    avisos = " ".join(w.value for w in at.warning)
+    assert "conferência do telhado" in avisos
+
+    _por_rotulo(at.checkbox, "contorno do telhado").set_value(True).run()
+    _por_rotulo(at.multiselect, "quadro de backup").set_value([]).run()
+    avisos = " ".join(w.value for w in at.warning)
+    assert "criticidade" in avisos and "telhado" not in avisos
+
+
+def test_sem_contorno_nao_ha_o_que_conferir():
+    """
+    Coleta antiga, sem contorno, não pode ficar presa numa caixa que não existe.
+
+    O estudo roda sem telhado — apenas sem afirmar que o sistema cabe na
+    cobertura —, e travar o cálculo por uma conferência impossível transformaria
+    a guarda em impedimento.
+    """
+    at = _abrir()
+    from aurum.coleta import ler_pacote
+
+    dados = ler_pacote(RAIZ / "tests" / "dados" / "coleta-exemplo.json")
+    dados.telhado_geojson = None
+    for chave, valor in (
+        ("e_cenario", dados.cenario), ("e_coleta", dados),
+        ("e_nome", dados.cliente), ("e_lat", dados.latitude),
+        ("e_lon", dados.longitude), ("e_aguas", []), ("e_via_rapida", True),
+    ):
+        at.session_state[chave] = valor
+    at.run()
+
+    assert not at.exception, at.exception
+    assert not [c for c in at.checkbox if "contorno" in (c.label or "").lower()]
+    assert not _por_rotulo(at.button, "Calcular o estudo").disabled

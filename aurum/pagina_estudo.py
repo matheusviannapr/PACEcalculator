@@ -528,6 +528,60 @@ def _corte_padrao(cenario) -> list[str]:
     return presentes[:2]
 
 
+def _mapa_de_conferencia(aguas: list[dict]) -> None:
+    """
+    O contorno do cliente e os módulos que couberam, só para olhar.
+
+    Sem ferramenta de desenho e sem clique: a tela é de confirmação, e quem
+    precisa mexer no contorno tem o assistente completo a um botão. Pôr o
+    editor aqui transformaria a tela curta em mais um passo do assistente.
+
+    O que este mapa pega e nenhuma tabela pega: o dedo que fechou o polígono
+    alguns metros além da platibanda, a caixa d'água incluída, o telhado do
+    vizinho junto. O número que sai daí é plausível — 12 kWp onde cabem 8 não
+    parece errado em lugar nenhum — e é a plausibilidade que o torna perigoso.
+    """
+    import folium
+    from streamlit_folium import st_folium
+
+    centro = [st.session_state["e_lat"], st.session_state["e_lon"]]
+    mapa = folium.Map(location=centro, zoom_start=19, max_zoom=22, tiles=None)
+    folium.TileLayer(
+        tiles=_TILES_SATELITE, attr="Esri World Imagery",
+        name="Satélite", max_zoom=22, max_native_zoom=19,
+    ).add_to(mapa)
+
+    limites = []
+    for agua in aguas:
+        contorno = agua["telhado"].as_dict()["geojson"]
+        camada = folium.GeoJson(
+            contorno,
+            style_function=lambda _: {
+                "color": "#f59e0b", "weight": 2.5, "fillOpacity": 0.08},
+            name=agua["nome"],
+        )
+        camada.add_to(mapa)
+        limites.extend(camada.get_bounds())
+        if agua.get("croqui"):
+            folium.GeoJson(
+                agua["croqui"], name=f"módulos · {agua['nome']}",
+                style_function=lambda f: {
+                    "color": "#1d4ed8", "weight": 0.6,
+                    "fillColor": "#1d4ed8", "fillOpacity": 0.75},
+            ).add_to(mapa)
+    if limites:
+        mapa.fit_bounds(limites)
+
+    # `center` e `zoom` como argumentos: o `location` do `folium.Map` decide a
+    # vista só na primeira montagem, e depois o componente guarda a sua.
+    st_folium(
+        mapa, height=380, width=None,
+        center=(centro[0], centro[1]), zoom=19,
+        key=f"mapa_conferencia_{centro[0]:.5f}_{centro[1]:.5f}",
+        returned_objects=[],
+    )
+
+
 def _tela_confirmacao() -> None:
     """
     Uma tela só: o que a coleta trouxe, e os poucos campos que faltam.
@@ -559,6 +613,9 @@ def _tela_confirmacao() -> None:
         ("e_corte_coleta", _corte_padrao(cenario)),
         ("e_autonomia_coleta", 6),
         ("e_com_solar", True),
+        # Nasce desmarcada de propósito: uma caixa já marcada não é
+        # confirmação, é aceite tácito com um clique a mais.
+        ("e_telhado_conferido", False),
     ):
         st.session_state.setdefault(chave, padrao)
 
@@ -647,11 +704,39 @@ def _tela_confirmacao() -> None:
             help="Desligado, o estudo compara só rede e bateria.",
         )
 
+    # ----------------------------------------------- o telhado, para conferir
+    if aguas:
+        st.divider()
+        st.markdown("#### Confira o telhado")
+        st.caption(
+            "O contorno em âmbar é o que o cliente desenhou sobre a própria casa; "
+            "os retângulos azuis são os módulos que cabem nele. São os dois "
+            "números que decidem o estudo — área aproveitável e potência "
+            "instalada —, e um desenho de celular erra de formas que só o olho "
+            f"pega. Aqui: **{len(aguas)} água(s), {modulos} módulos, "
+            f"{kwp_telhado:.2f} kWp**."
+        )
+        _mapa_de_conferencia(aguas)
+        st.checkbox(
+            "Confiro o contorno do telhado e a posição dos módulos",
+            key="e_telhado_conferido",
+            help="Sem isto o estudo não roda. Se o contorno estiver errado, "
+                 "abra o assistente completo e redesenhe — a via rápida não "
+                 "edita telhado.",
+        )
+
     st.divider()
-    pronto = bool(corte) and tarifa > 0 and consumo > 0
+    telhado_ok = (not aguas) or bool(st.session_state.get("e_telhado_conferido"))
+    pronto = bool(corte) and tarifa > 0 and consumo > 0 and telhado_ok
     if not pronto:
-        st.warning("Tarifa, consumo e ao menos um nível de criticidade são "
-                   "necessários para calcular.")
+        faltando = []
+        if tarifa <= 0 or consumo <= 0:
+            faltando.append("tarifa e consumo faturado")
+        if not corte:
+            faltando.append("ao menos um nível de criticidade")
+        if not telhado_ok:
+            faltando.append("a conferência do telhado")
+        st.warning("Falta " + ", e ".join(faltando) + ".")
 
     botoes = st.columns([1.0, 1.0, 1.4])
     if botoes[0].button("Calcular o estudo", type="primary", disabled=not pronto,
