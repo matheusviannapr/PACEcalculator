@@ -236,6 +236,14 @@ class Equipamento:
     probabilidade: float = 1.0
     fator_demanda: float = 1.0
     probabilisticado_no_intervalo: bool = False
+    #: Como refazer o gerador de janelas com outra probabilidade.
+    #:
+    #: Um item de intervalo dinâmico com duração não guarda a probabilidade num
+    #: campo: ela está dentro do gerador, que sorteia se o dia tem utilização
+    #: antes de sortear a hora. Mexer em `probabilidade` depois de construído
+    #: não muda nada — e era o que a sazonalidade por probabilidade fazia,
+    #: silenciosamente, justamente no ar-condicionado.
+    fabrica_intervalos: Optional[Callable[[float], IntervalType]] = None
 
     def simula_carga(self, tempo_total: int = 1440):
         carga = np.zeros(tempo_total)
@@ -342,30 +350,34 @@ def cria_comodo_da_planilha(sheet_df: pd.DataFrame, comodo_nome: str) -> Comodo:
             )
 
         probabilisticado_no_intervalo = False
+        fabrica = None
 
-        if tipo_intervalo == "fixo":
-            if duracao_min_h is not None and modo_fixo == "FIXO_DURACAO_INTERVALAR":
-                intervalos = criar_gerador_multijanela(
+        def _fabrica_multijanela(intervalo_str=intervalo_str,
+                                 duracao_min_h=duracao_min_h,
+                                 duracao_max_h=duracao_max_h):
+            """Gerador de janelas em função da probabilidade, para a sazonalidade."""
+            def refazer(prob: float):
+                return criar_gerador_multijanela(
                     janelas=parse_janelas_operacao(intervalo_str),
                     duracao_min_h=duracao_min_h,
                     duracao_max_h=duracao_max_h,
-                    probabilidade=probabilidade,
+                    probabilidade=max(0.0, min(1.0, float(prob))),
                     dt_min=1,
                     on_overflow="clamp",
                 )
+            return refazer
+
+        if tipo_intervalo == "fixo":
+            if duracao_min_h is not None and modo_fixo == "FIXO_DURACAO_INTERVALAR":
+                fabrica = _fabrica_multijanela()
+                intervalos = fabrica(probabilidade)
                 probabilisticado_no_intervalo = True
             else:
                 intervalos = parse_intervalo_fixo(intervalo_str)
         elif tipo_intervalo == "dinâmico":
             if duracao_min_h is not None:
-                intervalos = criar_gerador_multijanela(
-                    janelas=parse_janelas_operacao(intervalo_str),
-                    duracao_min_h=duracao_min_h,
-                    duracao_max_h=duracao_max_h,
-                    probabilidade=probabilidade,
-                    dt_min=1,
-                    on_overflow="clamp",
-                )
+                fabrica = _fabrica_multijanela()
+                intervalos = fabrica(probabilidade)
                 probabilisticado_no_intervalo = True
             else:
                 intervalos = parse_intervalo_dinamico_split(intervalo_str)
@@ -380,6 +392,7 @@ def cria_comodo_da_planilha(sheet_df: pd.DataFrame, comodo_nome: str) -> Comodo:
             probabilidade=probabilidade,
             fator_demanda=fd,
             probabilisticado_no_intervalo=probabilisticado_no_intervalo,
+            fabrica_intervalos=fabrica,
         )
         equipamentos.append(eq)
     return Comodo(nome=comodo_nome, equipamentos=equipamentos)
@@ -501,7 +514,25 @@ def aplicar_ajuste_sazonal(
 ) -> List[Comodo]:
     """
     Retorna uma cópia dos cômodos com ajuste sazonal aplicado.
-    Nesta v1, o fator sazonal é aplicado sobre a intensidade (fator_demanda).
+
+    O ajuste aceita um ``"modo"``, e a escolha muda a forma da curva:
+
+    ``"fator_demanda"`` (padrão)
+        O fator multiplica a **intensidade**. Serve para carga que de fato
+        modula com a estação sem mudar de horário — um chuveiro que esquenta
+        mais no inverno, uma bomba que trabalha contra água mais fria.
+
+    ``"probabilidade"``
+        O fator multiplica a **frequência de uso**, e só transborda para a
+        intensidade quando a probabilidade satura em 1,0. É o certo para
+        climatização: no inverno o ar-condicionado não liga mais fraco, ele não
+        liga. Aplicado sobre o fator de demanda, −45% de inverno vira "roda as
+        mesmas 5,5 horas todas as noites, a 55% da potência", e o modelo põe um
+        platô de ar-condicionado em todas as madrugadas de julho. Quem
+        dimensiona banco de bateria pela madrugada recebia uma carga que não
+        existe.
+
+    O padrão preserva o comportamento de todo ajuste já escrito.
     """
     comodos_sazonais = copy.deepcopy(comodos)
 
@@ -516,8 +547,27 @@ def aplicar_ajuste_sazonal(
             multiplicador = 1.0 + (percentual / 100.0)
             multiplicador = max(0.0, multiplicador)
 
-            # Aplicação explícita da sazonalidade na simulação.
-            eq.fator_demanda *= multiplicador
+            modo = str(ajuste_eq.get("modo", "fator_demanda")).strip().lower()
+            if modo != "probabilidade":
+                eq.fator_demanda *= multiplicador
+                continue
+
+            alvo = eq.probabilidade * multiplicador
+            eq.probabilidade = min(1.0, alvo)
+            if alvo > 1.0:
+                # O que não coube na frequência vira intensidade: um verão que
+                # dobra o uso de um aparelho já ligado toda noite só pode
+                # aparecer como mais potência e mais tempo.
+                eq.fator_demanda *= alvo
+
+            if eq.probabilisticado_no_intervalo:
+                # Aqui a probabilidade mora dentro do gerador de janelas, e o
+                # campo é só registro. Sem refazer o gerador, o ajuste não
+                # alcançaria justamente o ar-condicionado, que é dinâmico.
+                if eq.fabrica_intervalos is None:
+                    eq.fator_demanda *= multiplicador
+                else:
+                    eq.intervalos = eq.fabrica_intervalos(eq.probabilidade)
 
     return comodos_sazonais
 

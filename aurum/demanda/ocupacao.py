@@ -370,7 +370,13 @@ def sazonalidade_de_climatizacao(
             continue
         for equipamento in tabela["Equipamento"]:
             if e_climatizacao(equipamento):
-                ajustes[f"{nome}::{equipamento}"] = {"ativo": True, **percentuais}
+                # Climatização se liga ou não se liga; ela não passa o
+                # inverno inteiro ligada a meia potência. O modo diz a
+                # `aplicar_ajuste_sazonal` que o fator move a frequência de
+                # uso, e não a intensidade.
+                ajustes[f"{nome}::{equipamento}"] = {
+                    "ativo": True, "modo": "probabilidade", **percentuais,
+                }
     return ajustes
 
 

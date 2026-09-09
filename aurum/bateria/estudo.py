@@ -144,6 +144,21 @@ class ConfiguracaoEstudo:
     #:
     #: Vazio, os escopos usam `tabelas_cenario` e nada muda.
     tabelas_dimensionantes: dict[str, Any] | None = None
+
+    #: O cenário a partir do qual a rotina é deslocada, e o perfil de variação.
+    #:
+    #: Com os dois declarados, a carga total e a carga de backup passam a ser
+    #: simuladas com a rotina mudando de um dia para o outro — almoço mais
+    #: tarde, jantar mais tarde, uma fração dos dias virada na madrugada. Sem
+    #: eles, o Monte Carlo continua colocando toda refeição na mesma janela em
+    #: toda simulação, o que produz um perfil médio mais pontudo que o de
+    #: qualquer casa real.
+    #:
+    #: Precisa do cenário e não dos cômodos porque o que se desloca é o texto
+    #: da janela; o `Comodo` já convertido guarda a janela dentro de um gerador.
+    #: Ver :mod:`aurum.demanda.rotina`.
+    cenario_rotina: Any = None
+    rotina: Any = None
     #: Comparação entre perfis de ocupação (:mod:`aurum.demanda.ocupacao`) e
     #: qual deles dimensionou. Numa residência a mesma casa tem duas curvas —
     #: dia de semana com a casa vazia e fim de semana com a casa cheia — e
@@ -347,6 +362,38 @@ class ResultadoEstudo:
 
 
 # ----------------------------------------------------------------------------
+def _simular(
+    cfg: ConfiguracaoEstudo,
+    comodos: Sequence[Comodo],
+    instancias: dict[str, int],
+    apenas_essenciais: bool = False,
+):
+    """
+    Simula a carga — com rotina deslocada, quando o estudo a declarou.
+
+    Sem `cenario_rotina` e `rotina`, é o simulador de sempre. Com eles, cada
+    fatia do ensemble recebe um dia de rotina próprio: o almoço, o jantar e a
+    hora de dormir mudam juntos, porque quem atrasa é o domicílio e não o
+    aparelho.
+    """
+    if cfg.cenario_rotina is None or cfg.rotina is None:
+        return simular_ensemble(
+            comodos, instancias, cfg.simulacoes, cfg.ajustes_sazonais,
+            semente=cfg.semente,
+        )
+
+    from ..demanda.rotina import simular_com_rotina
+
+    return simular_com_rotina(
+        cfg.cenario_rotina,
+        num_simulacoes=cfg.simulacoes,
+        perfil=cfg.rotina,
+        ajustes_sazonais=cfg.ajustes_sazonais,
+        semente=cfg.semente,
+        apenas_essenciais=apenas_essenciais,
+    )
+
+
 def _carregar_cargas(cfg: ConfiguracaoEstudo) -> tuple[list[Comodo], dict[str, int]]:
     if cfg.comodos:
         instancias = cfg.instancias_por_comodo or {c.nome: 1 for c in cfg.comodos}
@@ -645,9 +692,9 @@ def _ensemble_de_backup(
         instancias_backup = cfg.instancias_backup or {
             c.nome: instancias.get(c.nome, 1) for c in cfg.comodos_backup
         }
-        return simular_ensemble(
-            list(cfg.comodos_backup), instancias_backup, cfg.simulacoes,
-            cfg.ajustes_sazonais, semente=cfg.semente,
+        return _simular(
+            cfg, list(cfg.comodos_backup), instancias_backup,
+            apenas_essenciais=True,
         ), []
     if not cfg.comodos_essenciais:
         return simular_ensemble(
@@ -786,8 +833,8 @@ def executar_estudo(cfg: ConfiguracaoEstudo, progresso=None) -> ResultadoEstudo:
     # 1. carga -------------------------------------------------------------
     avisar("Simulando a demanda (Monte Carlo por estação)", 0.05)
     comodos, instancias = _carregar_cargas(cfg)
-    ensemble_total = simular_ensemble(
-        comodos, instancias, cfg.simulacoes, cfg.ajustes_sazonais, semente=cfg.semente
+    ensemble_total = _simular(
+        cfg, comodos, instancias, apenas_essenciais=False,
     )
     ensemble_backup, avisos_backup = _ensemble_de_backup(cfg, comodos, instancias)
     avisos.extend(avisos_backup)
