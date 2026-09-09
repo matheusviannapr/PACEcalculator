@@ -101,6 +101,9 @@ _PADROES: dict[str, Any] = {
     "e_vistoria": None,
     #: O pacote da coleta residencial, quando a origem foi o aplicativo.
     "e_coleta": None,
+    #: A via rápida está aberta: a coleta respondeu quase tudo, e o que falta
+    #: cabe numa tela. Vira falso quando o operador escolhe o caminho longo.
+    "e_via_rapida": False,
     "e_conta_kwh": 5000.0,
     "e_dias_operacao": 30,
     "e_ensemble_total": None,
@@ -480,6 +483,255 @@ def _fixar_local(lugar: dict) -> None:
             st.session_state[chave] = float(valor)
 
 
+#: O que a coleta residencial não tem como responder, e por quê.
+#:
+#: Escrito aqui, e não espalhado pela tela, porque esta lista é o contrato da
+#: via rápida: se ela crescer, a via deixa de ser rápida e vira o assistente de
+#: novo — e é melhor descobrir isso olhando uma constante do que contando
+#: campos numa tela.
+_FALTA_NA_COLETA = (
+    ("Tarifa", "a conta vem como arquivo, e ninguém a leu ainda"),
+    ("Consumo faturado", "é ele que confere o levantamento contra o mundo"),
+    ("Tensão da rede", "a coleta não pergunta, e ela decide o catálogo de inversores"),
+    ("Inclinação do telhado", "não sai de uma projeção em planta"),
+    ("Quadro de backup", "quanto da escala de criticidade entra é decisão comercial"),
+    ("Autonomia alvo", "quantas horas sem rede, também decisão comercial"),
+)
+
+
+def _niveis_presentes(cenario) -> list[str]:
+    """
+    Os níveis de criticidade que este levantamento realmente tem.
+
+    Na ordem da escala, do mais para o menos crítico — que é a ordem em que o
+    corte faz sentido. Oferecer um nível que nenhum equipamento tem convida o
+    usuário a escolher um quadro de backup vazio.
+    """
+    from .demanda.vistoria import CRITICIDADES
+
+    presentes = set()
+    for tabela in cenario.comodos.values():
+        if "criticidade" in tabela.columns:
+            presentes |= {str(x).upper() for x in tabela["criticidade"].dropna()}
+    return [n for n in CRITICIDADES if n in presentes] or list(CRITICIDADES)
+
+
+def _corte_padrao(cenario) -> list[str]:
+    """
+    Os dois níveis mais críticos que existem — o mesmo critério do assistente.
+
+    Numa casa levantada com a escala inteira dá MC + C, que é o quadro
+    essencial. Numa em que ninguém marcou nada acima de P, dá P — porque um
+    corte que não seleciona nada não é um quadro pequeno, é um erro.
+    """
+    presentes = _niveis_presentes(cenario)
+    return presentes[:2]
+
+
+def _tela_confirmacao() -> None:
+    """
+    Uma tela só: o que a coleta trouxe, e os poucos campos que faltam.
+
+    O pacote do aplicativo responde cliente, local, coordenada confirmada,
+    telhado desenhado, cargas por ambiente e criticidade item a item. Repetir
+    isso em oito passos é pedir de novo o que já está no arquivo, e cada campo
+    repetido é uma chance de digitar diferente do que o cliente respondeu.
+    """
+    from .bateria.fontes import Fatura
+
+    dados = st.session_state.get("e_coleta")
+    cenario = st.session_state.get("e_cenario")
+    if dados is None or cenario is None:
+        st.session_state["e_via_rapida"] = False
+        st.rerun()
+        return
+
+    # Semeia uma vez, e daí em diante só a chave manda.
+    #
+    # Passar `value=`/`index=`/`default=` junto com `key=` reimpõe o padrão a
+    # cada re-execução e desfaz a escolha do usuário sozinha. É o mesmo defeito
+    # que o multiselect do quadro de backup já teve, e que tem teste próprio.
+    for chave, padrao in (
+        ("e_tarifa_coleta", 1.00),
+        ("e_conta_kwh", 500.0),
+        ("e_tensao_rede", 380.0),
+        ("e_inclinacao_coleta", 20),
+        ("e_corte_coleta", _corte_padrao(cenario)),
+        ("e_autonomia_coleta", 6),
+        ("e_com_solar", True),
+    ):
+        st.session_state.setdefault(chave, padrao)
+
+    st.markdown("## Confirme e calcule")
+    st.caption(
+        "A coleta do cliente respondeu quase tudo. Abaixo, o que veio pronto — e, "
+        "à direita, os seis campos que o aplicativo não tem como responder."
+    )
+
+    # ---------------------------------------------------- o que veio pronto
+    aguas = st.session_state.get("e_aguas") or []
+    kwp_telhado = sum(
+        float(getattr(a.get("layout"), "potencia_kwp", 0.0) or 0.0) for a in aguas)
+    modulos = sum(int(getattr(a.get("layout"), "quantidade", 0) or 0) for a in aguas)
+
+    esquerda, direita = st.columns([1.05, 1.0], gap="large")
+    with esquerda:
+        st.markdown("#### O que a coleta trouxe")
+        linhas = [
+            ("Cliente", dados.cliente or "—"),
+            ("Local", dados.local or "—"),
+            ("Coordenada",
+             f"{dados.latitude:.5f}, {dados.longitude:.5f}"
+             if dados.tem_coordenada else "não confirmada"),
+            ("Ambientes", f"{len(cenario.comodos)}"),
+            ("Equipamentos", f"{cenario.total_de_equipamentos()}"),
+            ("Criticidade",
+             "item a item" if cenario.tem_criticidade else "não classificada"),
+            ("Telhado",
+             f"{len(aguas)} água(s), {modulos} módulos, {kwp_telhado:.2f} kWp"
+             if aguas else "sem contorno desenhado"),
+            ("Conta de luz", dados.conta_nome or "não anexada"),
+        ]
+        for rotulo, valor in linhas:
+            st.markdown(f"**{rotulo}** · {valor}")
+        for aviso in dados.avisos:
+            st.caption(aviso)
+
+    # -------------------------------------------------- o que falta confirmar
+    with direita:
+        st.markdown("#### O que falta confirmar")
+        tarifa = st.number_input(
+            "Tarifa (R$/kWh)", min_value=0.0, max_value=5.0, step=0.05,
+            key="e_tarifa_coleta",
+            help="Da conta de luz do cliente: o valor total dividido pelos kWh "
+                 "faturados, e não a tarifa de tabela da distribuidora.",
+        )
+        consumo = st.number_input(
+            "Consumo faturado (kWh/mês)", min_value=0.0, step=50.0,
+            key="e_conta_kwh",
+            help="O estudo compara este número com o que o levantamento simula. "
+                 "Divergência acima de 15% vira ressalva no documento.",
+        )
+        tensao = st.selectbox(
+            "Tensão da rede", (220.0, 380.0),
+            format_func=lambda v: "127/220 V (monofásico ou bifásico)"
+                                  if v == 220.0 else "220/380 V (trifásico)",
+            key="e_tensao_rede",
+            help="Decide qual metade do catálogo de inversores é elegível. Está "
+                 "no padrão de entrada ou na conta de luz.",
+        )
+        if aguas:
+            st.slider(
+                "Inclinação do telhado (graus)", 0, 45,
+                key="e_inclinacao_coleta",
+                help="O contorno desenhado é a projeção em planta e não mede "
+                     "inclinação. 20 graus é o telhado brasileiro comum.",
+            )
+        # Os níveis que este levantamento tem, na ordem da escala. Oferecer MC
+        # numa casa sem nenhum equipamento MC é convidar a escolher o vazio.
+        corte = st.multiselect(
+            "Entra no quadro de backup",
+            options=_niveis_presentes(cenario),
+            key="e_corte_coleta",
+            help="MC é o que não admite interrupção nenhuma; C admite minutos. "
+                 "Levar P junto costuma dobrar o banco.",
+        )
+        autonomia = st.slider(
+            "Autonomia alvo (horas sem rede)", 1, 24,
+            key="e_autonomia_coleta",
+            help="Seis horas atravessam o apagão comum; 24 h, o temporal que "
+                 "derruba a rede de uma região.",
+        )
+        com_solar = st.toggle(
+            "Incluir geração solar", key="e_com_solar",
+            help="Desligado, o estudo compara só rede e bateria.",
+        )
+
+    st.divider()
+    pronto = bool(corte) and tarifa > 0 and consumo > 0
+    if not pronto:
+        st.warning("Tarifa, consumo e ao menos um nível de criticidade são "
+                   "necessários para calcular.")
+
+    botoes = st.columns([1.0, 1.0, 1.4])
+    if botoes[0].button("Calcular o estudo", type="primary", disabled=not pronto,
+                        width="stretch"):
+        _calcular_da_coleta(tarifa, consumo, autonomia, corte, com_solar)
+    if botoes[1].button("Abrir o assistente completo", width="stretch"):
+        # A via rápida assume padrões — inclinação, montagem, corte. Quem
+        # conhece a casa às vezes sabe que um deles está errado.
+        st.session_state["e_via_rapida"] = False
+        st.session_state["e_passo"] = 1
+        st.rerun()
+    botoes[2].caption(
+        "O assistente pergunta o mesmo em oito passos, e deixa mexer em "
+        "montagem, catálogo de equipamento e premissas econômicas."
+    )
+
+
+def _calcular_da_coleta(tarifa, consumo_mes, autonomia, corte, com_solar) -> None:
+    """
+    Roda o estudo com o que a coleta trouxe e o que a tela confirmou.
+
+    Reaproveita `_montar_configuracao`, que é a mesma peça que o assistente
+    usa: uma segunda montagem de configuração aqui viraria, com o tempo, um
+    segundo estudo com regras próprias — e dois estudos que divergem em silêncio
+    é o defeito que este projeto já corrigiu três vezes.
+    """
+    from .bateria.fontes import Fatura
+
+    cenario = st.session_state["e_cenario"]
+    cenario.criticidades_essenciais = tuple(corte)
+    st.session_state["e_criticidades"] = list(corte)
+
+    # Um corte que não seleciona nenhum equipamento não é um quadro pequeno: é
+    # um erro, e sem esta guarda ele chega ao usuário como traceback do
+    # Streamlit. Um formulário de confirmação que quebra ao confirmar é pior
+    # que um que pergunta demais.
+    if cenario.potencia_instalada_w(True) <= 0:
+        st.error(
+            "Nenhum equipamento deste levantamento está nos níveis escolhidos, "
+            "então não há quadro de backup a dimensionar. Inclua um nível menos "
+            "crítico, ou desligue a bateria e siga só com a geração."
+        )
+        return
+
+    # A inclinação declarada vale para todas as águas: o contorno é projeção em
+    # planta, e uma inclinação por água exigiria medida que a coleta não tem.
+    inclinacao = float(st.session_state.get("e_inclinacao_coleta") or 20.0)
+    st.session_state["e_inclinacao"] = inclinacao
+
+    fatura = Fatura(
+        tarifa_brl_kwh=float(tarifa),
+        consumo_mensal_kwh=float(consumo_mes),
+        custo_disponibilidade_kwh=100.0,
+    )
+    cfg = _montar_configuracao(
+        autonomia=float(autonomia), confiabilidade=0.95,
+        duracoes=(1.0, 2.0, 3.0, 6.0, 12.0, 24.0), amostras=150,
+        passo=5, candidatos=8,
+        tarifa=float(tarifa), tarifa_ponta=float(tarifa), tarifa_demanda=0.0,
+        custo_interrupcao=0.0, interrupcoes=8.0, anos=15, reserva=0.2,
+        fatura=fatura,
+        considerar_solar=bool(com_solar), considerar_bateria=True,
+        considerar_gerador=False,
+        topologia_kit="splitphase",
+    )
+    barra = st.progress(0.0, text="Preparando…")
+    try:
+        st.session_state["e_estudo"] = executar_estudo(
+            cfg, progresso=lambda m, f: barra.progress(min(1.0, f), text=m))
+    except Exception as exc:  # noqa: BLE001 — a tela mostra a mensagem, não o traceback
+        barra.empty()
+        st.error(f"O estudo não pôde ser concluído: {exc}")
+        return
+    barra.empty()
+    st.session_state["e_pacote"] = None
+    st.session_state["e_via_rapida"] = False
+    st.session_state["e_passo"] = len(PASSOS)
+    st.rerun()
+
+
 def _passo_cliente() -> None:
     # A vistoria vem **antes** de qualquer widget desta tela, e não é questão
     # de gosto: importar preenche `e_nome`, `e_tensao_rede` e as coordenadas,
@@ -759,6 +1011,8 @@ def _cargas_da_coleta() -> None:
         })
     if dados.telhado_geojson:
         _telhado_da_coleta(dados)
+    # A coleta respondeu quase tudo: o que falta cabe numa tela só.
+    st.session_state["e_via_rapida"] = True
     st.rerun()
 
 
@@ -3567,6 +3821,11 @@ def _montar_zip(estudo, capa: DadosCapa | None = None) -> bytes:
 def renderar() -> None:
     """Ponto de entrada chamado pelo ``app.py``."""
     _iniciar()
+    # A via rápida vem antes da barra lateral e do cabeçalho de passos: ela não
+    # é um passo, é o atalho de quem já respondeu tudo no aplicativo.
+    if st.session_state.get("e_via_rapida"):
+        _tela_confirmacao()
+        return
     _barra_lateral()
     passo = st.session_state["e_passo"]
     _cabecalho(passo)

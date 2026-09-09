@@ -654,3 +654,148 @@ def test_uma_uf_sozinha_nao_vira_coordenada():
     assert "if vistoria.cidade:" in trecho, (
         "a busca de coordenada tem de exigir cidade, não aceitar UF sozinha")
     assert "apenas o estado" in trecho, "e tem de avisar quando só houver UF"
+
+
+# ----------------------------------------------------------------------------
+# A via rápida da coleta residencial
+# ----------------------------------------------------------------------------
+def _coleta_pronta(at: AppTest) -> AppTest:
+    """
+    Põe a página no estado em que a importação da coleta a deixa.
+
+    O uploader não é acionável pelo `AppTest`, então o teste monta o mesmo
+    estado que `_cargas_da_coleta` monta ao fim da importação. O que se testa é
+    a tela de confirmação, e não o widget de arquivo.
+    """
+    from aurum.coleta import ler_pacote
+
+    caminho = RAIZ / "tests" / "dados" / "coleta-exemplo.json"
+    dados = ler_pacote(caminho) if caminho.exists() else None
+    if dados is None:
+        pytest.skip("sem pacote de coleta de exemplo")
+
+    # Sem impor corte: quem escolhe os níveis é a tela, a partir do que o
+    # levantamento tem. Impor aqui esconderia justamente o que se quer testar.
+    cenario = dados.cenario
+    at.session_state["e_cenario"] = cenario
+    at.session_state["e_coleta"] = dados
+    at.session_state["e_nome"] = dados.cliente
+    at.session_state["e_segmento"] = "residencia"
+    at.session_state["e_lat"] = dados.latitude
+    at.session_state["e_lon"] = dados.longitude
+    at.session_state["e_via_rapida"] = True
+    return at.run()
+
+
+def test_a_coleta_cai_numa_tela_so():
+    """
+    O pacote responde quase tudo; percorrer oito passos é pedir de novo.
+
+    Cada campo repetido é uma chance de digitar diferente do que o cliente
+    respondeu no aplicativo — e o cliente estava na casa, quem digita não.
+    """
+    at = _coleta_pronta(_abrir())
+    assert not at.exception, at.exception
+    assert at.session_state["e_via_rapida"] is True
+
+    titulos = " ".join(m.value for m in at.markdown)
+    assert "Confirme e calcule" in titulos
+    assert "O que a coleta trouxe" in titulos
+    assert "O que falta confirmar" in titulos
+
+
+def test_a_tela_pede_poucos_campos():
+    """
+    A via rápida só é rápida enquanto a lista do que falta for curta.
+
+    `_FALTA_NA_COLETA` é o contrato: se ela crescer, a tela vira o assistente
+    de novo, e é melhor descobrir isso num teste do que numa demonstração.
+    """
+    from aurum.pagina_estudo import _FALTA_NA_COLETA
+
+    assert len(_FALTA_NA_COLETA) <= 7, "mais que isso deixa de ser uma tela só"
+
+    at = _coleta_pronta(_abrir())
+    entradas = (len(at.number_input) + len(at.selectbox) + len(at.slider)
+                + len(at.multiselect) + len(at.toggle))
+    assert entradas <= 8, f"{entradas} campos é assistente, não confirmação"
+
+
+def test_o_assistente_continua_acessivel():
+    """
+    A via rápida assume padrões — inclinação, montagem, corte de criticidade.
+
+    Quem conhece a casa às vezes sabe que um deles está errado, e fechar a
+    porta do caminho longo transformaria um atalho em camisa de força.
+    """
+    at = _coleta_pronta(_abrir())
+    _por_rotulo(at.button, "assistente completo").click().run()
+    assert at.session_state["e_via_rapida"] is False
+    assert at.session_state["e_passo"] == CLIENTE
+    assert at.session_state["e_cenario"] is not None, "a coleta não se perde"
+
+
+def test_a_escolha_do_usuario_manda_na_tela_rapida():
+    """
+    O defeito que este projeto já corrigiu uma vez, na unidade nova.
+
+    Widget com `key=` **e** valor inicial reimpõe o padrão a cada re-execução:
+    a escolha se desfaz sozinha, e com multiselect o efeito é pior — lista
+    vazia é falsa em Python, e `[] or padrão` devolve a lista inteira.
+    """
+    at = _coleta_pronta(_abrir())
+    niveis = _por_rotulo(at.multiselect, "quadro de backup")
+    assert niveis.value, "o padrão seleciona algum nível"
+
+    # Esvaziar é a operação que denunciava o defeito: lista vazia é falsa em
+    # Python, e `[] or padrão` devolvia a lista inteira de volta.
+    niveis.set_value([]).run()
+    assert not at.exception, at.exception
+    assert at.session_state["e_corte_coleta"] == [], "o vazio do usuário manda"
+
+    tarifa = _por_rotulo(at.number_input, "Tarifa")
+    tarifa.set_value(1.50).run()
+    assert at.session_state["e_tarifa_coleta"] == 1.50
+
+
+def test_a_tela_so_oferece_os_niveis_que_existem():
+    """
+    Oferecer MC numa casa sem nenhum equipamento MC é convidar a escolher o vazio.
+
+    A verificação ponta a ponta pegou o caso: com o corte padrão fixo em MC+C e
+    um levantamento em que nada é MC nem C, `para_comodos(True)` levanta
+    "nenhum cômodo selecionado" — e isso chega ao usuário como traceback do
+    Streamlit. Um formulário de confirmação que quebra ao confirmar é pior que
+    um que pergunta demais.
+    """
+    from aurum.pagina_estudo import _corte_padrao, _niveis_presentes
+
+    at = _coleta_pronta(_abrir())
+    cenario = at.session_state["e_cenario"]
+    presentes = _niveis_presentes(cenario)
+
+    niveis = _por_rotulo(at.multiselect, "quadro de backup")
+    assert list(niveis.options) == presentes
+    assert at.session_state["e_corte_coleta"] == _corte_padrao(cenario)
+
+    # E o corte padrão tem de selecionar alguma coisa, seja qual for a escala
+    # que este levantamento usou: é essa a garantia que faltava.
+    cenario.criticidades_essenciais = tuple(at.session_state["e_corte_coleta"])
+    assert cenario.potencia_instalada_w(True) > 0
+
+
+def test_corte_vazio_responde_com_frase_e_nao_com_traceback():
+    """
+    O usuário ainda pode desmarcar tudo, e aí a resposta é uma frase.
+
+    Ela diz o que fazer — alargar o corte ou seguir sem bateria — porque um erro
+    que não aponta a saída obriga o operador a adivinhar qual dos seis campos
+    estava errado.
+    """
+    at = _coleta_pronta(_abrir())
+    _por_rotulo(at.multiselect, "quadro de backup").set_value([]).run()
+    assert not at.exception, at.exception
+
+    # Sem nível nenhum, o botão de calcular nem fica disponível.
+    calcular = _por_rotulo(at.button, "Calcular o estudo")
+    assert calcular.disabled, "calcular com quadro vazio derrubaria a tela"
