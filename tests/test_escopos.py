@@ -229,3 +229,67 @@ def test_a_tabela_sai_pronta_para_o_relatorio(comparacao):
     for coluna in ("escopo", "niveis", "equipamentos", "energia_diaria_kwh",
                    "pico_p95_kw", "energia_util_kwh", "capex_brl"):
         assert coluna in tabela.columns
+
+
+# ----------------------------------------------------------------------------
+# Que tabelas chegam aqui
+# ----------------------------------------------------------------------------
+
+
+def test_os_escopos_recebem_o_dia_que_dimensiona():
+    """
+    Equipamento sai do pior dia — inclusive o que os escopos escolhem.
+
+    `tabelas_cenario` serve a dois consumidores com necessidades opostas: os
+    cenários de uso precisam do levantamento cru, porque aplicam cada perfil de
+    ocupação por cima; os escopos escolhem banco, e medidos no levantamento cru
+    dimensionam contra uma carga mais leve que a do resto do estudo. Num caso
+    real a recomendação vinha com 9,3 kWh e a seção de escopos dizia que o mesmo
+    recorte, com o mesmo alvo, cabe em 4,6 kWh — dois bancos no mesmo documento.
+    """
+    import inspect
+
+    from aurum.bateria.estudo import ConfiguracaoEstudo, executar_estudo
+
+    padrao = ConfiguracaoEstudo(latitude=-22.9, longitude=-43.2)
+    assert padrao.tabelas_dimensionantes is None, (
+        "o padrão tem de preservar o comportamento de todo estudo existente"
+    )
+
+    fonte = inspect.getsource(executar_estudo)
+    chamada = fonte[fonte.index("_comparar_escopos("):]
+    chamada = chamada[:chamada.index(")\n")]
+    assert "cfg.tabelas_dimensionantes or cfg.tabelas_cenario" in chamada, (
+        "os escopos têm de receber o dia que dimensiona, quando declarado"
+    )
+
+
+def test_cada_argumento_novo_cai_na_chamada_certa():
+    """
+    O fio, e não o número: duas vezes um argumento caiu na chamada errada.
+
+    `ajustes_sazonais=cfg.ajustes_sazonais` aparece nas chamadas de escopos e de
+    cenários de uso, e ancorar uma edição nele acerta a primeira. Foi assim que
+    a tarifa foi parar em escopos uma vez, e `considerar_solar` outra — este
+    último derrubou a comparação inteira com `unexpected keyword argument`.
+
+    `considerar_solar` pertence aos cenários de uso, que dimensionam solar;
+    escopos não dimensiona solar nenhum e não conhece o argumento.
+    """
+    import inspect
+
+    from aurum.bateria.escopos import comparar_escopos
+    from aurum.bateria.estudo import executar_estudo
+    from aurum.bateria.uso import comparar_cenarios_de_uso
+
+    assert "considerar_solar" in inspect.signature(comparar_cenarios_de_uso).parameters
+    assert "considerar_solar" not in inspect.signature(comparar_escopos).parameters
+
+    fonte = inspect.getsource(executar_estudo)
+    escopos = fonte[fonte.index("_comparar_escopos("):]
+    escopos = escopos[:escopos.index(")\n")]
+    assert "considerar_solar" not in escopos, "argumento na chamada errada"
+
+    uso = fonte[fonte.index("comparar_cenarios_de_uso("):]
+    uso = uso[:uso.index(")\n")]
+    assert "considerar_solar=cfg.considerar_solar" in uso

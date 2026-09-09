@@ -132,6 +132,18 @@ class ConfiguracaoEstudo:
     #: anexo precisa do original para dizer por quanto tempo cada equipamento
     #: fica ligado, e não só em que janela ele pode ligar.
     tabelas_cenario: dict[str, Any] | None = None
+    #: As tabelas do **dia que dimensiona**, quando diferem do levantamento.
+    #:
+    #: `tabelas_cenario` serve a dois consumidores com necessidades opostas. Os
+    #: cenários de uso precisam do levantamento cru, porque aplicam cada perfil
+    #: de ocupação por cima — receber um perfil já aplicado transformaria duas
+    #: vezes. Os escopos escolhem equipamento, e equipamento sai do pior dia:
+    #: medidos no levantamento cru, dimensionam contra uma carga mais leve que a
+    #: do resto do estudo e devolvem um banco menor que o recomendado, no mesmo
+    #: documento e com o mesmo alvo de autonomia.
+    #:
+    #: Vazio, os escopos usam `tabelas_cenario` e nada muda.
+    tabelas_dimensionantes: dict[str, Any] | None = None
     #: Comparação entre perfis de ocupação (:mod:`aurum.demanda.ocupacao`) e
     #: qual deles dimensionou. Numa residência a mesma casa tem duas curvas —
     #: dia de semana com a casa vazia e fim de semana com a casa cheia — e
@@ -946,7 +958,10 @@ def executar_estudo(cfg: ConfiguracaoEstudo, progresso=None) -> ResultadoEstudo:
             from .escopos import comparar_escopos as _comparar_escopos
 
             escopos = _comparar_escopos(
-                cfg.tabelas_cenario,
+                # O dia que dimensiona, e não o levantamento: os escopos
+                # escolhem banco, e banco sai do pior dia — o mesmo critério
+                # que a recomendação usa, para os dois números baterem.
+                cfg.tabelas_dimensionantes or cfg.tabelas_cenario,
                 cfg.instancias_backup or cfg.instancias_por_comodo or {},
                 candidatos, serie, cfg.malha,
                 autonomia_alvo_h=cfg.autonomia_alvo_h,
