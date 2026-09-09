@@ -328,3 +328,117 @@ def test_o_modo_padrao_nao_muda_nada():
     ar = [e for e in quarto.equipamentos if e.nome.startswith("Ar-condicionado")][0]
     assert ar.probabilidade == pytest.approx(0.7), "a frequência fica intacta"
     assert ar.fator_demanda < 1.0
+
+
+# ----------------------------------------------------------------------------
+# Varredura: dimensionar sem o viés do horário declarado
+# ----------------------------------------------------------------------------
+def test_a_varredura_exaure_o_horario_em_vez_de_amostrar_em_volta_dele():
+    """
+    A diferença entre robustez e a ilusão dela.
+
+    `sortear_rotinas` amostra em torno do **zero** — isto é, em torno da janela
+    que o vistoriador escreveu. Isso responde "quanto a rotina varia em volta do
+    declarado", que é a pergunta certa quando o horário declarado é confiável.
+    Ele quase nunca é: não é medição, é o que o morador lembrou de dizer
+    preenchendo um formulário.
+
+    A varredura troca a amostra pela grade e responde outra pergunta — *o
+    dimensionamento muda se a rotina estiver em outro lugar do dia?*
+    """
+    from aurum.demanda.rotina import varrer_rotinas
+
+    grade = varrer_rotinas(de_min=-120.0, ate_min=180.0, passo_min=60.0,
+                           incluir_madrugada=False)
+    comuns = sorted({round(r.de("tarde")) for r in grade})
+    assert comuns == [-120, -60, 0, 60, 120, 180]
+    assert 0 in comuns, "o horário declarado tem de estar na grade, para comparar"
+
+
+def test_a_faixa_da_varredura_nao_e_simetrica():
+    """
+    Formulário raramente é preenchido com horário mais tarde do que a realidade.
+
+    Quem responde "jantar às 19h" janta às 19h ou depois, quase nunca antes. Uma
+    grade simétrica gastaria metade dos pontos num lado que não acontece.
+    """
+    from aurum.demanda.rotina import varrer_rotinas
+
+    grade = varrer_rotinas(incluir_madrugada=False)
+    comuns = [r.de("tarde") for r in grade]
+    assert abs(min(comuns)) < abs(max(comuns))
+
+
+def test_o_descompasso_e_o_segundo_vies():
+    """
+    Deslocar tudo junto preserva o alinhamento, e o alinhamento é o outro viés.
+
+    Todas as janelas de uma vistoria saíram do mesmo preenchimento, na mesma
+    sessão, e chegam compassadas de um jeito que rotina nenhuma é. Sem esta
+    dimensão a varredura mede um viés e deixa o outro passar: no caso real, a
+    grade de deslocamento comum sozinha acusou 3% de viés no pico, e com o
+    descompasso o número foi para 16%.
+    """
+    from aurum.demanda.rotina import varrer_rotinas
+
+    grade = varrer_rotinas(de_min=0.0, ate_min=0.0, passo_min=30.0,
+                           descompassos_min=(-90.0, 0.0, 90.0),
+                           incluir_madrugada=False)
+    assert len(grade) == 3
+    # Esticado: manhã mais cedo, noite mais tarde. Comprimido: o inverso.
+    esticado = grade[2]
+    assert esticado.de("manha") < 0 < esticado.de("noite")
+    comprimido = grade[0]
+    assert comprimido.de("noite") < 0 < comprimido.de("manha")
+    # O meio do dia não anda com o descompasso: é o eixo em torno do qual gira.
+    assert all(abs(r.de("tarde")) < 1e-6 for r in grade)
+
+
+def test_o_envelope_marca_o_ponto_declarado():
+    """
+    A comparação entre o enviesado e o envelope tem de sair na mesma tabela.
+
+    Depender de alguém lembrar qual linha era o horário declarado é como perder
+    a comparação: o envelope sozinho diz a faixa, e não diz de que lado dela o
+    estudo de hoje caiu.
+    """
+    from aurum.demanda.rotina import envelope_de_rotina, varrer_rotinas
+
+    casa = _casa()
+    grade = varrer_rotinas(de_min=-60.0, ate_min=60.0, passo_min=60.0,
+                           incluir_madrugada=False)
+
+    def medir(cenario, apenas_essenciais):
+        return {"n": len(cenario.comodos)}
+
+    env = envelope_de_rotina(casa, medir, grade)
+    assert len(env) == 3
+    assert env["declarado"].sum() == 1, "um e só um ponto é o declarado"
+    assert env.loc[env["declarado"], "deslocamento_min"].iloc[0] == 0.0
+
+
+def test_o_resumo_separa_amplitude_de_vies():
+    """
+    Duas perguntas diferentes, e confundi-las esconde a que importa.
+
+    **Amplitude** é quanto a grandeza se move ao longo da grade — se a resposta
+    depende do horário. **Viés** é quanto o horário declarado se afasta do pior
+    caso — se o estudo de hoje está dimensionando por baixo. Uma amplitude
+    grande com viés zero significa que o formulário calhou de acertar o pior
+    caso, e o dimensionamento está salvo.
+    """
+    from aurum.demanda.rotina import resumo_do_envelope
+
+    env = pd.DataFrame({
+        "deslocamento_min": [-60.0, 0.0, 60.0],
+        "descompasso_min": [0.0, 0.0, 0.0],
+        "madrugada": [False, False, False],
+        "declarado": [False, True, False],
+        "pico_kw": [8.0, 8.0, 10.0],
+    })
+    r = resumo_do_envelope(env, "pico_kw")
+    assert r["declarado"] == 8.0 and r["maximo"] == 10.0
+    assert r["amplitude_percentual"] == pytest.approx(0.25)
+    assert r["vies_percentual"] == pytest.approx(-0.2), (
+        "o declarado está 20% abaixo do pior caso"
+    )

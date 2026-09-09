@@ -1469,6 +1469,105 @@ def _secao_quadro_backup(estudo: ResultadoEstudo) -> str:
     return "\n\n".join(partes)
 
 
+def _secao_vies_de_horario(estudo: ResultadoEstudo) -> str:
+    """
+    O dimensionamento ancorado no horário declarado, e o dimensionamento sem ele.
+
+    O horário que a vistoria traz não é medição: é o que o morador lembrou de
+    dizer preenchendo um formulário — quase sempre a noite, quase nunca o
+    almoço, e o horário comercial quando o formulário o sugere. Todo o resto do
+    estudo é ancorado nele.
+
+    A varredura percorre o início dos horários de ponta a ponta e mede a casa em
+    cada ponto, em duas dimensões: a rotina inteira mais cedo ou mais tarde, e as
+    âncoras se afastando ou se aproximando entre si. O que sai é um envelope, e
+    a pergunta que ele responde é a única que interessa ao cliente — *este
+    dimensionamento depende do que eu respondi no formulário?*
+    """
+    env = getattr(estudo, "envelope_rotina", None)
+    if env is None or len(env) == 0:
+        return ""
+
+    from ..demanda.rotina import resumo_do_envelope
+
+    grandezas = [
+        ("energia_kwh", "Energia diária", 1, "kWh"),
+        ("pico_p95_kw", "Pico P95 da casa", 2, "kW"),
+        ("backup_pico_p95_kw", "Pico P95 do backup", 2, "kW"),
+        ("backup_energia_6h_kwh", "Energia do banco", 2, "kWh"),
+    ]
+    linhas = []
+    maior_vies = 0.0
+    for coluna, rotulo, casas, unidade in grandezas:
+        r = resumo_do_envelope(env, coluna)
+        if not r:
+            continue
+        maior_vies = max(maior_vies, abs(r.get("vies_percentual") or 0.0))
+        linhas.append((
+            rotulo,
+            _n(r["declarado"], casas, unidade),
+            _n(r["minimo"], casas, unidade),
+            _n(r["maximo"], casas, unidade),
+            # Texto puro: `tabela` passa cada célula por `esc`, que é quem
+            # transforma o símbolo de porcento. Escapar aqui o faria duas
+            # vezes, e a tabela sairia com uma barra invertida impressa.
+            f"{r['amplitude_percentual']:.0%}",
+            f"{r['vies_percentual']:+.0%}",
+        ))
+    if not linhas:
+        return ""
+
+    pontos = len(env)
+    partes = [
+        secao("O horário declarado dimensiona?"),
+        "O horário que a vistoria traz não é medição: é o que o morador lembrou "
+        "de dizer preenchendo um formulário — quase sempre a noite, quase nunca "
+        "o almoço, e o horário comercial quando o formulário o sugere. Todo o "
+        "resto deste estudo é ancorado nele, e um estudo que não diz isso está "
+        f"pedindo confiança onde pode mostrar evidência. Foram medidos {pontos} "
+        "arranjos de horário: a rotina inteira de duas horas mais cedo a três "
+        "mais tarde, as âncoras do dia se afastando e se aproximando entre si, e "
+        "cada um deles com e sem alguém virando a noite.",
+    ]
+    partes.append(tabela(
+        ["Grandeza", "Horário declarado", "Menor", "Maior", "Amplitude", "Viés"],
+        linhas,
+        alinhamento="p{4.2cm}rrrrr",
+        tamanho_fonte="scriptsize",
+        legenda="O que muda quando a rotina se desloca no dia",
+    ))
+    partes.append(nota(
+        "'Amplitude' é quanto a grandeza se move ao longo da varredura — se a "
+        "resposta depende do horário. 'Viés' é quanto o horário declarado se "
+        "afasta do pior caso: negativo significa que o formulário dimensiona por "
+        "baixo. As duas perguntas são diferentes, e uma amplitude grande com viés "
+        "zero significa que o horário declarado calhou de ser o pior caso — o "
+        "dimensionamento está salvo, e não por mérito do formulário."
+    ))
+
+    if maior_vies < 0.05:
+        veredito = (
+            "Nenhuma grandeza que dimensiona se move mais de 5% ao longo da "
+            "varredura, e é isso que se queria saber: este dimensionamento não "
+            "depende do horário informado. "
+            "É o resultado que se quer, e ele não é sorte — vem do recorte de "
+            "criticidade. Um quadro de backup feito de refrigeração, bombas e "
+            "rede é composto de carga que não tem hora, e carga que não tem hora "
+            "não se desloca."
+        )
+    else:
+        veredito = (
+            "A varredura mostra que parte do dimensionamento depende, sim, do "
+            "horário informado. Onde o viés é negativo, o horário declarado "
+            "dimensiona "
+            "por baixo, e o equipamento especificado por ele encontraria dias "
+            "piores que os simulados. A leitura defensável é a coluna 'Maior': "
+            "ela não supõe que o formulário estava certo."
+        )
+    partes.append(caixa("O que a varredura conclui", veredito, cor="amarelopace"))
+    return "\n\n".join(partes)
+
+
 def _secao_escopos(estudo: ResultadoEstudo, figuras: dict[str, Path]) -> str:
     """
     Quanto custa levar junto o que seria bom ter.
@@ -2592,6 +2691,10 @@ def montar_documento(
         # só faz sentido quando o leitor já sabe o que o quadro essencial
         # custou.
         _secao_escopos(estudo, figuras),
+        # Depois de o leitor saber o que foi especificado: a pergunta "isso
+        # depende do que eu respondi no formulário?" só tem sentido quando já
+        # existe um "isso".
+        _secao_vies_de_horario(estudo),
         _secao_vida_util(estudo, figuras),
         _secao_cenarios(estudo, figuras),
         _secao_economia(estudo),

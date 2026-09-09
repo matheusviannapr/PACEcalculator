@@ -55,8 +55,11 @@ __all__ = [
     "Rotina",
     "ancora_da_janela",
     "deslocar",
+    "envelope_de_rotina",
+    "resumo_do_envelope",
     "simular_com_rotina",
     "sortear_rotinas",
+    "varrer_rotinas",
 ]
 
 _MIN_POR_DIA = 1440
@@ -408,3 +411,168 @@ def resumo_do_deslocamento(
             "maior_atraso_min": float(np.max(valores)) if valores else 0.0,
         })
     return pd.DataFrame(linhas)
+
+
+# ----------------------------------------------------------------------------
+# Varredura: dimensionar sem o viés do horário declarado
+# ----------------------------------------------------------------------------
+#
+# `sortear_rotinas` amostra em torno do **zero** — isto é, em torno da janela que
+# o vistoriador escreveu. Isso responde "quanto a rotina desta casa varia em
+# volta do que foi declarado", e é a pergunta certa quando o horário declarado é
+# confiável. Ele quase nunca é.
+#
+# O horário de uma vistoria não é medição: é o que o morador lembrou de dizer
+# preenchendo um formulário. O próprio motor já sabe disso em outro lugar —
+# `ocupacao._e_de_formulario` existe porque as janelas padrão se acumulam no
+# horário comercial, e o estudo já registra que o levantamento é "recortado pelo
+# que o morador lembra de responder: quase sempre a noite, quase nunca o almoço".
+#
+# São dois vieses, e eles pedem tratamentos diferentes:
+#
+# *Viés de âncora* — tudo é centrado no horário declarado. Quem disse que assiste
+# TV das 18 às 23 talvez assista das 20 à 1, e o modelo nunca considera isso.
+#
+# *Viés de simultaneidade* — todas as janelas saíram do mesmo preenchimento, na
+# mesma sessão, e por isso chegam alinhadas entre si de um jeito que rotina
+# nenhuma é.
+#
+# A varredura troca a amostra pela **grade**: percorre o deslocamento comum do
+# domicílio de ponta a ponta e mede em cada ponto. O resultado não é um número,
+# é um envelope — e a pergunta que ele responde é outra e melhor: *o
+# dimensionamento muda se a rotina desta casa estiver em outro lugar do dia?*
+#
+# Se não muda, está dimensionado sem viés, e dá para afirmar isso. Se muda, quem
+# está dimensionando é o formulário, e não a física — e o cliente precisa saber.
+
+
+#: A ordem das âncoras no dia, usada para abrir e fechar o descompasso.
+#:
+#: O gradiente vai de −1 na manhã a +1 na noite: descompasso positivo estica o
+#: dia (acorda cedo, dorme tarde), negativo o comprime (tudo junto no meio).
+_GRADIENTE = {"manha": -1.0, "almoco": -0.5, "tarde": 0.0,
+              "jantar": 0.5, "noite": 1.0}
+
+
+def varrer_rotinas(
+    de_min: float = -120.0,
+    ate_min: float = 180.0,
+    passo_min: float = 30.0,
+    descompassos_min: Sequence[float] = (0.0,),
+    incluir_madrugada: bool = True,
+) -> list[Rotina]:
+    """
+    A grade que exaure o início dos horários, em vez de amostrá-lo.
+
+    Duas dimensões, porque são dois vieses diferentes:
+
+    **Deslocamento comum** — a rotina inteira mais cedo ou mais tarde. É a
+    dimensão que o horário declarado fixa. A faixa padrão vai de duas horas
+    antes a três horas depois, e não é simétrica de propósito: formulário
+    raramente é preenchido com horário mais tarde do que a realidade — quem
+    responde "jantar às 19h" janta às 19h ou depois, quase nunca antes.
+
+    **Descompasso** — as âncoras se afastando ou se aproximando entre si.
+    Deslocar tudo junto preserva o alinhamento das janelas, e o alinhamento é o
+    segundo viés: todas as janelas saíram do mesmo preenchimento, na mesma
+    sessão, e chegam compassadas de um jeito que rotina nenhuma é. Descompasso
+    positivo estica o dia; **negativo o comprime, e é o caso perigoso** — tudo
+    junto no meio faz a coincidência subir, e é ele que dimensiona inversor.
+
+    ``incluir_madrugada`` acrescenta, em cada ponto, a variante em que alguém
+    vira a noite. É regime, não deslocamento, e por isso duplica a grade em vez
+    de esticá-la.
+    """
+    if passo_min <= 0:
+        raise ValueError("o passo da varredura tem de ser positivo")
+
+    passos = int(math.floor((ate_min - de_min) / passo_min)) + 1
+    rotinas: list[Rotina] = []
+    for i in range(max(1, passos)):
+        comum = de_min + i * passo_min
+        for descompasso in descompassos_min:
+            base = {
+                nome: comum + descompasso * _GRADIENTE.get(nome, 0.0)
+                for nome in ANCORAS
+            }
+            rotinas.append(Rotina(deslocamentos=dict(base), madrugada=False))
+            if incluir_madrugada:
+                virada = dict(base)
+                virada["noite"] = base["noite"] + 180.0
+                rotinas.append(Rotina(deslocamentos=virada, madrugada=True))
+    return rotinas
+
+
+def envelope_de_rotina(
+    cenario: Cenario,
+    medir,
+    rotinas: Sequence[Rotina] | None = None,
+    apenas_essenciais: bool = False,
+) -> pd.DataFrame:
+    """
+    Mede a casa em cada ponto da grade e devolve o envelope.
+
+    ``medir`` recebe o cenário deslocado e devolve um dicionário de grandezas —
+    fica de fora daqui de propósito, porque o que se mede muda com a pergunta:
+    inversor quer pico, banco quer energia da carga essencial, e conta de luz
+    quer o total.
+
+    A linha com deslocamento zero é o dimensionamento **de hoje**: a rotina
+    exatamente como a vistoria a declarou. Ela fica marcada para que a
+    comparação entre o enviesado e o envelope apareça na mesma tabela, em vez de
+    depender de alguém lembrar qual era qual.
+    """
+    rotinas = list(rotinas if rotinas is not None else varrer_rotinas())
+    linhas: list[dict[str, Any]] = []
+    for rotina in rotinas:
+        deslocado = deslocar(cenario, rotina)
+        deslocado.criticidades_essenciais = getattr(
+            cenario, "criticidades_essenciais", ())
+        medidas = medir(deslocado, apenas_essenciais)
+        # O deslocamento comum é o do meio do dia, onde o gradiente é zero; o
+        # descompasso é o que separa a noite da manhã.
+        comum = rotina.de("tarde")
+        descompasso = rotina.de("noite") - rotina.de("manha")
+        if rotina.madrugada:
+            descompasso -= 180.0
+        linhas.append({
+            "deslocamento_min": round(comum, 1),
+            "descompasso_min": round(descompasso / 2.0, 1),
+            "madrugada": rotina.madrugada,
+            "declarado": bool(abs(comum) < 1e-6 and abs(descompasso) < 1e-6
+                              and not rotina.madrugada),
+            **medidas,
+        })
+    return pd.DataFrame(linhas)
+
+
+def resumo_do_envelope(
+    envelope: pd.DataFrame, coluna: str,
+) -> dict[str, float]:
+    """
+    O que o envelope diz sobre uma grandeza: onde ela fica, e quanto o viés vale.
+
+    ``vies_percentual`` é o que separa um dimensionamento honesto de um que só
+    parece: quanto o valor do horário declarado se afasta do pior caso da grade.
+    Perto de zero, o horário declarado já era o pior caso e não há viés a
+    corrigir. Muito negativo, o formulário está dimensionando por baixo — e é o
+    cliente que descobre isso no primeiro apagão.
+    """
+    if coluna not in envelope.columns or envelope.empty:
+        return {}
+    valores = envelope[coluna].astype(float)
+    declarado = envelope.loc[envelope["declarado"], coluna]
+    valor_declarado = float(declarado.iloc[0]) if len(declarado) else float("nan")
+    pior = float(valores.max())
+    return {
+        "declarado": valor_declarado,
+        "minimo": float(valores.min()),
+        "maximo": pior,
+        "mediana": float(valores.median()),
+        "amplitude_percentual": (
+            float(valores.max() / valores.min() - 1.0) if valores.min() > 0 else float("nan")
+        ),
+        "vies_percentual": (
+            float(valor_declarado / pior - 1.0) if pior > 0 else float("nan")
+        ),
+    }

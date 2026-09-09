@@ -159,6 +159,14 @@ class ConfiguracaoEstudo:
     #: Ver :mod:`aurum.demanda.rotina`.
     cenario_rotina: Any = None
     rotina: Any = None
+
+    #: O envelope da varredura de horários, quando ela foi rodada.
+    #:
+    #: É a tabela que `aurum.demanda.rotina.envelope_de_rotina` devolve. Vem
+    #: pronta de fora, e não é calculada aqui, porque a varredura roda uma
+    #: simulação por ponto da grade e custa mais que o estudo inteiro — quem a
+    #: quer decide quando pagar por ela.
+    envelope_rotina: Any = None
     #: Comparação entre perfis de ocupação (:mod:`aurum.demanda.ocupacao`) e
     #: qual deles dimensionou. Numa residência a mesma casa tem duas curvas —
     #: dia de semana com a casa vazia e fim de semana com a casa cheia — e
@@ -296,6 +304,8 @@ class ResultadoEstudo:
     cenarios: ComparacaoFontes | None = None
     #: Quadro essencial contra quadro ampliado, quando a vistoria classificou
     #: equipamentos como preferíveis. ``None`` quando não há o que comparar.
+    #: O envelope da varredura de horários, repassado à montagem do documento.
+    envelope_rotina: Any = None
     escopos: Any = None
     #: Os três cenários de uso, cada um com solar e banco próprios.
     uso: Any = None
@@ -1096,6 +1106,7 @@ def executar_estudo(cfg: ConfiguracaoEstudo, progresso=None) -> ResultadoEstudo:
         ranking=ranking,
         recomendado=recomendado,
         cenarios=cenarios,
+        envelope_rotina=cfg.envelope_rotina,
         escopos=escopos,
         uso=uso,
         avisos=avisos,
