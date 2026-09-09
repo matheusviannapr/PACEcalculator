@@ -917,6 +917,16 @@ def _capex_do_conjunto(
             # Sem os 35% de instalação: o bloco já é preço de módulo pronto,
             # com caixa, BMS e a instalação do módulo dentro.
             return baterias, baterias
+
+    # Sem topologia, o inversor é compra à parte — e dizer isso aqui é
+    # necessário. `premissas.inversor_no_kit_fv` é global do estudo e fica
+    # ligada quando há solar; sem esta linha, o arranjo "Rede + bateria", que
+    # não tem kit fotovoltaico nenhum, recebia o híbrido de graça e aparecia
+    # por R$ 12.000 num quadro em que ele custa o banco mais o inversor.
+    if topologia_kit is None and premissas.inversor_no_kit_fv:
+        from dataclasses import replace as _replace
+
+        premissas = _replace(premissas, inversor_no_kit_fv=False)
     return _capex(conjunto, premissas)
 
 

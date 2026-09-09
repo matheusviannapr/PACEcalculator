@@ -176,6 +176,17 @@ class ConfiguracaoEstudo:
     #: frequência e outro valor para o cliente. Vazio, o estudo dimensiona para
     #: uma meta só e não mostra o degrau — que é como ele sempre funcionou.
     metas_autonomia_h: Sequence[float] = ()
+
+    #: Geometrias de instalação a comparar antes de dimensionar o gerador.
+    #:
+    #: Lista de ``(rótulo, inclinação, azimute)`` na convenção interna, com o
+    #: plano ótimo na primeira posição. A comparação mede cada uma na série
+    #: horária real e revela o que a perda anual esconde: em que época do ano a
+    #: energia aparece. Uma parede voltada ao Norte, no Rio, gera no inverno o
+    #: triplo do que gera no verão — o telhado faz o contrário.
+    orientacoes: Sequence[tuple[str, float, float]] = ()
+    #: Índice, em `orientacoes`, da geometria efetivamente adotada.
+    orientacao_adotada: int = 0
     #: Comparação entre perfis de ocupação (:mod:`aurum.demanda.ocupacao`) e
     #: qual deles dimensionou. Numa residência a mesma casa tem duas curvas —
     #: dia de semana com a casa vazia e fim de semana com a casa cheia — e
@@ -317,6 +328,8 @@ class ResultadoEstudo:
     envelope_rotina: Any = None
     #: A comparação entre metas de autonomia, quando pedida.
     autonomia: Any = None
+    #: A comparação entre geometrias de instalação, quando pedida.
+    orientacao: Any = None
     escopos: Any = None
     #: Os três cenários de uso, cada um com solar e banco próprios.
     uso: Any = None
@@ -750,6 +763,8 @@ def executar_estudo(cfg: ConfiguracaoEstudo, progresso=None) -> ResultadoEstudo:
             progresso(mensagem, fracao)
 
     avisos: list[str] = []
+    # Existe mesmo sem solar: o resultado sempre carrega o campo.
+    orientacao = None
 
     # Uma tarifa só no documento inteiro.
     #
@@ -872,6 +887,25 @@ def executar_estudo(cfg: ConfiguracaoEstudo, progresso=None) -> ResultadoEstudo:
         )
         kwp = 0.0
     else:
+        # Antes de dimensionar: onde pôr os módulos é anterior a quantos pôr, e
+        # a inversão sazonal de um plano fora do ótimo muda o que o sistema
+        # serve — não só quanto ele rende.
+        if cfg.orientacoes:
+            avisar("Comparando geometrias de instalação", 0.22)
+            try:
+                from ..pv.orientacao import comparar_orientacoes
+
+                orientacao = comparar_orientacoes(
+                    cfg.latitude, cfg.longitude, cfg.orientacoes,
+                    potencia_kwp=cfg.potencia_fv_kwp or 1.0,
+                    anos=cfg.anos_serie,
+                    adotada=cfg.orientacao_adotada,
+                )
+                avisos.extend(orientacao.avisos)
+            except Exception as exc:  # noqa: BLE001 — leitura extra não derruba estudo
+                LOGGER.warning("comparação de orientações falhou: %s", exc)
+                avisos.append(f"A comparação entre geometrias falhou: {exc}")
+
         avisar("Obtendo a série horária de geração", 0.25)
         serie = _serie_do_telhado(cfg)
         if serie.aviso:
@@ -1117,6 +1151,10 @@ def executar_estudo(cfg: ConfiguracaoEstudo, progresso=None) -> ResultadoEstudo:
                 # lado de um quadro de arranjos cuja única composição é rede
                 # mais bateria, com economia zero.
                 considerar_solar=cfg.considerar_solar,
+                # A potência que o estudo adotou, quando ela foi declarada:
+                # senão cada cenário dimensiona o seu e o documento sai com
+                # três sistemas onde o cliente comprou um.
+                potencia_fv_kwp=kwp if cfg.potencia_fv_kwp else None,
             )
             avisos.extend(uso.avisos)
         except Exception as exc:  # noqa: BLE001 — leitura extra não derruba estudo
@@ -1142,6 +1180,7 @@ def executar_estudo(cfg: ConfiguracaoEstudo, progresso=None) -> ResultadoEstudo:
         cenarios=cenarios,
         envelope_rotina=cfg.envelope_rotina,
         autonomia=autonomia,
+        orientacao=orientacao,
         escopos=escopos,
         uso=uso,
         avisos=avisos,

@@ -109,6 +109,9 @@ def gerar_graficos(estudo: ResultadoEstudo, destino: Path) -> dict[str, Path]:
     ocupacao = getattr(estudo.configuracao, "ocupacao", None) or {}
     if ocupacao.get("curvas"):
         figuras["perfis_ocupacao"] = _grafico_perfis_ocupacao(estudo, destino)
+    orientacao = getattr(estudo, "orientacao", None)
+    if orientacao is not None and getattr(orientacao, "medidas", None):
+        figuras["orientacoes"] = _grafico_orientacoes(orientacao, destino)
     uso = getattr(estudo, "uso", None)
     if uso is not None and len(getattr(uso, "cenarios", ())) > 1:
         figuras["cenarios_de_uso"] = _grafico_cenarios_de_uso(uso, destino)
@@ -727,6 +730,65 @@ def _grafico_perfis_ocupacao(estudo: ResultadoEstudo, destino: Path) -> Path:
     eixo.set_title(titulo)
     eixo.legend(fontsize=8, ncol=2, frameon=False)
     return _salvar(fig, destino, "perfis_ocupacao")
+
+
+def _grafico_orientacoes(comparacao, destino: Path) -> Path:
+    """
+    A inversão sazonal, que é o que a perda anual esconde.
+
+    À esquerda, quanto cada geometria gera mês a mês: é onde a inversão salta
+    aos olhos, porque as curvas se cruzam. À direita, o total do ano de cada
+    uma, para a perda não ficar só na frase.
+
+    O desenho existe porque "perde 46%" e "gera três vezes mais no inverno que
+    no verão" são duas informações, e só a primeira cabe numa frase.
+    """
+    medidas = list(comparacao.medidas)
+    fig, eixos = plt.subplots(1, 2, figsize=(11.5, 4.4), dpi=140,
+                              gridspec_kw={"width_ratios": [1.7, 1.0]})
+    for eixo in eixos:
+        eixo.grid(alpha=0.25, linewidth=0.6)
+        eixo.set_axisbelow(True)
+
+    meses = ["J", "F", "M", "A", "M", "J", "J", "A", "S", "O", "N", "D"]
+    paleta = [_SEM["geracao"], marca.APOIO["azul"], marca.APOIO["roxo"], _SEM["carga"]]
+    estilos = ["-", (0, (7, 2)), (0, (2, 2)), (0, (4, 2, 1, 2))]
+
+    for i, medida in enumerate(medidas):
+        eixos[0].plot(
+            range(12), medida.mensal_kwh_por_kwp,
+            color=paleta[i % len(paleta)], lw=2.4, ls=estilos[i % len(estilos)],
+            marker="o", markersize=3.5, label=medida.rotulo,
+        )
+    eixos[0].set_xticks(range(12))
+    eixos[0].set_xticklabels(meses)
+    eixos[0].set_xlabel("Mês")
+    eixos[0].set_ylabel("Geração (kWh por kWp)")
+    eixos[0].set_ylim(bottom=0)
+    eixos[0].set_title("Onde a energia aparece no ano")
+    eixos[0].legend(fontsize=7.5, frameon=False)
+
+    posicoes = np.arange(len(medidas))
+    eixos[1].bar(
+        posicoes, [m.anual_kwh_por_kwp for m in medidas],
+        0.6, color=[paleta[i % len(paleta)] for i in range(len(medidas))],
+    )
+    base = comparacao.otima.anual_kwh_por_kwp
+    for i, medida in enumerate(medidas):
+        perda = medida.anual_kwh_por_kwp / base - 1.0 if base else 0.0
+        rotulo = "referência" if i == comparacao.referencia else f"{perda:+.0%}"
+        eixos[1].annotate(
+            rotulo, (i, medida.anual_kwh_por_kwp), textcoords="offset points",
+            xytext=(0, 6), ha="center", fontsize=8,
+        )
+    eixos[1].set_xticks(posicoes)
+    eixos[1].set_xticklabels(
+        [chr(10).join(_quebrar(m.rotulo, 14)) for m in medidas], fontsize=7.0)
+    eixos[1].set_ylabel("Geração (kWh por kWp · ano)")
+    eixos[1].set_ylim(0, max(m.anual_kwh_por_kwp for m in medidas) * 1.18)
+    eixos[1].set_title("Quanto cada uma rende no ano")
+
+    return _salvar(fig, destino, "orientacoes")
 
 
 def _grafico_cenarios_de_uso(uso, destino: Path) -> Path:

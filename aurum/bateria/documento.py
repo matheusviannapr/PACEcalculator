@@ -1493,6 +1493,104 @@ def _secao_quadro_backup(estudo: ResultadoEstudo) -> str:
     return "\n\n".join(partes)
 
 
+def _secao_orientacao(estudo: ResultadoEstudo, figuras: dict[str, Path]) -> str:
+    """
+    Onde os módulos vão, antes de quantos módulos são.
+
+    Um sistema fora do plano ótimo costuma ser resumido a "perde tanto por
+    cento". A frase é verdadeira e insuficiente: a perda anual esconde a mudança
+    mais importante que a geometria produz, que é **em que época do ano a
+    energia aparece**.
+
+    No hemisfério sul, um plano vertical voltado ao Norte inverte a sazonalidade
+    da geração — no verão o sol passa alto e roça a superfície; no inverno ele
+    cruza o céu baixo, ao Norte, e bate quase de frente. Isso muda o que o
+    sistema serve, e é decisão anterior a dimensioná-lo.
+    """
+    comparacao = getattr(estudo, "orientacao", None)
+    if comparacao is None or not getattr(comparacao, "medidas", None):
+        return ""
+
+    otima, escolhida = comparacao.otima, comparacao.escolhida
+    linhas = []
+    for medida in comparacao.medidas:
+        contra = medida.anual_kwh_por_kwp / otima.anual_kwh_por_kwp - 1.0
+        linhas.append((
+            medida.rotulo,
+            _n(medida.inclinacao_deg, 0, "°"),
+            esc(medida.orientacao),
+            _n(medida.anual_kwh_por_kwp, 0, "kWh/kWp"),
+            "referência" if medida is otima else f"{contra:+.0%}",
+            f"{medida.razao_inverno_verao:.1f}×",
+        ))
+
+    partes = [
+        secao("Onde os módulos vão"),
+        "Antes de quantos módulos, onde. Um plano fora do ótimo é quase sempre "
+        "resumido a uma frase — 'perde tanto por cento' —, e a frase é verdadeira "
+        "e insuficiente. A perda anual esconde a mudança mais importante que a "
+        "geometria produz: em que época do ano a energia aparece.",
+        "No hemisfério sul, um plano vertical voltado ao Norte inverte a "
+        "sazonalidade da geração. No verão o sol passa alto, quase por cima, e "
+        "roça a superfície vertical com ângulo ruim; no inverno ele cruza o céu "
+        "baixo, ao Norte, e bate quase de frente na parede. O telhado inclinado "
+        "faz o contrário. A última coluna da tabela mede isso: abaixo de 1 a "
+        "geometria entrega mais no verão, acima de 1 ela entrega mais no inverno.",
+    ]
+    partes.append(tabela(
+        ["Geometria", "Inclinação", "Face", "Geração anual", "Contra o ótimo",
+         "Inverno ÷ verão"],
+        linhas,
+        alinhamento="p{3.6cm}rlrrr",
+        tamanho_fonte="scriptsize",
+        legenda="O que cada geometria rende, e em que estação",
+    ))
+
+    if figuras.get("orientacoes"):
+        partes.append(_figura(
+            figuras["orientacoes"],
+            "À esquerda, a geração mês a mês: é onde a inversão salta aos olhos, "
+            "porque as curvas se cruzam. À direita, o total do ano — 'perde 46%' e "
+            "'gera três vezes mais no inverno' são duas informações, e só a "
+            "primeira cabe numa frase.",
+            largura="1.0",
+        ))
+
+    if escolhida is not otima:
+        texto = (
+            f"O sistema adotado fica em {escolhida.rotulo.lower()}, que rende "
+            f"{_n(escolhida.anual_kwh_por_kwp, 0, 'kWh/kWp')} por ano contra "
+            f"{_n(otima.anual_kwh_por_kwp, 0, 'kWh/kWp')} do plano ótimo — "
+            f"{comparacao.perda:+.0%}. "
+        )
+        if escolhida.inverte:
+            texto += (
+                f"E ele inverte a estação: produz {escolhida.razao_inverno_verao:.1f} "
+                "vezes mais no inverno que no verão, enquanto o telhado produz "
+                "menos no inverno que no verão. Onde a casa gasta mais com "
+                "climatização no verão, essa geometria entrega justamente quando "
+                "a casa pede menos — o que não a desqualifica, mas muda o cálculo "
+                "de autoconsumo e precisa estar na conversa antes da assinatura."
+            )
+        else:
+            texto += (
+                "A sazonalidade acompanha a do plano ótimo, então o que muda é "
+                "só a quantidade."
+            )
+        partes.append(caixa("O que a geometria adotada implica", texto,
+                            cor="amarelopace"))
+
+    partes.append(nota(
+        "As séries vêm do PVGIS, hora a hora, para cada geometria — e não de um "
+        "fator aplicado sobre o plano ótimo. Um fator descreve razoavelmente a "
+        "perda anual e descreve mal a inversão, que é justamente o achado. "
+        "Sombreamento não está incluído: uma parede em meio urbano costuma ter "
+        "obstrução de prédios vizinhos que a série de céu aberto não conhece, e "
+        "isso se mede em campo."
+    ))
+    return "\n\n".join(partes)
+
+
 def _secao_metas_de_autonomia(estudo: ResultadoEstudo) -> str:
     """
     Quanto custa atravessar seis horas, e quanto custa atravessar o dia inteiro.
@@ -2795,6 +2893,10 @@ def montar_documento(
         # dessa mesma casa, e só fazem sentido depois de o leitor saber o que
         # os separa.
         _secao_cenarios_de_uso(estudo, figuras),
+        # Antes do telhado e do gerador: decidir onde os módulos vão é
+        # anterior a dimensioná-los, e a inversão sazonal de um plano fora do
+        # ótimo muda o que o sistema serve.
+        _secao_orientacao(estudo, figuras),
         _secao_telhado(estudo, figuras) if estudo.com_solar else "",
         _secao_solar(estudo, figuras) if estudo.com_solar else "",
         _secao_demanda(estudo, figuras),

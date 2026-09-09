@@ -235,6 +235,7 @@ def comparar_cenarios_de_uso(
     tarifa_brl_kwh: float = 0.0,
     ajustes_sazonais: dict | None = None,
     considerar_solar: bool = True,
+    potencia_fv_kwp: float | None = None,
 ) -> ComparacaoDeUso:
     """
     Mede os três cenários e dimensiona bateria — e solar, quando há solar.
@@ -288,11 +289,17 @@ def comparar_cenarios_de_uso(
         medida = medidos[dimensionante]
 
         consumo_anual = diaria * 365.0
-        kwp = (
-            consumo_anual / produtividade
-            if considerar_solar and produtividade > 0
-            else 0.0
-        )
+        if not considerar_solar:
+            kwp = 0.0
+        elif potencia_fv_kwp is not None:
+            # Potência declarada vale para os três cenários. O cliente que diz
+            # "cinco módulos de 610 Wp" tem um sistema, e não três: o que muda
+            # entre os cenários é o consumo, e portanto quanto dessa geração é
+            # aproveitada. Redimensionar aqui punha 14 a 20 kWp na tabela
+            # enquanto o quadro de arranjos, na página seguinte, trazia 3,05.
+            kwp = float(potencia_fv_kwp)
+        else:
+            kwp = consumo_anual / produtividade if produtividade > 0 else 0.0
 
         # A curva do cenário é a **média ponderada** dos perfis que o compõem,
         # e não a do perfil que dimensiona. As duas coisas são diferentes e a
