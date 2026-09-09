@@ -455,10 +455,10 @@ _GRADIENTE = {"manha": -1.0, "almoco": -0.5, "tarde": 0.0,
 
 
 def varrer_rotinas(
-    de_min: float = -120.0,
-    ate_min: float = 180.0,
-    passo_min: float = 30.0,
-    descompassos_min: Sequence[float] = (0.0,),
+    de_min: float = -360.0,
+    ate_min: float = 360.0,
+    passo_min: float = 90.0,
+    descompassos_min: Sequence[float] = (-180.0, -90.0, 0.0, 90.0, 180.0),
     incluir_madrugada: bool = True,
 ) -> list[Rotina]:
     """
@@ -467,10 +467,12 @@ def varrer_rotinas(
     Duas dimensões, porque são dois vieses diferentes:
 
     **Deslocamento comum** — a rotina inteira mais cedo ou mais tarde. É a
-    dimensão que o horário declarado fixa. A faixa padrão vai de duas horas
-    antes a três horas depois, e não é simétrica de propósito: formulário
-    raramente é preenchido com horário mais tarde do que a realidade — quem
-    responde "jantar às 19h" janta às 19h ou depois, quase nunca antes.
+    dimensão que o horário declarado fixa. A faixa padrão vai de seis horas
+    antes a seis depois, e isso não descreve erro de preenchimento: descreve o
+    dia virado do avesso. É deliberado. Cobrir só o plausível responde "e se o
+    morador tiver errado o horário?", que é a pergunta modesta; a que vale é "e
+    se a rotina desta casa for **outra**?", e a resposta a ela precisa incluir a
+    casa que janta à uma da manhã, porque essa casa existe.
 
     **Descompasso** — as âncoras se afastando ou se aproximando entre si.
     Deslocar tudo junto preserva o alinhamento das janelas, e o alinhamento é o
@@ -482,6 +484,12 @@ def varrer_rotinas(
     ``incluir_madrugada`` acrescenta, em cada ponto, a variante em que alguém
     vira a noite. É regime, não deslocamento, e por isso duplica a grade em vez
     de esticá-la.
+
+    **Sobre ler a amplitude.** Ela depende do passo: uma grade mais grossa pode
+    não sortear o ponto extremo e devolver amplitude menor sem que nada tenha
+    melhorado. O número que dimensiona é o **máximo**, e é sobre ele que
+    :func:`resumo_do_envelope` calcula o viés — justamente porque ele converge
+    conforme a faixa cresce, e a amplitude não.
     """
     if passo_min <= 0:
         raise ValueError("o passo da varredura tem de ser positivo")

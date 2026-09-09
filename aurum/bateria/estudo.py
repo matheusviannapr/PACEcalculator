@@ -167,6 +167,15 @@ class ConfiguracaoEstudo:
     #: simulação por ponto da grade e custa mais que o estudo inteiro — quem a
     #: quer decide quando pagar por ela.
     envelope_rotina: Any = None
+
+    #: Metas de autonomia a comparar, além da que dimensiona o estudo.
+    #:
+    #: 6 h atravessa o apagão comum brasileiro — o poste, o transformador, a
+    #: manobra da distribuidora. 24 h é o temporal que derruba a rede de uma
+    #: região inteira: não é uma meta maior, é outro evento, com outra
+    #: frequência e outro valor para o cliente. Vazio, o estudo dimensiona para
+    #: uma meta só e não mostra o degrau — que é como ele sempre funcionou.
+    metas_autonomia_h: Sequence[float] = ()
     #: Comparação entre perfis de ocupação (:mod:`aurum.demanda.ocupacao`) e
     #: qual deles dimensionou. Numa residência a mesma casa tem duas curvas —
     #: dia de semana com a casa vazia e fim de semana com a casa cheia — e
@@ -306,6 +315,8 @@ class ResultadoEstudo:
     #: equipamentos como preferíveis. ``None`` quando não há o que comparar.
     #: O envelope da varredura de horários, repassado à montagem do documento.
     envelope_rotina: Any = None
+    #: A comparação entre metas de autonomia, quando pedida.
+    autonomia: Any = None
     escopos: Any = None
     #: Os três cenários de uso, cada um com solar e banco próprios.
     uso: Any = None
@@ -971,6 +982,29 @@ def executar_estudo(cfg: ConfiguracaoEstudo, progresso=None) -> ResultadoEstudo:
             f"aceitar confiabilidade menor, ou ampliar banco e inversor além do catálogo."
         )
 
+    # 6b. metas de autonomia ------------------------------------------------
+    # A meta é a premissa mais escondida do estudo: alguém escreve 6 h no começo
+    # e o documento inteiro sai dali. Mostrar o degrau até 24 h transforma
+    # premissa em escolha, e reaproveita candidatos e ensemble já montados.
+    autonomia = None
+    if cfg.metas_autonomia_h:
+        avisar("Comparando metas de autonomia", 0.90)
+        try:
+            from .autonomia import comparar_metas_de_autonomia
+
+            autonomia = comparar_metas_de_autonomia(
+                candidatos, ensemble_backup_passo, serie, cfg.malha,
+                metas_h=cfg.metas_autonomia_h,
+                confiabilidade=cfg.confiabilidade_alvo,
+                exigir_pior_caso=cfg.exigir_pior_caso,
+                premissas=cfg.premissas,
+                semente=cfg.semente,
+            )
+            avisos.extend(autonomia.avisos)
+        except Exception as exc:  # noqa: BLE001 — leitura extra não derruba estudo
+            LOGGER.warning("comparação de metas de autonomia falhou: %s", exc)
+            avisos.append(f"A comparação entre metas de autonomia falhou: {exc}")
+
     # 7. cenários de fontes ------------------------------------------------
     avisar("Comparando cenários com e sem solar, bateria e gerador", 0.92)
     # Sem conjunto recomendado, o quadro usa o de maior autonomia entre os
@@ -1107,6 +1141,7 @@ def executar_estudo(cfg: ConfiguracaoEstudo, progresso=None) -> ResultadoEstudo:
         recomendado=recomendado,
         cenarios=cenarios,
         envelope_rotina=cfg.envelope_rotina,
+        autonomia=autonomia,
         escopos=escopos,
         uso=uso,
         avisos=avisos,

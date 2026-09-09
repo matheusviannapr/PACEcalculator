@@ -349,24 +349,36 @@ def test_a_varredura_exaure_o_horario_em_vez_de_amostrar_em_volta_dele():
     from aurum.demanda.rotina import varrer_rotinas
 
     grade = varrer_rotinas(de_min=-120.0, ate_min=180.0, passo_min=60.0,
-                           incluir_madrugada=False)
+                           descompassos_min=(0.0,), incluir_madrugada=False)
     comuns = sorted({round(r.de("tarde")) for r in grade})
     assert comuns == [-120, -60, 0, 60, 120, 180]
     assert 0 in comuns, "o horário declarado tem de estar na grade, para comparar"
 
 
-def test_a_faixa_da_varredura_nao_e_simetrica():
+def test_a_faixa_padrao_vira_o_dia_do_avesso():
     """
-    Formulário raramente é preenchido com horário mais tarde do que a realidade.
+    ±6 h não descreve erro de preenchimento: descreve outra rotina.
 
-    Quem responde "jantar às 19h" janta às 19h ou depois, quase nunca antes. Uma
-    grade simétrica gastaria metade dos pontos num lado que não acontece.
+    Uma faixa estreita responde "e se o morador tiver errado o horário?", que é
+    a pergunta modesta — e ela justificaria uma grade assimétrica, já que
+    formulário raramente traz horário mais cedo que a realidade. A pergunta que
+    vale é outra: "e se a rotina desta casa for **outra**?". Aí a simetria é o
+    certo, porque a casa que janta às 13 h existe tanto quanto a que janta à 1 h.
+
+    A faixa larga é estritamente mais conservadora que a estreita, então nada se
+    perde ao trocá-la — o que muda é o que a grade afirma cobrir.
     """
     from aurum.demanda.rotina import varrer_rotinas
 
     grade = varrer_rotinas(incluir_madrugada=False)
-    comuns = [r.de("tarde") for r in grade]
-    assert abs(min(comuns)) < abs(max(comuns))
+    comuns = sorted({round(r.de("tarde")) for r in grade})
+    assert min(comuns) == -360 and max(comuns) == 360
+    assert 0 in comuns, "o horário declarado continua na grade, para comparar"
+
+    # A grade padrão cobre as duas dimensões: sem descompasso ela mediria um
+    # viés e deixaria o outro passar.
+    descompassos = sorted({round(r.de("noite") - r.de("manha")) for r in grade})
+    assert min(descompassos) < 0 < max(descompassos)
 
 
 def test_o_descompasso_e_o_segundo_vies():
@@ -406,7 +418,7 @@ def test_o_envelope_marca_o_ponto_declarado():
 
     casa = _casa()
     grade = varrer_rotinas(de_min=-60.0, ate_min=60.0, passo_min=60.0,
-                           incluir_madrugada=False)
+                           descompassos_min=(0.0,), incluir_madrugada=False)
 
     def medir(cenario, apenas_essenciais):
         return {"n": len(cenario.comodos)}

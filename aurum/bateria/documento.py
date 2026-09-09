@@ -1469,6 +1469,96 @@ def _secao_quadro_backup(estudo: ResultadoEstudo) -> str:
     return "\n\n".join(partes)
 
 
+def _secao_metas_de_autonomia(estudo: ResultadoEstudo) -> str:
+    """
+    Quanto custa atravessar seis horas, e quanto custa atravessar o dia inteiro.
+
+    A meta de autonomia é a premissa mais escondida do estudo: alguém a escreve
+    no começo e o documento inteiro sai dali. Mas 6 h e 24 h respondem a apagões
+    diferentes — o poste e o temporal —, com frequências diferentes e valores
+    diferentes para o cliente. Mostrar as duas com o preço de cada uma
+    transforma premissa em escolha.
+    """
+    comparacao = getattr(estudo, "autonomia", None)
+    if comparacao is None or not getattr(comparacao, "metas_h", ()):
+        return ""
+
+    metas = list(comparacao.metas_h)
+    linhas = []
+    for meta in metas:
+        medida = comparacao.para(meta)
+        if medida is None:
+            linhas.append((
+                _n(meta, 0, "h"), "não alcançada", "—", "—", "—",
+            ))
+            continue
+        linhas.append((
+            _n(meta, 0, "h"),
+            f"{medida.blocos} bloco(s)",
+            _n(medida.conjunto.energia_util_kwh, 1, "kWh"),
+            _n(medida.autonomia_h, 0, "h"),
+            _brl(medida.capex_brl),
+        ))
+    if not linhas:
+        return ""
+
+    partes = [
+        secao("Seis horas ou o dia inteiro?"),
+        "A autonomia alvo é a premissa mais silenciosa de um estudo de "
+        "armazenamento: ela é escolhida no começo e tudo o mais decorre dela. "
+        "As duas metas abaixo não são uma maior que a outra — são apagões "
+        "diferentes. Seis horas atravessam a falta comum: o poste, o "
+        "transformador, a manobra da distribuidora, que respondem pela "
+        "esmagadora maioria das interrupções. Vinte e quatro horas atravessam o "
+        "temporal que derruba a rede de uma região inteira, que é raro e é o que "
+        "o cliente lembra.",
+    ]
+    partes.append(tabela(
+        ["Meta", "Banco", "Energia útil", "Autonomia medida", "Investimento"],
+        linhas,
+        alinhamento="p{2.6cm}p{2.6cm}rrr",
+        tamanho_fonte="scriptsize",
+        legenda="O banco mais barato que cumpre cada meta",
+    ))
+
+    if len(metas) >= 2:
+        degrau = comparacao.degrau(metas[0], metas[-1])
+        if degrau and degrau["blocos_a_mais"] > 0:
+            partes.append(caixa(
+                "O que custa o dia inteiro",
+                f"Ir de {metas[0]:g} h para {metas[-1]:g} h pede "
+                f"{degrau['blocos_a_mais']} bloco(s) a mais e "
+                f"{_brl(degrau['capex_a_mais_brl'])} — "
+                f"{degrau['percentual']:+.0%} sobre o investimento da meta menor. "
+                "O inversor não muda: quem decide a autonomia é a energia "
+                "guardada, e quem decide a potência é a carga do quadro de "
+                "backup, que é a mesma nas duas metas.",
+                cor="amarelopace",
+            ))
+        elif degrau:
+            partes.append(caixa(
+                "O que custa o dia inteiro",
+                f"Nada: o mesmo banco que cumpre {metas[0]:g} h já atravessa "
+                f"{metas[-1]:g} h. Acontece quando a carga essencial é pequena "
+                "diante do menor bloco que se vende — e é um bom sinal sobre o "
+                "recorte de criticidade, não sobre a bateria.",
+                cor="amarelopace",
+            ))
+
+    duracoes = getattr(comparacao, "duracoes_da_malha", ())
+    if duracoes:
+        partes.append(nota(
+            "A autonomia é medida nos degraus da malha de apagões ("
+            + ", ".join(f"{d:g} h" for d in duracoes)
+            + ") e com 95% de confiabilidade no pior par estação/hora, e não na "
+            "média — o apagão acontece numa hora e numa estação, e é contra essa "
+            "hora que o banco precisa ter sido comprado. Um banco que aparece "
+            "com 12 h pode chegar a 17: a malha não tem como dizer, e para a "
+            "decisão isso basta, porque ninguém compra bateria para 17 h."
+        ))
+    return "\n\n".join(partes)
+
+
 def _secao_vies_de_horario(estudo: ResultadoEstudo) -> str:
     """
     O dimensionamento ancorado no horário declarado, e o dimensionamento sem ele.
@@ -2694,6 +2784,9 @@ def montar_documento(
         # Depois de o leitor saber o que foi especificado: a pergunta "isso
         # depende do que eu respondi no formulário?" só tem sentido quando já
         # existe um "isso".
+        # Antes do viés: "quanto custa a meta maior" é a pergunta que o cliente
+        # faz; "isso depende do formulário" é a que ele deveria fazer.
+        _secao_metas_de_autonomia(estudo),
         _secao_vies_de_horario(estudo),
         _secao_vida_util(estudo, figuras),
         _secao_cenarios(estudo, figuras),
