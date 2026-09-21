@@ -12,6 +12,7 @@ import zipfile
 from datetime import date
 
 import pytest
+from pathlib import Path
 
 from aurum.bateria.apresentacao import (
     OpcoesComerciais,
@@ -57,6 +58,12 @@ def test_dados_saem_do_cenario_que_o_estudo_recomenda(estudo_com_telhado):
     assert dados["economia"]["economia_anual_brl"] == pytest.approx(cenario.economia_anual_brl)
     assert dados["sistema"]["geracao_anual_kwh"] == pytest.approx(cenario.geracao_fv_kwh_ano)
     assert dados["sistema"]["modulos"] == estudo.configuracao.memoria.modulos_do_sistema
+    # O módulo é o da memória, não o do empacotamento: quantidade, potência e
+    # Wp têm que fechar a mesma conta na tabela do slide.
+    memoria = estudo.configuracao.memoria
+    assert dados["sistema"]["modulo_wp"] == memoria.modulo.potencia_wp
+    assert dados["sistema"]["potencia_kwp"] == pytest.approx(
+        memoria.modulos_do_sistema * memoria.modulo.potencia_wp / 1000.0)
     assert dados["sistema"]["area_ocupada_m2"] == pytest.approx(
         estudo.configuracao.layout.area_ocupada_m2)
 
@@ -82,6 +89,19 @@ def test_fluxo_acumulado_e_o_do_estudo_menos_o_que_a_proposta_acrescenta(estudo_
     assert ano1["leasing"] == pytest.approx(fluxo[0] - 9 * mensalidade)
     # O último ano mostrado é o horizonte do estudo, nunca além dele.
     assert dados["fluxo_acumulado"][-1]["ano"] == estudo.cenarios.premissas.anos_analise
+
+
+def test_cliente_da_capa_vem_das_opcoes_e_cai_no_nome_do_estudo(estudo_com_telhado):
+    estudo = estudo_com_telhado
+    assert dados_da_apresentacao(estudo)["cliente"] == estudo.configuracao.nome
+    dados = dados_da_apresentacao(estudo, opcoes=OpcoesComerciais(cliente="Condomínio Sol"))
+    assert dados["cliente"] == "Condomínio Sol"
+    tex = dados_tex(dados)
+    assert "\\newcommand{\\cliente}{Condomínio Sol}" in tex
+    # O esqueleto põe o cliente em destaque na capa, não só no "preparado para".
+    capa = (Path(__file__).resolve().parent.parent / "apresentacao" / "apresentacao.tex").read_text(encoding="utf-8")
+    inicio = capa.index("1. Capa"); fim = capa.index("2. Quem somos")
+    assert capa[inicio:fim].count(r"\cliente") >= 2
 
 
 def test_cenario_inexistente_e_erro_claro(estudo_com_telhado):

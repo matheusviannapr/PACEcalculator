@@ -665,7 +665,11 @@ def _selecionar_candidatos(
     if cfg.banco_em_blocos:
         from .catalogo import candidatos_em_blocos
 
-        blocos = candidatos_em_blocos(base, cfg.tensao_rede_v)
+        blocos = candidatos_em_blocos(
+            base, cfg.tensao_rede_v,
+            **({"capacidade_kwh": float(cfg.premissas.bloco_bateria_kwh)}
+               if cfg.premissas.bloco_bateria_kwh > 0 else {}),
+        )
         if blocos:
             aprovados_blocos = set(
                 diagnostico.loc[diagnostico["aprovado"], "modelo"].str.lower())
@@ -1060,6 +1064,16 @@ def executar_estudo(cfg: ConfiguracaoEstudo, progresso=None) -> ResultadoEstudo:
             f"({melhor['conjunto']}). Caminhos: reduzir a carga do quadro de backup, "
             f"aceitar confiabilidade menor, ou ampliar banco e inversor além do catálogo."
         )
+        if cfg.candidatos:
+            # A lista foi declarada: é o produto que o cliente pediu, e a
+            # proposta sai com ele. Sem isto o banco sumia da apresentação
+            # justamente quando o operador tinha fixado quantos blocos levar.
+            recomendado = next(
+                r for r in resiliencias if r.conjunto.descricao() == melhor["conjunto"])
+            avisos.append(
+                "O banco declarado não cumpre a meta, e o estudo segue com ele porque "
+                "foi ele que se pediu — a autonomia que ele garante é a que está acima."
+            )
 
     # 6b. metas de autonomia ------------------------------------------------
     # A meta é a premissa mais escondida do estudo: alguém escreve 6 h no começo

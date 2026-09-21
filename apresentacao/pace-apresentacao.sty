@@ -254,7 +254,8 @@
 
 % ----------------------------------------------------------------------------
 %  Tabela chave–valor: rótulo à esquerda em célula escura, valor à direita em
-%  célula clara. As linhas são separadas por um fio da cor do fundo, o que
+%  célula clara, os dois centrados também na vertical (m{}, e não p{}): um
+%  valor de duas linhas deixava o rótulo colado no alto da célula. As linhas são separadas por um fio da cor do fundo, o que
 %  dá o efeito de células soltas sem desenhar borda nenhuma.
 % ----------------------------------------------------------------------------
 \newenvironment{tabelachave}[2][4.4cm]{%
@@ -263,8 +264,8 @@
   \arrayrulecolor{corcanvas}%
   \footnotesize
   \begin{tabular}{%
-    |>{\columncolor{corrotulo}\color{corrotulotexto}\pesomedio\centering\arraybackslash}p{#1}%
-    |>{\columncolor{corcelula}\color{corcelulatexto}\centering\arraybackslash}p{#2}|}
+    |>{\columncolor{corrotulo}\color{corrotulotexto}\pesomedio\centering\arraybackslash}m{#1}%
+    |>{\columncolor{corcelula}\color{corcelulatexto}\centering\arraybackslash}m{#2}|}
   \hline
 }{%
   \end{tabular}%

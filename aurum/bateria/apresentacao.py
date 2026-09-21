@@ -220,7 +220,13 @@ def dados_da_apresentacao(
     else:
         potencia_kwp = estudo.potencia_fv_kwp
         qtd_modulos = None
-    modulo = layout.modulo if layout is not None else None
+    # O módulo é o da memória quando ela existe: a quantidade e a potência
+    # vêm dela, e um "450 Wp" do empacotamento ao lado de "17 módulos, 10,88
+    # kWp" da memória não fecha a conta na frente do cliente.
+    if memoria is not None:
+        modulo = memoria.modulo
+    else:
+        modulo = layout.modulo if layout is not None else None
 
     # O inversor do gerador solar é o da memória de cálculo. O híbrido do
     # conjunto de baterias é outro equipamento — o que faz o backup — e vai
@@ -240,8 +246,21 @@ def dados_da_apresentacao(
     if conjunto is not None:
         hibrido_kw = conjunto.inversor.potencia_ca_nominal_kw
         hibrido_nome = f"{conjunto.inversor.fabricante} {conjunto.inversor.modelo}"
-        if memoria is None:
+        # O híbrido responde sozinho pela linha do inversor quando não há
+        # memória de arranjo, quando o kit é split-phase (o híbrido já vem
+        # nele) ou quando ele sozinho aceita o gerador com razão CC/CA de
+        # até 1,35 — o kit residencial comum. O catálogo de inversores de
+        # rede salta de 6 para 50 kW, e sem esta regra uma casa de 10 kWp
+        # saía com "50 kW string" ao lado do híbrido de 10 kW que de fato
+        # faz o serviço.
+        hibrido_basta = (
+            memoria is None
+            or cfg.topologia_kit == "splitphase"
+            or (potencia_kwp or 0.0) <= float(hibrido_kw) * 1.35
+        )
+        if hibrido_basta:
             inversor_kw, inversor_nome, inversor_tipo = hibrido_kw, hibrido_nome, "híbrido"
+            inversores = 1
             hibrido_kw = hibrido_nome = None
 
     # -- o dinheiro -----------------------------------------------------------

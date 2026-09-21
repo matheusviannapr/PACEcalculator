@@ -295,6 +295,52 @@ def test_a_curva_do_segmento_e_o_padrao_e_a_edicao_chega_ao_ajuste():
     assert at.session_state["e_ensemble_total"].metadados["ajuste"]["editada"] is True
 
 
+def test_o_inversor_padrao_cabe_no_gerador_e_a_escolha_sobrevive_a_navegacao():
+    """
+    O passo Equipamento nascia com o primeiro inversor da lista — o maior do
+    catálogo — e a escolha voltava a ele quando o usuário saía e voltava ao
+    passo. Foi assim que "80 kW string" chegou à proposta de uma casa de
+    10 kWp.
+    """
+    at = _ate_o_equipamento(_ate_o_consumo(_abrir()), kwp=20.0)
+    assert at.session_state["e_passo"] == EQUIPAMENTO
+    from aurum.pv.equipment import carregar_base
+
+    padrao = at.session_state["e_inversor_sel"]
+    # O menor do catálogo que aceita 20 kWp com razão CC/CA de até 1,35 — e
+    # não o maior da lista, que é o primeiro do seletor.
+    que_cabem = [i for i in carregar_base().inversores if i.potencia_ca_w >= 20_000.0 / 1.35]
+    assert padrao.potencia_ca_w == min(i.potencia_ca_w for i in que_cabem), padrao.modelo
+    assert padrao.potencia_ca_w < max(i.potencia_ca_w for i in carregar_base().inversores)
+
+    # Escolhe outro, sai e volta: a escolha tem que estar lá.
+    inversores = [i for i in _por_rotulo(at.selectbox, "Inversor de rede").options]
+    outro = next(i for i in inversores if i != padrao.modelo and i != str(padrao))
+    _por_rotulo(at.selectbox, "Inversor de rede").select(outro).run()
+    escolhido = at.session_state["e_inversor_sel"]
+    _por_rotulo(at.button, "Voltar").click().run()
+    assert at.session_state["e_passo"] == TELHADO
+    _continuar(at)
+    assert at.session_state["e_passo"] == EQUIPAMENTO
+    assert at.session_state["e_inversor_sel"].modelo == escolhido.modelo
+    assert at.session_state["e_memoria"].inversor.modelo == escolhido.modelo
+
+
+def test_os_blocos_declarados_chegam_ao_estudo():
+    """Fixar 2 blocos: o estudo avalia só bancos de 2 blocos e recomenda um deles."""
+    at = _ate_a_meta(_abrir())
+    _por_rotulo(at.number_input, "Blocos no banco").set_value(2).run()
+    _por_rotulo(at.select_slider, "Autonomia alvo").set_value(3).run()
+    _por_rotulo(at.multiselect, "Durações de falta").set_value([1.0, 3.0]).run()
+    _por_rotulo(at.slider, "Amostras por combinação").set_value(20).run()
+    _por_rotulo(at.button, "Rodar o estudo").click().run()
+    assert not at.exception, at.exception
+    estudo = at.session_state["e_estudo"]
+    assert estudo.configuracao.candidatos and all(
+        c.modulos == 2 for c in estudo.configuracao.candidatos)
+    assert estudo.recomendado is not None and estudo.recomendado.conjunto.modulos == 2
+
+
 def test_a_conta_de_luz_chega_ao_estudo_inteiro():
     """
     O caminho da conta atravessa as duas fases e o estudo sai **da conta**.

@@ -360,3 +360,29 @@ def test_estudo_com_ajuste_nao_cai_no_cenario_de_demonstracao(comercial):
     assert any("hipótese" in a for a in estudo.avisos)
     assert any("40%" in a for a in estudo.avisos)
     assert not estudo.ranking.empty
+
+
+def test_banco_declarado_vai_para_a_proposta_mesmo_sem_cumprir_a_meta(comercial):
+    """
+    N blocos fixados são o produto: o estudo mede o que garantem e segue com
+    eles. Antes, sem candidato apto, `recomendado` ficava vazio e o banco
+    sumia da apresentação.
+    """
+    from aurum.bateria.apagao import MalhaApagao
+    from aurum.bateria.catalogo import candidatos_em_blocos, carregar_catalogo
+    from aurum.bateria.estudo import ConfiguracaoEstudo, executar_estudo
+
+    ajuste = ajustar(ContaDeLuz(consumo_mensal_kwh=9000.0), comercial)
+    base = carregar_catalogo(None)
+    um_bloco = [c for c in candidatos_em_blocos(base, 380.0, max_blocos=1) if c.modulos == 1]
+    cfg = ConfiguracaoEstudo(
+        latitude=-25.43, longitude=-49.27, nome="Loja",
+        ajuste_conta=ajuste, candidatos=um_bloco,
+        simulacoes=20, potencia_fv_kwp=10.0, anos_serie=(2019, 2020),
+        autonomia_alvo_h=24.0,  # um bloco de 5 kWh não atravessa 24 h de 300 kWh/dia
+        malha=MalhaApagao(duracoes_h=(1.0, 24.0), horas_inicio=(0, 12), amostras=6, passo_min=15),
+    )
+    estudo = executar_estudo(cfg)
+    assert estudo.recomendado is not None
+    assert estudo.recomendado.conjunto.modulos == 1
+    assert any("banco declarado não cumpre a meta" in a for a in estudo.avisos)

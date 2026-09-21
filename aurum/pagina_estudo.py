@@ -215,6 +215,13 @@ def _iniciar() -> None:
         st.session_state.setdefault(chave, valor)
     for chave in _CHAVES_PERSISTENTES:
         st.session_state[chave] = st.session_state[chave]
+    # As escolhas do passo Equipamento não têm padrão em `_PADROES` (são
+    # objetos do catálogo), mas sofrem da mesma limpeza: sair do passo e
+    # voltar devolvia o seletor ao primeiro inversor da lista — 80 kW numa
+    # casa de 10 kWp — e a memória era refeita com ele.
+    for chave in ("e_modulo_sel", "e_inversor_sel", "e_blocos_bateria"):
+        if chave in st.session_state:
+            st.session_state[chave] = st.session_state[chave]
 
 
 #: Passos que só fazem sentido num estudo com energia solar.
@@ -836,7 +843,7 @@ def _calcular_da_coleta(tarifa, consumo_mes, autonomia, corte, com_solar) -> Non
     cfg = _montar_configuracao(
         autonomia=float(autonomia), confiabilidade=0.95,
         duracoes=(1.0, 2.0, 3.0, 6.0, 12.0, 24.0), amostras=150,
-        passo=5, candidatos=8,
+        passo=5, candidatos_max=8,
         tarifa=float(tarifa), tarifa_ponta=float(tarifa), tarifa_demanda=0.0,
         custo_interrupcao=0.0, interrupcoes=8.0, anos=15, reserva=0.2,
         fatura=fatura,
@@ -2176,8 +2183,22 @@ def _passo_equipamento() -> None:
     # `key=` em vez de `index=`: passar o índice a cada rerun sobrescreve a
     # escolha que o usuário acabou de fazer com a que estava guardada antes —
     # o seletor volta sozinho para o valor anterior.
-    st.session_state.setdefault("e_modulo_sel", modulos[0])
-    st.session_state.setdefault("e_inversor_sel", inversores[0])
+    #
+    # O padrão vem do telhado, não do topo da lista: o módulo é o que o
+    # empacotamento usou, e o inversor é o menor que aceita o gerador com
+    # razão CC/CA de até 1,35. O primeiro da lista é o maior do catálogo, e
+    # numa casa de 10 kWp ele entrava na proposta como "80 kW string".
+    if "e_modulo_sel" not in st.session_state:
+        st.session_state["e_modulo_sel"] = next(
+            (m for m in modulos if layout is not None and m.modelo == layout.modulo.modelo),
+            modulos[0],
+        )
+    if "e_inversor_sel" not in st.session_state:
+        st.session_state["e_inversor_sel"] = _inversor_padrao(
+            inversores,
+            float(getattr(layout, "potencia_kwp", 0.0) or st.session_state.get("e_kwp") or 0.0),
+            float(st.session_state.get("e_tensao_rede") or 380.0),
+        )
     escolha_modulo = colunas[0].selectbox(
         "Módulo fotovoltaico", modulos, format_func=str, key="e_modulo_sel")
     escolha_inversor = colunas[1].selectbox(
@@ -2229,6 +2250,19 @@ def _passo_equipamento() -> None:
         pendencia=None if memoria.viavel else "escolher um par de equipamentos compatível",
         rotulo_avancar="Analisar com bateria →",
     )
+
+
+def _inversor_padrao(inversores, kwp_alvo: float, tensao_rede_v: float):
+    """O menor inversor que aceita o gerador com razão CC/CA de até 1,35."""
+    if kwp_alvo <= 0:
+        return inversores[0]
+    do_menor = sorted(inversores, key=lambda i: i.potencia_ca_w)
+    que_cabem = [
+        i for i in do_menor
+        if i.potencia_ca_w >= kwp_alvo * 1000.0 / 1.35
+        and (not hasattr(i, "atende_rede") or i.atende_rede(tensao_rede_v))
+    ]
+    return (que_cabem or do_menor)[0]
 
 
 def _para_latex(formula: str) -> str:
@@ -3626,7 +3660,16 @@ def _controles_do_kit() -> tuple[str | None, float, float]:
             key="e_bateria_bloco_brl_w",
             value=float(st.session_state.get("e_bateria_bloco_brl") or BATERIA_BLOCO_BRL),
         )
-        bloco[2].caption(
+        st.session_state.setdefault("e_blocos_bateria", 0)
+        bloco[2].number_input(
+            "Blocos no banco (0 = o estudo escolhe)", 0, 12, step=1,
+            key="e_blocos_bateria",
+            help="Fixa quantos blocos vão na proposta. O estudo mede o que esse "
+                 "banco garante e diz se ele cumpre a meta; se não cumprir, segue "
+                 "com ele mesmo assim e registra a ressalva — é o produto que o "
+                 "cliente pediu, não um recorte a refazer.",
+        )
+        st.caption(
             "A cada bloco, mais autonomia e mais conforto. O inversor híbrido já "
             "vem no kit split-phase e **não** é cobrado de novo aqui — é por isso "
             "que o preço do armazenamento é o do bloco, e não o de um sistema "
@@ -3726,7 +3769,7 @@ def _referencia_capex(
 
 
 def _montar_configuracao(
-    autonomia, confiabilidade, duracoes, amostras, passo, candidatos,
+    autonomia, confiabilidade, duracoes, amostras, passo, candidatos_max,
     tarifa, tarifa_ponta, tarifa_demanda, custo_interrupcao, interrupcoes, anos, reserva,
     fatura: Fatura | None = None,
     gerador: Gerador | None = None,
@@ -3780,6 +3823,28 @@ def _montar_configuracao(
     if ajuste_conta is not None:
         consumo_anual = float(ajuste_conta.consumo_anual_kwh)
 
+    # O banco declarado: N blocos, com os inversores que o catálogo oferece
+    # para esse tamanho. Vira a lista de candidatos do estudo — o produto, e
+    # não um recorte que a varredura possa trocar.
+    candidatos = None
+    blocos = int(estado.get("e_blocos_bateria") or 0)
+    if blocos > 0:
+        from .bateria.catalogo import candidatos_em_blocos
+
+        try:
+            base_baterias = _catalogo()
+        except CatalogoError:
+            base_baterias = None
+        if base_baterias is not None:
+            candidatos = [
+                c for c in candidatos_em_blocos(
+                    base_baterias, float(estado.get("e_tensao_rede") or 380.0),
+                    max_blocos=blocos,
+                    capacidade_kwh=float(estado.get("e_bateria_bloco_kwh") or 5.0),
+                )
+                if c.modulos == blocos
+            ] or None
+
     return ConfiguracaoEstudo(
         latitude=estado["e_lat"], longitude=estado["e_lon"],
         nome=estado["e_nome"] or "instalação",
@@ -3812,7 +3877,8 @@ def _montar_configuracao(
         inclinacao_deg=estado.get("e_inclinacao") or None,
         azimute_deg=estado.get("e_azimute") or None,
         permitir_serie_sintetica=not estado.get("e_exigir_pvgis", False),
-        max_candidatos=candidatos,
+        max_candidatos=candidatos_max,
+        candidatos=candidatos,
         fatura=fatura,
         gerador=gerador if considerar_gerador else None,
         considerar_solar=considerar_solar and bool(estado.get("e_com_solar", True)),
@@ -3983,6 +4049,9 @@ def _passo_resultado() -> None:
         colunas = st.columns([2, 1])
         with colunas[1]:
             st.caption("Dados que vão na capa")
+            cliente_capa = st.text_input(
+                "Cliente", value=cfg.nome, key="capa_cliente",
+                help="Vai na capa da apresentação e no rodapé de cada slide.")
             empresa = st.text_input("Empresa", value="PACE Inteligência Energética", key="capa_empresa")
             responsavel = st.text_input("Responsável técnico", key="capa_resp")
             crea = st.text_input("CREA", key="capa_crea")
@@ -4030,6 +4099,7 @@ def _passo_resultado() -> None:
                             referencia=cfg.nome, nomear_marcas=nomear,
                         ),
                         OpcoesComerciais(
+                            cliente=(cliente_capa or "").strip() or None,
                             juros_financiamento_am=juros_am / 100.0,
                             prazo_financiamento_meses=int(prazo_fin),
                             carencia_financiamento_meses=int(carencia),
