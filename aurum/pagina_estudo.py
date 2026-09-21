@@ -31,6 +31,7 @@ import streamlit as st
 
 from .bateria.apagao import MalhaApagao
 from .bateria.catalogo import CatalogoError, carregar_catalogo, criar_planilha_modelo
+from .bateria.apresentacao import OpcoesComerciais
 from .bateria.documento import DadosCapa, zip_do_dossie
 from .bateria.economia import PremissasBateria
 from .bateria.estudo import ConfiguracaoEstudo, executar_estudo
@@ -43,12 +44,12 @@ from .demanda.biblioteca import (
     CATEGORIAS,
     EQUIPAMENTOS,
     MODELOS,
-    calibrar_por_conta,
     comparar_com_perfil,
+    perfis_tipicos,
     segmento_do_perfil,
 )
 from .demanda.cenario import MODOS_FIXOS, TIPOS_INTERVALO, Cenario
-from .demanda.ensemble import ensemble_de_curva_tipica
+from .demanda.ajuste import ContaDeLuz, ajustar, ajustar_melhor_perfil
 from .proposal.render import encontrar_compilador
 
 # O fluxo tem duas fases, e a fronteira entre elas é real, não decorativa: a
@@ -105,7 +106,26 @@ _PADROES: dict[str, Any] = {
     #: cabe numa tela. Vira falso quando o operador escolhe o caminho longo.
     "e_via_rapida": False,
     "e_conta_kwh": 5000.0,
-    "e_dias_operacao": 30,
+    #: O caminho da conta de luz: a curva típica ajustada à fatura
+    #: (:class:`aurum.demanda.ajuste.AjusteCurva`), e a fração da carga que
+    #: fica no backup, já que sem lista de circuitos não há o que escolher.
+    "e_ajuste_conta": None,
+    "e_fracao_backup": 1.0,
+    "e_conta_grupo": "B",
+    "e_conta_perfil": "",
+    "e_conta_dias_semana": 7,
+    "e_conta_24h": True,
+    "e_conta_abre": 8,
+    "e_conta_fecha": 18,
+    "e_conta_ponta_kwh": 800.0,
+    "e_conta_fora_kwh": 7000.0,
+    "e_conta_dem_ponta": 0.0,
+    "e_conta_dem_fora": 0.0,
+    "e_conta_ponta_ini": 18,
+    "e_conta_ponta_fim": 21,
+    "e_conta_dispersao_dia": 15,
+    "e_conta_dispersao_hora": 5,
+    "e_conta_historico": None,
     "e_ensemble_total": None,
     "e_ensemble_backup": None,
     "e_essenciais": [],
@@ -170,9 +190,22 @@ _PADROES: dict[str, Any] = {
 # ============================================================================
 # Infraestrutura da página
 # ============================================================================
+#: Chaves que são widgets de telas que nem sempre aparecem. O Streamlit
+#: descarta, no fim do run, a chave de todo widget que não foi desenhado nele
+#: — e o `setdefault` do run seguinte a reporia no padrão. Reatribuir a cada
+#: run marca a chave como estado do programa, e ela sobrevive à navegação: a
+#: conta digitada continua lá quando o usuário volta ao passo das cargas, e a
+#: fração do backup chega ao estudo em vez de voltar a 100%.
+_CHAVES_PERSISTENTES = tuple(
+    chave for chave in _PADROES if chave.startswith("e_conta_") or chave == "e_fracao_backup"
+)
+
+
 def _iniciar() -> None:
     for chave, valor in _PADROES.items():
         st.session_state.setdefault(chave, valor)
+    for chave in _CHAVES_PERSISTENTES:
+        st.session_state[chave] = st.session_state[chave]
 
 
 #: Passos que só fazem sentido num estudo com energia solar.
@@ -992,7 +1025,7 @@ _OPCOES_CARGA = {
     "vistoria": "Tenho uma vistoria técnica",
     "modelo": "Usar o rascunho do modelo",
     "planilha": "Tenho a planilha do D²",
-    "conta": "Não tenho levantamento",
+    "conta": "Só tenho a conta de luz",
 }
 
 
@@ -1314,52 +1347,256 @@ def _cargas_da_planilha() -> None:
             st.rerun()
 
 
+MESES_CURTOS = ("jan", "fev", "mar", "abr", "mai", "jun",
+                "jul", "ago", "set", "out", "nov", "dez")
+
+
+def _conta_da_tela() -> ContaDeLuz | None:
+    """Monta a conta com o que está nos controles; ``None`` se não fecha."""
+    estado = st.session_state
+    horario = {} if estado["e_conta_24h"] else {
+        "abertura_h": int(estado["e_conta_abre"]), "fechamento_h": int(estado["e_conta_fecha"]),
+    }
+    historico = None
+    tabela = estado.get("e_conta_historico")
+    if tabela is not None:
+        valores = {
+            i + 1: float(v) for i, v in enumerate(tabela["kWh"])
+            if v is not None and float(v) > 0
+        }
+        historico = valores or None
+    try:
+        if estado["e_conta_grupo"] == "A":
+            return ContaDeLuz(
+                consumo_ponta_kwh=float(estado["e_conta_ponta_kwh"]),
+                consumo_fora_ponta_kwh=float(estado["e_conta_fora_kwh"]),
+                demanda_ponta_kw=float(estado["e_conta_dem_ponta"]) or None,
+                demanda_fora_ponta_kw=float(estado["e_conta_dem_fora"]) or None,
+                ponta_inicio_h=int(estado["e_conta_ponta_ini"]),
+                ponta_fim_h=int(estado["e_conta_ponta_fim"]),
+                dias_operacao_semana=int(estado["e_conta_dias_semana"]),
+                consumo_por_mes_kwh=historico,
+                **horario,
+            )
+        return ContaDeLuz(
+            consumo_mensal_kwh=float(estado["e_conta_kwh"]),
+            demanda_fora_ponta_kw=float(estado["e_conta_dem_fora"]) or None,
+            dias_operacao_semana=int(estado["e_conta_dias_semana"]),
+            consumo_por_mes_kwh=historico,
+            **horario,
+        )
+    except ValueError as exc:
+        st.error(f"A conta não fecha: {exc}")
+        return None
+
+
 def _cargas_pela_conta() -> None:
-    perfil = segmento_do_perfil(st.session_state["e_segmento"])
-    if perfil is None:
-        st.error("Este segmento não tem curva de referência. Use o rascunho do modelo.")
+    """
+    O caminho de quem só tem a fatura: a curva típica ajustada à conta.
+
+    A forma vem do perfil do segmento; o tamanho, da conta. O que a tela pede
+    é o que está impresso na fatura — e o que a fatura não traz, como o
+    horário de funcionamento, é a pergunta que mais muda a curva.
+    """
+    estado = st.session_state
+    perfis = perfis_tipicos()
+    if not perfis:
+        st.error("Não há curvas de referência na base. Use o rascunho do modelo.")
         _rodape(pendencia="escolher outro caminho")
         return
+    do_segmento = segmento_do_perfil(estado["e_segmento"])
 
     st.warning(
         "**O que você perde por este caminho.** A forma do dia vem da curva típica do "
         "segmento e o tamanho, da sua conta de luz. Falta a variabilidade dia a dia — "
         "e é ela que produz o pico raro que decide o inversor. O estudo assume uma "
-        "dispersão de 15%, que é hipótese, não medição. Serve para uma primeira "
-        "conversa; não substitui o levantamento antes de fechar a venda."
-    )
-    colunas = st.columns(2)
-    colunas[0].number_input(
-        "Consumo mensal da conta (kWh)", min_value=50.0, max_value=5_000_000.0,
-        step=100.0, key="e_conta_kwh",
-    )
-    colunas[1].number_input(
-        "Dias de operação por mês", min_value=1, max_value=31, key="e_dias_operacao",
-        help="Comércio que fecha domingo opera ~26 dias; indústria de turno único, ~22.",
+        "dispersão, que é hipótese, não medição. Serve para uma primeira conversa; não "
+        "substitui o levantamento antes de fechar a venda."
     )
 
-    calibrado = calibrar_por_conta(
-        perfil, st.session_state["e_conta_kwh"], st.session_state["e_dias_operacao"]
+    # -- a conta ------------------------------------------------------------
+    st.markdown("##### O que está na conta")
+    grupo = st.radio(
+        "Tipo de conta", ("B", "A"), horizontal=True, key="e_conta_grupo",
+        format_func=lambda g: {
+            "B": "Grupo B — só o consumo do mês (residência, comércio pequeno)",
+            "A": "Grupo A — ponta e fora de ponta, com demanda medida",
+        }[g],
     )
-    colunas = st.columns(3)
-    _cartao(colunas[0], "Consumo diário", f"{calibrado['consumo_diario_kwh']:.0f} kWh")
-    _cartao(colunas[1], "Demanda média", f"{calibrado['demanda_media_kw']:.1f} kW")
-    _cartao(colunas[2], "Pico da curva", f"{calibrado['demanda_maxima_kw']:.1f} kW")
+    if grupo == "A":
+        colunas = st.columns(2)
+        colunas[0].number_input(
+            "Consumo na ponta (kWh/mês)", min_value=0.0, max_value=5_000_000.0,
+            step=50.0, key="e_conta_ponta_kwh",
+        )
+        colunas[1].number_input(
+            "Consumo fora de ponta (kWh/mês)", min_value=0.0, max_value=5_000_000.0,
+            step=100.0, key="e_conta_fora_kwh",
+        )
+        colunas = st.columns(2)
+        colunas[0].number_input(
+            "Demanda medida na ponta (kW)", min_value=0.0, max_value=100_000.0,
+            step=5.0, key="e_conta_dem_ponta",
+            help="A demanda **medida**, não a contratada. Zero deixa a forma do perfil "
+                 "decidir o pico.",
+        )
+        colunas[1].number_input(
+            "Demanda medida fora de ponta (kW)", min_value=0.0, max_value=100_000.0,
+            step=5.0, key="e_conta_dem_fora",
+            help="A demanda **medida**, não a contratada. Zero deixa a forma do perfil "
+                 "decidir o pico.",
+        )
+        colunas = st.columns(2)
+        colunas[0].number_input("Início da ponta (h)", 0, 23, key="e_conta_ponta_ini")
+        colunas[1].number_input("Fim da ponta (h)", 0, 24, key="e_conta_ponta_fim")
+    else:
+        colunas = st.columns(2)
+        colunas[0].number_input(
+            "Consumo do mês (kWh)", min_value=50.0, max_value=5_000_000.0,
+            step=100.0, key="e_conta_kwh",
+        )
+        colunas[1].number_input(
+            "Demanda medida, se a conta trouxer (kW)", min_value=0.0, max_value=100_000.0,
+            step=1.0, key="e_conta_dem_fora",
+            help="Conta do Grupo B raramente traz. Zero deixa a forma do perfil decidir "
+                 "o pico.",
+        )
 
-    st.caption(f"Curva de referência: **{perfil.nome}**"
-               + ("" if perfil.confiavel else " — perfil sintético na origem da base."))
-    st.line_chart(
-        pd.DataFrame({"kW": calibrado["curva_kw"]}, index=pd.RangeIndex(24, name="hora")),
-        height=200,
+    # -- como o lugar funciona ----------------------------------------------
+    st.markdown("##### Como o lugar funciona")
+    colunas = st.columns([1, 1, 1, 1])
+    colunas[0].selectbox(
+        "Dias por semana", (5, 6, 7), key="e_conta_dias_semana",
+        help="Nos dias fechados a carga cai para a base do perfil — o que fica ligado "
+             "com o prédio vazio.",
     )
+    colunas[1].checkbox("Funciona 24 h", key="e_conta_24h")
+    colunas[2].number_input(
+        "Abre (h)", 0, 23, key="e_conta_abre", disabled=estado["e_conta_24h"])
+    colunas[3].number_input(
+        "Fecha (h)", 1, 24, key="e_conta_fecha", disabled=estado["e_conta_24h"])
+
+    with st.expander("Tenho o histórico de 12 meses da conta"):
+        st.caption(
+            "Com o histórico, cada estação recebe o seu fator: julho não é janeiro. "
+            "Deixe em zero os meses que não tem."
+        )
+        base = estado.get("e_conta_historico")
+        if base is None:
+            base = pd.DataFrame({"mês": list(MESES_CURTOS), "kWh": [0.0] * 12})
+        editado = st.data_editor(
+            base, hide_index=True, width="stretch", num_rows="fixed",
+            column_config={
+                "mês": st.column_config.TextColumn("Mês", disabled=True),
+                "kWh": st.column_config.NumberColumn("kWh", min_value=0.0, step=100.0, format="%.0f"),
+            },
+            key="editor_historico_conta",
+        )
+        estado["e_conta_historico"] = editado
+
+    # -- a forma -------------------------------------------------------------
+    with st.expander("Curva de referência e hipóteses da variabilidade"):
+        opcoes = [""] + sorted(perfis, key=lambda k: perfis[k].nome)
+        rotulo_auto = (
+            "Deixar o ajuste escolher (só decide com ponta, fora de ponta ou demanda)"
+        )
+        st.selectbox(
+            "Perfil típico", opcoes, key="e_conta_perfil",
+            format_func=lambda k: rotulo_auto if k == "" else perfis[k].nome + (
+                " — o do segmento" if do_segmento is not None and k == do_segmento.id else ""
+            ),
+            help="Com só o consumo do mês, toda forma fecha exatamente e vale o perfil do "
+                 "segmento. Com ponta, fora de ponta e demanda medida, a forma que "
+                 "reproduz esses números com menos deformação é a escolhida.",
+        )
+        colunas = st.columns(2)
+        colunas[0].slider(
+            "Variação dia a dia (%)", 0, 40, key="e_conta_dispersao_dia",
+            help="Desvio do fator log-normal do dia. 15% é a ordem de grandeza da carga "
+                 "comercial; move a energia e o pico juntos.",
+        )
+        colunas[1].slider(
+            "Variação hora a hora (%)", 0, 20, key="e_conta_dispersao_hora",
+            help="Desvio do fator log-normal de cada hora. Forma a cauda de pico que "
+                 "decide o inversor.",
+        )
+
+    conta = _conta_da_tela()
+    if conta is None:
+        estado["e_ajuste_conta"] = None
+        _rodape(pendencia="corrigir a conta")
+        return
+
+    escolhido = estado["e_conta_perfil"]
+    if escolhido:
+        ajuste = ajustar(conta, perfis[escolhido])
+    else:
+        ajuste = ajustar_melhor_perfil(conta, preferido=do_segmento)
+    estado["e_ajuste_conta"] = ajuste
+
+    # -- o resultado ---------------------------------------------------------
+    st.markdown("##### A curva ajustada")
+    colunas = st.columns(4)
+    _cartao(colunas[0], "Dia de operação", f"{ajuste.consumo_diario_operacao_kwh:.0f} kWh")
+    _cartao(colunas[1], "Demanda média", f"{ajuste.demanda_media_kw:.1f} kW")
+    _cartao(colunas[2], "Pico da curva", f"{ajuste.demanda_maxima_kw:.1f} kW")
+    _cartao(colunas[3], "Fator de carga", f"{ajuste.fator_de_carga:.0%}")
+    st.caption(
+        f"Curva de referência: **{ajuste.perfil.nome}**"
+        + ("" if ajuste.perfil.confiavel else " — perfil sintético na origem da base.")
+        + (f" · expoente de forma {ajuste.expoente:.2f}" if conta.tem_demanda else "")
+        + f" · carga de base {ajuste.carga_base_kw:.1f} kW"
+    )
+    series = {"dia de operação": ajuste.curva_operacao_kw}
+    if conta.dias_operacao_semana < 7:
+        series["dia fechado"] = ajuste.curva_fechado_kw
+    if do_segmento is not None and do_segmento.id != ajuste.perfil.id:
+        series[f"forma do segmento ({do_segmento.nome})"] = (
+            do_segmento.curva_pu * ajuste.consumo_diario_operacao_kwh
+        )
+    st.line_chart(pd.DataFrame(series, index=pd.RangeIndex(24, name="hora")), height=220)
+
+    rotulos = {
+        "energia_mensal_kwh": ("Energia do mês", "kWh"),
+        "energia_ponta_kwh": ("Energia na ponta", "kWh"),
+        "energia_fora_ponta_kwh": ("Energia fora de ponta", "kWh"),
+        "demanda_ponta_kw": ("Demanda na ponta", "kW"),
+        "demanda_fora_ponta_kw": ("Demanda fora de ponta", "kW"),
+    }
+    linhas = [
+        {"grandeza": rotulo,
+         "na conta": f"{ajuste.alvos[chave]:,.0f} {unidade}".replace(",", "."),
+         "na curva": f"{ajuste.obtidos[chave]:,.0f} {unidade}".replace(",", "."),
+         "diferença": f"{ajuste.erros_pct[chave]:.1f}%"}
+        for chave, (rotulo, unidade) in rotulos.items()
+        if ajuste.alvos.get(chave)
+    ]
+    st.dataframe(pd.DataFrame(linhas), width="stretch", hide_index=True)
+    if ajuste.fechou:
+        st.success("A curva reproduz todos os números informados da conta dentro de 5%.")
+    else:
+        st.warning(
+            "A curva não fechou com a conta em todas as grandezas — veja a tabela. Quase "
+            "sempre é a forma do perfil que não é a deste lugar, ou uma demanda medida "
+            "que vem de um pico que curva típica não modela."
+        )
+    for aviso in ajuste.avisos:
+        if "sintética" not in aviso:
+            st.caption(f"⚠ {aviso}")
 
     def _seguir() -> bool:
-        ensemble = ensemble_de_curva_tipica(calibrado["curva_w_por_minuto"])
-        st.session_state["e_cenario"] = None
-        st.session_state["e_ensemble_total"] = ensemble
-        st.session_state["e_ensemble_backup"] = ensemble
-        st.session_state["e_essenciais"] = []
-        st.session_state["e_avisos_carga"] = [calibrado["aviso"], ensemble.metadados["aviso"]]
+        ensemble = ajuste.ensemble(
+            dispersao_diaria=estado["e_conta_dispersao_dia"] / 100.0,
+            dispersao_horaria=estado["e_conta_dispersao_hora"] / 100.0,
+        )
+        estado["e_cenario"] = None
+        estado["e_ensemble_total"] = ensemble
+        estado["e_ensemble_backup"] = ensemble
+        estado["e_fracao_backup"] = 1.0
+        estado["e_essenciais"] = []
+        estado["e_analise"] = None
+        estado["e_assinatura_analise"] = None
+        estado["e_avisos_carga"] = [ensemble.metadados["aviso"], *ajuste.avisos]
         return True
 
     _rodape(ao_avancar=_seguir)
@@ -2052,21 +2289,14 @@ def _passo_backup() -> None:
         )
         fracao = st.slider(
             "Que fração da carga total ficaria no quadro de backup?",
-            0.1, 1.0, value=1.0, step=0.05,
+            0.1, 1.0, step=0.05, key="e_fracao_backup",
             help="Um recorte grosseiro, já que não há lista de circuitos. Metade da carga "
                  "é o típico quando só entram iluminação, refrigeração e TI.",
         )
-        base = st.session_state["e_ensemble_total"]
-        if fracao < 1.0:
-            from .demanda.ensemble import EnsembleCarga
+        from .demanda.ajuste import recortar_fracao
 
-            st.session_state["e_ensemble_backup"] = EnsembleCarga(
-                perfis_w={e: base.perfis_w[e] * fracao for e in base.estacoes},
-                passo_min=base.passo_min,
-                metadados=dict(base.metadados, fracao_backup=fracao),
-            )
-        else:
-            st.session_state["e_ensemble_backup"] = base
+        st.session_state["e_ensemble_backup"] = recortar_fracao(
+            st.session_state["e_ensemble_total"], float(fracao))
         _mostrar_carga_de_backup()
         _rodape()
         return
@@ -2183,7 +2413,15 @@ def _mostrar_carga_de_backup() -> None:
     with aba_conf:
         perfil = segmento_do_perfil(st.session_state["e_segmento"])
         total = st.session_state["e_ensemble_total"]
-        if perfil is None:
+        ajuste = st.session_state.get("e_ajuste_conta")             if st.session_state.get("e_cenario") is None else None
+        if ajuste is not None:
+            # Conferir a curva contra o padrão do setor só faz sentido quando
+            # ela veio de um levantamento. Aqui ela veio do próprio padrão.
+            st.info(
+                f"A curva veio do perfil **{ajuste.perfil.nome}** ajustado à conta de "
+                "luz — não há levantamento a conferir contra o padrão do setor."
+            )
+        elif perfil is None:
             st.info("Este segmento não tem curva de referência na base.")
         elif total is None:
             st.info("Simule a demanda para comparar.")
@@ -3013,8 +3251,14 @@ def _passo_meta() -> None:
     tarifa_simples = colunas[0].number_input(
         "Tarifa (R$/kWh)", 0.10, 5.0, 0.98, 0.01,
         help="A tarifa cheia da fatura, com impostos.")
+    # Quem veio pela conta de luz já a informou: o campo nasce preenchido, e
+    # a economia é medida contra a mesma fatura que deu forma à carga.
+    ajuste_conta = st.session_state.get("e_ajuste_conta")         if st.session_state.get("e_cenario") is None else None
+    consumo_padrao = (
+        round(float(ajuste_conta.conta.consumo_mensal_kwh), 0) if ajuste_conta else 0.0
+    )
     consumo_fatura = colunas[1].number_input(
-        "Consumo médio na fatura (kWh/mês)", 0.0, 500_000.0, 0.0, 50.0,
+        "Consumo médio na fatura (kWh/mês)", 0.0, 500_000.0, consumo_padrao, 50.0,
         help="Zero usa o consumo que a simulação de cargas produziu. Preenchido, a "
              "simulação é escalada para bater com a fatura — ela é medida, o "
              "levantamento é estimativa.")
@@ -3455,6 +3699,13 @@ def _montar_configuracao(
     if ocupacao_dados and ocupacao_dados.get("diaria_ponderada_kwh"):
         consumo_anual = float(ocupacao_dados["diaria_ponderada_kwh"]) * 365.0
 
+    # O caminho da conta de luz: sem cenário, o estudo recebe a curva ajustada
+    # e é ela que gera o ensemble. Sem isto, `comodos=None` caía no cenário de
+    # demonstração e o dossiê saía com o hotel de quarenta quartos.
+    ajuste_conta = estado.get("e_ajuste_conta") if cenario is None else None
+    if ajuste_conta is not None:
+        consumo_anual = float(ajuste_conta.consumo_anual_kwh)
+
     return ConfiguracaoEstudo(
         latitude=estado["e_lat"], longitude=estado["e_lon"],
         nome=estado["e_nome"] or "instalação",
@@ -3473,6 +3724,10 @@ def _montar_configuracao(
         tabelas_cenario=(levantado or cenario).comodos if cenario else None,
         ocupacao=ocupacao_dados,
         consumo_anual_kwh=consumo_anual,
+        ajuste_conta=ajuste_conta,
+        fracao_backup=float(estado.get("e_fracao_backup") or 1.0),
+        dispersao_diaria=float(estado.get("e_conta_dispersao_dia", 15)) / 100.0,
+        dispersao_horaria=float(estado.get("e_conta_dispersao_hora", 5)) / 100.0,
         simulacoes=300,
         potencia_fv_kwp=estado["e_kwp"] or None,
         telhado=estado.get("e_telhado"),
@@ -3648,7 +3903,8 @@ def _passo_resultado() -> None:
             "do telhado com os módulos, croqui cotado, recurso solar, demanda, "
             "excedência de pico, resiliência a apagões, degradação, análise econômica e "
             "a procedência de cada dado — mais o PDF compilado, um resumo em Markdown, "
-            "todas as figuras em PNG e as tabelas em CSV."
+            "todas as figuras em PNG e as tabelas em CSV. Junto vai a **apresentação "
+            "comercial** de 19 slides, com as três formas de pagamento."
         )
         colunas = st.columns([2, 1])
         with colunas[1]:
@@ -3656,7 +3912,33 @@ def _passo_resultado() -> None:
             empresa = st.text_input("Empresa", value="PACE Inteligência Energética", key="capa_empresa")
             responsavel = st.text_input("Responsável técnico", key="capa_resp")
             crea = st.text_input("CREA", key="capa_crea")
+            credenciais = st.text_input(
+                "Formação e título", key="capa_credenciais",
+                placeholder="Engenheiro Eletricista — MSc ...",
+                help="Vai na capa da apresentação, abaixo do responsável.",
+            )
             contato = st.text_input("E-mail ou telefone", key="capa_contato")
+
+            # As condições de venda não saem de cálculo nenhum: são a
+            # premissa comercial da PACE, e a apresentação as imprime como
+            # estão aqui. Os padrões são os da proposta que serviu de modelo.
+            with st.expander("Condições comerciais da apresentação"):
+                juros_am = st.number_input(
+                    "Juros do financiamento (% a.m.)", 0.0, 10.0, 1.49, 0.01,
+                    key="com_juros", format="%.2f")
+                prazo_fin = st.number_input(
+                    "Prazo do financiamento (meses)", 6, 180, 60, 6, key="com_prazo")
+                carencia = st.number_input("Carência (meses)", 0, 12, 3, 1, key="com_carencia")
+                fracao_leasing = st.number_input(
+                    "Mensalidade do leasing (% da economia mensal)", 10.0, 100.0, 86.0, 1.0,
+                    key="com_leasing")
+                prazo_leasing = st.number_input(
+                    "Prazo do leasing (anos)", 1, 25, 10, 1, key="com_prazo_leasing")
+                seguro = st.number_input("Seguro (R$/mês)", 0.0, 5000.0, 40.0, 5.0, key="com_seguro")
+                gerenciamento = st.number_input(
+                    "Gerenciamento (R$/mês)", 0.0, 5000.0, 40.0, 5.0, key="com_gerenciamento")
+                nomear = st.checkbox(
+                    "Nomear marca e modelo dos equipamentos", value=False, key="com_nomear")
 
         with colunas[0]:
             if not encontrar_compilador():
@@ -3670,7 +3952,16 @@ def _passo_resultado() -> None:
                         estudo,
                         DadosCapa(
                             empresa=empresa, responsavel=responsavel, crea=crea,
-                            email=contato, referencia=cfg.nome,
+                            credenciais=credenciais, email=contato,
+                            referencia=cfg.nome, nomear_marcas=nomear,
+                        ),
+                        OpcoesComerciais(
+                            juros_financiamento_am=juros_am / 100.0,
+                            prazo_financiamento_meses=int(prazo_fin),
+                            carencia_financiamento_meses=int(carencia),
+                            leasing_fracao_da_economia=fracao_leasing / 100.0,
+                            prazo_leasing_anos=int(prazo_leasing),
+                            seguro_brl_mes=seguro, gerenciamento_brl_mes=gerenciamento,
                         ),
                     )
             if st.session_state["e_pacote"]:
@@ -3897,9 +4188,11 @@ def _mostrar_figura(figuras: dict, chave: str, legenda: str) -> None:
         st.image(str(caminho), caption=legenda, width="stretch")
 
 
-def _montar_zip(estudo, capa: DadosCapa | None = None) -> bytes:
-    """O dossiê completo — LaTeX, PDF, figuras e tabelas — como ZIP em memória."""
-    return zip_do_dossie(estudo, capa)
+def _montar_zip(
+    estudo, capa: DadosCapa | None = None, comercial: OpcoesComerciais | None = None
+) -> bytes:
+    """O dossiê completo — LaTeX, PDF, figuras, tabelas e a apresentação — como ZIP em memória."""
+    return zip_do_dossie(estudo, capa, comercial=comercial)
 
 
 # ============================================================================

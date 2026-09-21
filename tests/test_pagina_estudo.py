@@ -248,12 +248,88 @@ def test_caminho_da_conta_de_luz_avisa_o_que_perde():
     assert any("variabilidade" in w.value.lower() for w in at.warning), \
         "o caminho sem levantamento tem que declarar o que se perde"
 
+    # A curva ajustada já existe antes de avançar: a tela mostra o ajuste.
+    ajuste = at.session_state["e_ajuste_conta"]
+    assert ajuste is not None and ajuste.fechou
+    assert ajuste.consumo_mensal_kwh == pytest.approx(at.session_state["e_conta_kwh"])
+
     _continuar(at)
     assert at.session_state["e_passo"] == CONSUMO
     ensemble = at.session_state["e_ensemble_total"]
-    assert ensemble.metadados["origem"] == "curva_tipica_calibrada"
+    assert ensemble.metadados["origem"] == "curva_tipica_ajustada"
     # A dispersão assumida tem que produzir uma cauda, não uma curva única.
     assert ensemble.picos_diarios_w().std() > 0
+    # E a energia do ensemble é a da conta — não a de um cenário de demonstração.
+    assert ensemble.energia_diaria_kwh().mean() * 30 == pytest.approx(
+        at.session_state["e_conta_kwh"], rel=0.05)
+
+
+def test_a_conta_de_luz_chega_ao_estudo_inteiro():
+    """
+    O caminho da conta atravessa as duas fases e o estudo sai **da conta**.
+
+    Antes, `_montar_configuracao` mandava `comodos=None` e o motor caía no
+    cenário de demonstração: o dossiê de quem só tinha a fatura saía com o
+    hotel de quarenta quartos, sem avisar. O teste fixa que o ensemble do
+    estudo tem a energia da conta, que o quadro de backup é a fração escolhida
+    e que o documento conta o método certo.
+    """
+    at = _abrir()
+    _por_rotulo(at.text_input, "Nome do cliente").set_value("Loja Teste").run()
+    _continuar(at)
+    at.radio[0].set_value("conta").run()
+    at.radio[1].set_value("A").run()
+    _por_rotulo(at.number_input, "Consumo na ponta").set_value(900.0).run()
+    _por_rotulo(at.number_input, "Consumo fora de ponta").set_value(12000.0).run()
+    _por_rotulo(at.number_input, "Demanda medida fora de ponta").set_value(62.0).run()
+    _por_rotulo(at.selectbox, "Dias por semana").set_value(6).run()
+    _por_rotulo(at.checkbox, "Funciona 24 h").set_value(False).run()
+    assert not at.exception, at.exception
+    ajuste = at.session_state["e_ajuste_conta"]
+    assert ajuste.conta.grupo == "A" and ajuste.conta.dias_operacao_semana == 6
+    assert ajuste.erros_pct["energia_ponta_kwh"] < 1e-6
+    assert ajuste.erros_pct["energia_fora_ponta_kwh"] < 1e-6
+
+    _continuar(at)  # cargas -> consumo
+    _por_rotulo(at.button, "Analisar o consumo").click().run()
+    assert not at.exception, at.exception
+    analise = at.session_state["e_analise"]
+    assert analise.indicadores.consumo_mensal_kwh == pytest.approx(12900.0, rel=0.06)
+
+    at = _ate_o_equipamento(at, kwp=20.0)
+    _por_rotulo(at.button, "Analisar com bateria").click().run()
+    assert at.session_state["e_passo"] == BACKUP
+    _por_rotulo(at.slider, "fração da carga total").set_value(0.5).run()
+    _continuar(at)
+    assert at.session_state["e_passo"] == META
+    # O consumo da fatura já vem preenchido com o da conta que deu forma à carga.
+    assert _por_rotulo(at.number_input, "Consumo médio na fatura").value == pytest.approx(12900.0)
+
+    _por_rotulo(at.select_slider, "Autonomia alvo").set_value(3).run()
+    _por_rotulo(at.multiselect, "Durações de falta").set_value([1.0, 3.0]).run()
+    _por_rotulo(at.slider, "Amostras por combinação").set_value(20).run()
+    _por_rotulo(at.slider, "Conjuntos a avaliar").set_value(2).run()
+    _por_rotulo(at.button, "Rodar o estudo").click().run()
+    assert not at.exception, at.exception
+    assert at.session_state["e_passo"] == RESULTADO
+
+    estudo = at.session_state["e_estudo"]
+    cfg = estudo.configuracao
+    assert cfg.ajuste_conta is not None and cfg.comodos is None
+    assert cfg.fracao_backup == pytest.approx(0.5)
+    assert cfg.consumo_anual_kwh == pytest.approx(12900.0 * 12)
+    total = estudo.ensemble_total.energia_diaria_kwh().mean() * 30
+    backup = estudo.ensemble_backup.energia_diaria_kwh().mean() * 30
+    assert total == pytest.approx(12900.0, rel=0.06), "o ensemble do estudo não é o da conta"
+    assert backup == pytest.approx(total / 2, rel=0.01)
+    assert estudo.ensemble_total.metadados["origem"] == "curva_tipica_ajustada"
+    assert any("hipótese" in a for a in estudo.avisos)
+
+    from aurum.bateria.documento import montar_documento
+    tex = montar_documento(estudo, {})
+    assert "não parte de um levantamento de equipamentos" in tex
+    assert "Grupo A" in tex and "O que este caminho assume" in tex
+    assert "Área Comum" not in tex, "o hotel de demonstração vazou para o dossiê"
 
 
 def test_erro_de_carga_bloqueia_e_aponta_a_linha():

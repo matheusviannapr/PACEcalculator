@@ -84,6 +84,23 @@ class ConfiguracaoEstudo:
     instancias_por_comodo: dict[str, int] | None = None
     planilha_cargas: str | Path | None = None
     cenario_demo: str = "hotel"
+    #: A curva típica ajustada à conta de luz (:class:`aurum.demanda.ajuste.AjusteCurva`),
+    #: para o estudo de quem não tem levantamento de equipamentos. Quando
+    #: presente, é ela — e não a lista de cômodos — que produz o ensemble de
+    #: carga, e o quadro de backup é a fração ``fracao_backup`` da instalação.
+    #:
+    #: Sem este campo o estudo sem cômodos caía no cenário de demonstração,
+    #: e o dossiê saía com o hotel de quarenta quartos no lugar da conta do
+    #: cliente — sem avisar.
+    ajuste_conta: Any = None
+    #: Fração da carga total que fica no quadro de backup, no caminho da conta.
+    #: Recorte grosseiro por necessidade: sem lista de circuitos não há o que
+    #: escolher, só quanto.
+    fracao_backup: float = 1.0
+    #: Variabilidade assumida ao gerar o ensemble a partir do ajuste — dia a
+    #: dia e hora a hora, como desvio do fator log-normal.
+    dispersao_diaria: float = 0.15
+    dispersao_horaria: float = 0.05
     ajustes_sazonais: dict[str, dict] | None = None
     simulacoes: int = 300
     #: Cômodos ligados ao quadro de backup. ``None`` significa a instalação
@@ -575,11 +592,12 @@ def _dimensionar_fv(cfg: ConfiguracaoEstudo, ensemble: EnsembleCarga, serie: Ser
     rendimento = serie.anual_kwh_por_kwp()
     kwp = consumo_anual / rendimento if rendimento > 0 else 0.0
     consumo_texto = f"{consumo_anual:,.0f}".replace(",", ".")
-    origem = (
-        "consumo anual ponderado entre os perfis de ocupação"
-        if cfg.consumo_anual_kwh
-        else "consumo anual estimado"
-    )
+    if cfg.ajuste_conta is not None:
+        origem = "consumo anual da conta de luz"
+    elif cfg.consumo_anual_kwh:
+        origem = "consumo anual ponderado entre os perfis de ocupação"
+    else:
+        origem = "consumo anual estimado"
     aviso = (
         f"Potência FV não informada: dimensionada em {kwp:.1f} kWp para compensar o "
         f"{origem} de {consumo_texto} kWh a {rendimento:.0f} kWh/kWp. "
@@ -867,13 +885,40 @@ def executar_estudo(cfg: ConfiguracaoEstudo, progresso=None) -> ResultadoEstudo:
         ))
 
     # 1. carga -------------------------------------------------------------
-    avisar("Simulando a demanda (Monte Carlo por estação)", 0.05)
-    comodos, instancias = _carregar_cargas(cfg)
-    ensemble_total = _simular(
-        cfg, comodos, instancias, apenas_essenciais=False,
-    )
-    ensemble_backup, avisos_backup = _ensemble_de_backup(cfg, comodos, instancias)
-    avisos.extend(avisos_backup)
+    if cfg.ajuste_conta is not None:
+        # O caminho da conta de luz: a forma vem do perfil do segmento e o
+        # tamanho, da fatura. O ensemble sai do ajuste, não do Monte Carlo
+        # por equipamento — e o estudo diz isso em cada lugar onde a
+        # variabilidade assumida pesa.
+        avisar("Gerando a demanda a partir da curva típica ajustada à conta", 0.05)
+        from ..demanda.ajuste import recortar_fracao
+
+        ensemble_total = cfg.ajuste_conta.ensemble(
+            num_simulacoes=cfg.simulacoes,
+            dispersao_diaria=cfg.dispersao_diaria,
+            dispersao_horaria=cfg.dispersao_horaria,
+            semente=cfg.semente,
+        )
+        ensemble_backup = recortar_fracao(ensemble_total, cfg.fracao_backup)
+        avisos.append(ensemble_total.metadados["aviso"])
+        avisos.extend(cfg.ajuste_conta.avisos)
+        if cfg.fracao_backup < 1.0:
+            avisos.append(
+                f"Quadro de backup estimado como {cfg.fracao_backup:.0%} da carga total, "
+                "sem lista de circuitos. É um recorte de ordem de grandeza; o "
+                "levantamento é que diz o que fica ligado."
+            )
+        if cfg.consumo_anual_kwh is None:
+            # O solar é dimensionado pela conta, não pelo dia que dimensiona.
+            cfg = replace(cfg, consumo_anual_kwh=float(cfg.ajuste_conta.consumo_anual_kwh))
+    else:
+        avisar("Simulando a demanda (Monte Carlo por estação)", 0.05)
+        comodos, instancias = _carregar_cargas(cfg)
+        ensemble_total = _simular(
+            cfg, comodos, instancias, apenas_essenciais=False,
+        )
+        ensemble_backup, avisos_backup = _ensemble_de_backup(cfg, comodos, instancias)
+        avisos.extend(avisos_backup)
 
     # 2. geração -----------------------------------------------------------
     if not cfg.considerar_solar:
@@ -1096,6 +1141,9 @@ def executar_estudo(cfg: ConfiguracaoEstudo, progresso=None) -> ResultadoEstudo:
                 semente=cfg.semente,
                 ajustes_sazonais=cfg.ajustes_sazonais,
                 catalogo=base,
+                # Declarados, os candidatos são o produto e valem em toda
+                # seção; senão cada escopo monta a sua lista, como sempre.
+                candidatos_declarados=bool(cfg.candidatos),
             )
             avisos.extend(escopos.avisos)
         except Exception as exc:  # noqa: BLE001 — leitura extra não derruba estudo
@@ -1155,6 +1203,13 @@ def executar_estudo(cfg: ConfiguracaoEstudo, progresso=None) -> ResultadoEstudo:
                 # senão cada cenário dimensiona o seu e o documento sai com
                 # três sistemas onde o cliente comprou um.
                 potencia_fv_kwp=kwp if cfg.potencia_fv_kwp else None,
+                # O bloco das premissas, pela mesma razão de sempre: sem
+                # passá-lo, os cenários de uso precificavam o banco pelo
+                # padrão de 5 kWh e o documento saía com dois preços.
+                **({"bloco_kwh": cfg.premissas.bloco_bateria_kwh,
+                    "bloco_brl": cfg.premissas.bloco_bateria_brl}
+                   if cfg.premissas.bloco_bateria_brl > 0 else {}),
+                candidatos=list(cfg.candidatos) if cfg.candidatos else None,
             )
             avisos.extend(uso.avisos)
         except Exception as exc:  # noqa: BLE001 — leitura extra não derruba estudo
