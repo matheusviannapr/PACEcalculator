@@ -35,7 +35,7 @@ levantamento produz. A variabilidade é **assumida** ao gerar o ensemble (ver
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Mapping, Sequence
 
 import numpy as np
@@ -269,6 +269,8 @@ class AjusteCurva:
     avisos: list[str] = field(default_factory=list)
     pontuacao: float = 0.0
     fator_demanda_medida: float = FATOR_DEMANDA_MEDIDA
+    #: A curva do dia de operação foi reescrita pelo operador sobre o ajuste.
+    editada: bool = False
 
     # -- grandezas derivadas -----------------------------------------------
     @property
@@ -317,6 +319,59 @@ class AjusteCurva:
     @property
     def sazonalidade_aplicada(self) -> bool:
         return any(abs(f - 1.0) > 1e-9 for f in self.fatores_sazonais.values())
+
+    def com_curva_editada(
+        self,
+        curva_kw: Sequence[float],
+        manter_energia: bool = True,
+    ) -> "AjusteCurva":
+        """
+        O mesmo ajuste com a curva do dia de operação reescrita pelo operador.
+
+        Quem conhece a instalação sabe o que a curva típica não sabe — o
+        chuveiro das sete, a máquina que liga às cinco. A edição entra sobre a
+        curva ajustada, hora a hora. O dia fechado acompanha: fica na hora mais
+        vazia da curva editada.
+
+        Com ``manter_energia`` a curva editada é reescalada para que o ciclo
+        continue fechando com a energia da conta: o operador desenha a
+        **forma**, a fatura dá o **tamanho**. Sem ele, o que foi digitado vale
+        em kW, e a diferença para a conta aparece na conferência.
+        """
+        curva = np.asarray(curva_kw, dtype=float).ravel()
+        if curva.size != 24 or not np.isfinite(curva).all() or (curva < 0).any():
+            raise ValueError("a curva editada precisa de 24 valores não negativos, um por hora")
+        if curva.sum() <= 0:
+            raise ValueError("a curva editada é nula")
+        fechado = np.full(24, float(curva.min()))
+        if manter_energia:
+            conta = self.conta
+            dias_abertos = conta.dias_uteis_operacao + conta.dias_fim_de_semana_operacao
+            energia = dias_abertos * float(curva.sum()) + conta.dias_fechado * float(fechado.sum())
+            escala = float(conta.consumo_mensal_kwh) / energia if energia > 0 else 1.0
+            curva = curva * escala
+            fechado = fechado * escala
+        obtidos, erros, pontuacao, avisos = _conferir(
+            self.conta, curva, fechado, self.alvos, self.fator_demanda_medida,
+        )
+        avisos.insert(0, (
+            "A curva do dia de operação foi editada pelo operador sobre a curva "
+            "ajustada" + (
+                "; a energia do ciclo foi mantida na da conta." if manter_energia
+                else ", em kW — a conferência mostra o quanto ela se afasta da conta."
+            )
+        ))
+        avisos.extend(a for a in self.avisos if "sintética" in a)
+        return replace(
+            self,
+            curva_operacao_kw=curva,
+            curva_fechado_kw=fechado,
+            obtidos=obtidos,
+            erros_pct=erros,
+            pontuacao=float(pontuacao),
+            avisos=avisos,
+            editada=True,
+        )
 
     def curva_do_dia(self, estacao: str | None = None, operacao: bool = True) -> np.ndarray:
         """A curva de 24 h em kW, de uma estação, em dia aberto ou fechado."""
@@ -422,6 +477,7 @@ class AjusteCurva:
             "erros_pct": dict(self.erros_pct),
             "fechou": self.fechou,
             "pontuacao": float(self.pontuacao),
+            "editada": bool(self.editada),
             "avisos": list(self.avisos),
         }
 
@@ -519,13 +575,6 @@ def ajustar(
         )
 
     # conferência ---------------------------------------------------------
-    e_dia = float(curva.sum())
-    e_ponta_dia = float(curva[ponta].sum())
-    e_mes = (n_u + n_s) * e_dia + n_f * float(fechado.sum())
-    e_ponta = n_u * e_ponta_dia
-    e_fora = e_mes - e_ponta
-    d_ponta = float(curva[ponta].max()) * fator_demanda_medida if ponta.any() else 0.0
-    d_fora = float(curva[fora].max()) * fator_demanda_medida if fora.any() else 0.0
     alvos: dict[str, float | None] = {
         "energia_mensal_kwh": alvo_total,
         "energia_ponta_kwh": alvo_ponta,
@@ -533,31 +582,10 @@ def ajustar(
         "demanda_ponta_kw": conta.demanda_ponta_kw or None,
         "demanda_fora_ponta_kw": conta.demanda_fora_ponta_kw or None,
     }
-    obtidos = {
-        "energia_mensal_kwh": e_mes,
-        "energia_ponta_kwh": e_ponta,
-        "energia_fora_ponta_kwh": e_fora,
-        "demanda_ponta_kw": d_ponta,
-        "demanda_fora_ponta_kw": d_fora,
-    }
-    erros = {
-        chave: (abs(obtidos[chave] - alvo) / alvo * 100.0 if alvo else None)
-        for chave, alvo in alvos.items()
-    }
-    pontuacao = sum(_PESOS_ERRO[k] * e for k, e in erros.items() if e is not None)
-    for chave, erro in erros.items():
-        if erro is not None and erro > TOLERANCIA_ERRO_PCT:
-            avisos.append(
-                f"O ajuste não fechou em {_ROTULOS[chave]}: {erro:.0f}% de diferença "
-                "para a conta."
-            )
-    fator_carga = float(curva.mean() / curva.max()) if curva.max() > 0 else 0.0
-    if fator_carga < 0.15 or fator_carga > 0.95:
-        avisos.append(
-            f"Fator de carga de {fator_carga:.0%} está fora do que se vê em instalações "
-            "reais (15% a 95%). Ou a demanda medida não corresponde ao consumo, ou o "
-            "perfil não é o desse lugar."
-        )
+    obtidos, erros, pontuacao, avisos_conferencia = _conferir(
+        conta, curva, fechado, alvos, fator_demanda_medida,
+    )
+    avisos.extend(avisos_conferencia)
     if not perfil.confiavel:
         avisos.append(
             f"A curva de referência ({perfil.nome}) está marcada como sintética na "
@@ -664,6 +692,55 @@ _ROTULOS = {
     "demanda_ponta_kw": "demanda na ponta",
     "demanda_fora_ponta_kw": "demanda fora de ponta",
 }
+
+
+def _conferir(
+    conta: ContaDeLuz,
+    curva: np.ndarray,
+    fechado: np.ndarray,
+    alvos: Mapping[str, float | None],
+    fator_demanda_medida: float,
+) -> tuple[dict[str, float], dict[str, float | None], float, list[str]]:
+    """
+    Soma a curva no calendário do ciclo e compara com a conta.
+
+    Devolve o obtido, o erro percentual por grandeza informada, a pontuação
+    ponderada e os avisos de conferência. É a mesma conta para a curva
+    ajustada e para a curva editada — e é isso que faz a edição continuar
+    auditável.
+    """
+    ponta = conta.mascara_ponta
+    fora = ~ponta
+    n_u, n_s, n_f = conta.dias_uteis_operacao, conta.dias_fim_de_semana_operacao, conta.dias_fechado
+    e_mes = (n_u + n_s) * float(curva.sum()) + n_f * float(fechado.sum())
+    e_ponta = n_u * float(curva[ponta].sum())
+    obtidos = {
+        "energia_mensal_kwh": e_mes,
+        "energia_ponta_kwh": e_ponta,
+        "energia_fora_ponta_kwh": e_mes - e_ponta,
+        "demanda_ponta_kw": float(curva[ponta].max()) * fator_demanda_medida if ponta.any() else 0.0,
+        "demanda_fora_ponta_kw": float(curva[fora].max()) * fator_demanda_medida if fora.any() else 0.0,
+    }
+    erros = {
+        chave: (abs(obtidos[chave] - alvo) / alvo * 100.0 if alvo else None)
+        for chave, alvo in alvos.items()
+    }
+    pontuacao = sum(_PESOS_ERRO[k] * e for k, e in erros.items() if e is not None)
+    avisos: list[str] = []
+    for chave, erro in erros.items():
+        if erro is not None and erro > TOLERANCIA_ERRO_PCT:
+            avisos.append(
+                f"O ajuste não fechou em {_ROTULOS[chave]}: {erro:.0f}% de diferença "
+                "para a conta."
+            )
+    fator_carga = float(curva.mean() / curva.max()) if curva.max() > 0 else 0.0
+    if fator_carga < 0.15 or fator_carga > 0.95:
+        avisos.append(
+            f"Fator de carga de {fator_carga:.0%} está fora do que se vê em instalações "
+            "reais (15% a 95%). Ou a demanda medida não corresponde ao consumo, ou o "
+            "perfil não é o desse lugar."
+        )
+    return obtidos, erros, float(pontuacao), avisos
 
 
 def _fator_fora_de_ponta(

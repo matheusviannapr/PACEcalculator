@@ -264,6 +264,37 @@ def test_caminho_da_conta_de_luz_avisa_o_que_perde():
         at.session_state["e_conta_kwh"], rel=0.05)
 
 
+def test_a_curva_do_segmento_e_o_padrao_e_a_edicao_chega_ao_ajuste():
+    """
+    Sem escolha, vale a curva do modelo do segmento — o ajuste não a troca
+    sozinho. E a edição do operador entra sobre ela, com a energia da conta.
+    """
+    from aurum.demanda.biblioteca import segmento_do_perfil
+
+    at = _abrir()
+    _por_rotulo(at.text_input, "Nome do cliente").set_value("Loja Teste").run()
+    _continuar(at)
+    at.radio[0].set_value("conta").run()
+    at.radio[1].set_value("A").run()
+    _por_rotulo(at.number_input, "Demanda medida fora de ponta").set_value(48.0).run()
+    ajuste = at.session_state["e_ajuste_conta"]
+    assert ajuste.perfil.id == segmento_do_perfil(at.session_state["e_segmento"]).id
+    assert not ajuste.editada
+
+    curva = list(ajuste.curva_operacao_kw)
+    curva[7] = curva[7] * 3
+    at.session_state["e_conta_curva_editada"] = curva
+    at.run()
+    assert not at.exception, at.exception
+    editado = at.session_state["e_ajuste_conta"]
+    assert editado.editada
+    assert editado.consumo_mensal_kwh == pytest.approx(ajuste.consumo_mensal_kwh)
+    assert any("editada" in t.value.lower() for t in at.markdown)
+
+    _continuar(at)
+    assert at.session_state["e_ensemble_total"].metadados["ajuste"]["editada"] is True
+
+
 def test_a_conta_de_luz_chega_ao_estudo_inteiro():
     """
     O caminho da conta atravessa as duas fases e o estudo sai **da conta**.

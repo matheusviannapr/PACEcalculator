@@ -1002,6 +1002,18 @@ def _metodo_da_conta(estudo: ResultadoEstudo) -> list[str]:
             "preservando a energia de cada posto — até o pico bater com a demanda medida "
             "descontada dessa razão. Expoente acima de um afina o pico; abaixo, achata."
         )
+    if ajuste.editada:
+        partes.append(
+            "Sobre a curva ajustada, o operador **editou** a curva do dia de operação "
+            "hora a hora, com o que conhece da instalação e a curva típica não modela"
+            + (
+                "; a energia do ciclo foi mantida na da conta, de modo que a edição "
+                "mudou a forma, não o tamanho."
+                if ajuste.fechou or ajuste.erros_pct.get("energia_mensal_kwh", 0) <= 5.0
+                else ". A energia do ciclo não foi mantida: a tabela abaixo mostra o "
+                "quanto a curva editada se afasta da conta."
+            )
+        )
     if ajuste.sazonalidade_aplicada:
         fatores = ", ".join(
             f"{estacao} {valor:+.0%}".replace("+0%", "0%")

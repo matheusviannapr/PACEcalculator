@@ -180,6 +180,60 @@ def test_perfil_sintetico_e_declarado(comercial):
 
 
 # ----------------------------------------------------------------------------
+# A edição
+# ----------------------------------------------------------------------------
+def test_curva_editada_mantem_a_energia_da_conta(comercial):
+    conta = ContaDeLuz(consumo_mensal_kwh=9000.0, dias_operacao_semana=6,
+                       abertura_h=8, fechamento_h=18)
+    ajuste = ajustar(conta, comercial)
+    curva = ajuste.curva_operacao_kw.copy()
+    curva[7] = 40.0  # o chuveiro das sete
+    editado = ajuste.com_curva_editada(curva)
+    assert editado.editada
+    assert editado.obtidos["energia_mensal_kwh"] == pytest.approx(9000.0)
+    assert editado.fechou
+    # A forma é a digitada, reescalada; a hora sete ficou proporcionalmente alta.
+    assert editado.curva_operacao_kw[7] / editado.curva_operacao_kw[12] == pytest.approx(
+        40.0 / curva[12])
+    # O dia fechado acompanha a hora mais vazia da curva editada.
+    assert np.allclose(editado.curva_fechado_kw, editado.curva_operacao_kw.min())
+    assert any("editada pelo operador" in a for a in editado.avisos)
+    assert editado.resumo()["editada"] is True
+    # O ajuste original não foi tocado.
+    assert not ajuste.editada and ajuste.curva_operacao_kw[7] != 40.0
+
+
+def test_curva_editada_sem_manter_energia_vale_em_kw(comercial):
+    ajuste = ajustar(ContaDeLuz(consumo_mensal_kwh=9000.0), comercial)
+    curva = ajuste.curva_operacao_kw * 1.2
+    editado = ajuste.com_curva_editada(curva, manter_energia=False)
+    assert np.allclose(editado.curva_operacao_kw, curva)
+    assert editado.obtidos["energia_mensal_kwh"] == pytest.approx(9000.0 * 1.2)
+    assert not editado.fechou
+
+
+def test_curva_editada_invalida_e_recusada(comercial):
+    ajuste = ajustar(ContaDeLuz(consumo_mensal_kwh=9000.0), comercial)
+    with pytest.raises(ValueError):
+        ajuste.com_curva_editada([1.0] * 23)
+    with pytest.raises(ValueError):
+        ajuste.com_curva_editada([0.0] * 24)
+    with pytest.raises(ValueError):
+        ajuste.com_curva_editada([-1.0] + [1.0] * 23)
+
+
+def test_curva_editada_chega_ao_ensemble(comercial):
+    ajuste = ajustar(ContaDeLuz(consumo_mensal_kwh=9000.0), comercial)
+    curva = np.full(24, 1.0)
+    curva[20] = 30.0
+    editado = ajuste.com_curva_editada(curva)
+    ensemble = editado.ensemble(num_simulacoes=50, dispersao_diaria=0.0, dispersao_horaria=0.0)
+    medio = ensemble.perfil_medio_w() / 1000.0
+    assert int(np.argmax(medio)) // 60 == 20
+    assert ensemble.energia_diaria_kwh().mean() * 30 == pytest.approx(9000.0)
+
+
+# ----------------------------------------------------------------------------
 # O ensemble
 # ----------------------------------------------------------------------------
 def test_interpolador_preserva_energia_e_nao_passa_do_pico():

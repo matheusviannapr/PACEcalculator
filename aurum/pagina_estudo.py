@@ -126,6 +126,15 @@ _PADROES: dict[str, Any] = {
     "e_conta_dispersao_dia": 15,
     "e_conta_dispersao_hora": 5,
     "e_conta_historico": None,
+    #: A curva do dia de operação reescrita pelo operador (24 valores em kW),
+    #: e a assinatura do ajuste sobre o qual ela foi feita — quando a conta ou
+    #: o perfil mudam, a edição antiga não vale mais e é descartada.
+    "e_conta_curva_editada": None,
+    "e_conta_assinatura_edicao": None,
+    "e_conta_manter_energia": True,
+    #: Muda a cada "descartar": o editor precisa de chave nova para largar o
+    #: que estava digitado e voltar à curva ajustada.
+    "e_conta_edicao_geracao": 0,
     "e_ensemble_total": None,
     "e_ensemble_backup": None,
     "e_essenciais": [],
@@ -1404,7 +1413,13 @@ def _cargas_pela_conta() -> None:
         st.error("Não há curvas de referência na base. Use o rascunho do modelo.")
         _rodape(pendencia="escolher outro caminho")
         return
+    # A curva do modelo do segmento é o ponto de partida. Um segmento sem curva
+    # própria cai na comercial genérica — e a tela diz isso, em vez de escolher
+    # em silêncio.
     do_segmento = segmento_do_perfil(estado["e_segmento"])
+    sem_curva_propria = do_segmento is None
+    if sem_curva_propria:
+        do_segmento = perfis.get("comercial_generico") or next(iter(perfis.values()))
 
     st.warning(
         "**O que você perde por este caminho.** A forma do dia vem da curva típica do "
@@ -1496,18 +1511,23 @@ def _cargas_pela_conta() -> None:
 
     # -- a forma -------------------------------------------------------------
     with st.expander("Curva de referência e hipóteses da variabilidade"):
-        opcoes = [""] + sorted(perfis, key=lambda k: perfis[k].nome)
-        rotulo_auto = (
-            "Deixar o ajuste escolher (só decide com ponta, fora de ponta ou demanda)"
-        )
+        if sem_curva_propria:
+            st.caption(
+                f"O segmento **{MODELOS[estado['e_segmento']].nome}** não tem curva "
+                f"própria na base; o ponto de partida é **{do_segmento.nome}**."
+            )
+        opcoes = ["", "auto"] + sorted(perfis, key=lambda k: perfis[k].nome)
+        rotulos_fixos = {
+            "": f"A do modelo do segmento ({do_segmento.nome})",
+            "auto": "Deixar o ajuste escolher entre todas (só decide com ponta, fora de "
+                    "ponta ou demanda)",
+        }
         st.selectbox(
-            "Perfil típico", opcoes, key="e_conta_perfil",
-            format_func=lambda k: rotulo_auto if k == "" else perfis[k].nome + (
-                " — o do segmento" if do_segmento is not None and k == do_segmento.id else ""
-            ),
-            help="Com só o consumo do mês, toda forma fecha exatamente e vale o perfil do "
-                 "segmento. Com ponta, fora de ponta e demanda medida, a forma que "
-                 "reproduz esses números com menos deformação é a escolhida.",
+            "Curva de referência", opcoes, key="e_conta_perfil",
+            format_func=lambda k: rotulos_fixos.get(k) or perfis[k].nome,
+            help="O padrão é a curva do modelo do segmento. A escolha automática só "
+                 "decide com ponta, fora de ponta ou demanda medida — com o total do "
+                 "mês apenas, toda forma fecha exatamente.",
         )
         colunas = st.columns(2)
         colunas[0].slider(
@@ -1528,14 +1548,66 @@ def _cargas_pela_conta() -> None:
         return
 
     escolhido = estado["e_conta_perfil"]
-    if escolhido:
-        ajuste = ajustar(conta, perfis[escolhido])
-    else:
+    if escolhido == "auto":
         ajuste = ajustar_melhor_perfil(conta, preferido=do_segmento)
+    else:
+        ajuste = ajustar(conta, perfis.get(escolhido) or do_segmento)
+    ajustado = ajuste
+
+    # -- a edição ------------------------------------------------------------
+    # A assinatura prende a edição ao ajuste sobre o qual ela foi feita: se a
+    # conta ou a curva de referência mudam, o editor volta para a curva nova.
+    assinatura = (ajuste.perfil.id, repr(sorted(conta.resumo().items())))
+    if estado.get("e_conta_assinatura_edicao") != assinatura:
+        estado["e_conta_curva_editada"] = None
+        estado["e_conta_assinatura_edicao"] = assinatura
+    with st.expander("Editar a curva do dia de operação"):
+        st.caption(
+            "Quem conhece a instalação sabe o que a curva típica não sabe — o chuveiro "
+            "das sete, a máquina que liga às cinco. Reescreva as horas que quiser; o dia "
+            "fechado acompanha a hora mais vazia."
+        )
+        st.checkbox(
+            "Manter a energia da conta (a curva editada é reescalada para fechar o mês)",
+            key="e_conta_manter_energia",
+        )
+        editada = estado.get("e_conta_curva_editada")
+        tabela = pd.DataFrame({
+            "hora": [f"{h:02d}h" for h in range(24)],
+            "kW": [float(v) for v in (editada if editada is not None else ajustado.curva_operacao_kw)],
+        })
+        resultado = st.data_editor(
+            tabela, hide_index=True, width="stretch", num_rows="fixed",
+            column_config={
+                "hora": st.column_config.TextColumn("Hora", disabled=True),
+                "kW": st.column_config.NumberColumn("kW", min_value=0.0, step=0.5, format="%.1f"),
+            },
+            key=f"editor_curva_{abs(hash(assinatura))}_{estado['e_conta_edicao_geracao']}",
+        )
+        digitada = [float(v) if v is not None else 0.0 for v in resultado["kW"]]
+        if np.allclose(digitada, ajustado.curva_operacao_kw, rtol=1e-6, atol=1e-6):
+            estado["e_conta_curva_editada"] = None
+        else:
+            estado["e_conta_curva_editada"] = digitada
+        if estado.get("e_conta_curva_editada") is not None:
+            if st.button("Descartar a edição e voltar à curva ajustada"):
+                estado["e_conta_curva_editada"] = None
+                estado["e_conta_edicao_geracao"] += 1
+                st.rerun()
+    if estado.get("e_conta_curva_editada") is not None:
+        try:
+            ajuste = ajustado.com_curva_editada(
+                estado["e_conta_curva_editada"],
+                manter_energia=bool(estado["e_conta_manter_energia"]),
+            )
+        except ValueError as exc:
+            st.error(f"A curva editada não serve: {exc}")
+            estado["e_conta_curva_editada"] = None
+            ajuste = ajustado
     estado["e_ajuste_conta"] = ajuste
 
     # -- o resultado ---------------------------------------------------------
-    st.markdown("##### A curva ajustada")
+    st.markdown("##### A curva editada" if ajuste.editada else "##### A curva ajustada")
     colunas = st.columns(4)
     _cartao(colunas[0], "Dia de operação", f"{ajuste.consumo_diario_operacao_kwh:.0f} kWh")
     _cartao(colunas[1], "Demanda média", f"{ajuste.demanda_media_kw:.1f} kW")
@@ -1548,6 +1620,8 @@ def _cargas_pela_conta() -> None:
         + f" · carga de base {ajuste.carga_base_kw:.1f} kW"
     )
     series = {"dia de operação": ajuste.curva_operacao_kw}
+    if ajuste.editada:
+        series["curva ajustada (antes da edição)"] = ajustado.curva_operacao_kw
     if conta.dias_operacao_semana < 7:
         series["dia fechado"] = ajuste.curva_fechado_kw
     if do_segmento is not None and do_segmento.id != ajuste.perfil.id:
