@@ -1,0 +1,362 @@
+% ============================================================================
+%  pace-apresentacao.sty — o tema visual da PACE para apresentações (beamer)
+%
+%  A apresentação comercial tem duas metades, e o tema tem dois modos para
+%  elas: o ESCURO (preto da marca, texto quase branco, âmbar de destaque) para
+%  a proposta em si, e o CLARO (branco quente, texto preto) para o anexo
+%  técnico. Chame \modoescuro ou \modoclaro antes do frame; tudo que depende
+%  do modo — cor do cartão, da tabela, da logo — troca junto.
+%
+%  As cores são as de `aurum/marca.py`, medidas na logo. Não invente tons
+%  aqui: se a marca mudar, muda lá primeiro.
+% ============================================================================
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{pace-apresentacao}[2026/09/10 Tema visual da PACE para beamer]
+
+\RequirePackage[utf8]{inputenc}
+\RequirePackage[T1]{fontenc}
+\RequirePackage[brazil]{babel}
+\RequirePackage[defaultfam,tabular,lining]{montserrat}
+\RequirePackage{textcomp}
+\RequirePackage{graphicx}
+\RequirePackage{tikz}
+\usetikzlibrary{calc,positioning,fadings,shapes.misc}
+\RequirePackage{pgfplots}
+\pgfplotsset{compat=1.18}
+\RequirePackage{booktabs,array,colortbl,tabularx,multirow}
+\RequirePackage{fontawesome5}
+\RequirePackage{tcolorbox}
+\tcbuselibrary{skins}
+\RequirePackage{etoolbox}
+
+% ----------------------------------------------------------------------------
+%  Cores da marca (ver aurum/marca.py)
+% ----------------------------------------------------------------------------
+\definecolor{pretopace}{HTML}{161615}
+\definecolor{amarelopace}{HTML}{F8C112}
+\definecolor{grafitepace}{HTML}{242422}
+\definecolor{carvaopace}{HTML}{1C1C1A}
+\definecolor{cinzapace}{HTML}{8A8A85}
+\definecolor{cinzaclaro}{HTML}{E8E8E4}
+\definecolor{brancopace}{HTML}{FAFAF8}
+% Apoio: semáforo e uma terceira série de gráfico.
+\definecolor{verdepace}{HTML}{2E7D52}
+\definecolor{vermelhoaviso}{HTML}{B4451F}
+\definecolor{azulapoio}{HTML}{3B6EA5}
+
+% Superfícies derivadas. O cartão escuro é o preto da marca clareado, para
+% que o calor do preto continue; o cartão claro é branco puro sobre o branco
+% quente do fundo, com uma borda quase invisível.
+\definecolor{cartaoescuro}{HTML}{262624}
+\definecolor{cartaoclaro}{HTML}{FFFFFF}
+\definecolor{celulaescura}{HTML}{31312E}
+\definecolor{verdeescuro}{HTML}{1F4A34}
+\definecolor{vermelhoescuro}{HTML}{5A2C1C}
+\definecolor{verdeclaro}{HTML}{DCEFE3}
+\definecolor{vermelhoclaro}{HTML}{F5DED3}
+% Texto secundário. O cinza da marca (#8A8A85) foi medido para superfície,
+% não para letra: sobre o preto ele passa, sobre o branco quente fica com
+% contraste 3,3:1 e some. Cada modo ganha o seu cinza de texto, os dois
+% acima de 7:1 contra o fundo — legível em projetor ruim.
+\definecolor{cinzatextoescuro}{HTML}{C4C4BE}
+\definecolor{cinzatextoclaro}{HTML}{5A5A55}
+
+% ----------------------------------------------------------------------------
+%  Pesos da Montserrat
+%
+%  A família tem nove pesos e o \bfseries usa o Bold (700), pesado demais para
+%  título de slide. O tema usa três: Light para subtítulo e frase de capa,
+%  Medium para rótulo de tabela e título de cartão, SemiBold para o título
+%  do slide. O corpo fica no Regular.
+% ----------------------------------------------------------------------------
+\newcommand{\pesoleve}{\fontseries{l}\selectfont}
+\newcommand{\pesomedio}{\fontseries{medium}\selectfont}
+\newcommand{\pesosemi}{\fontseries{sb}\selectfont}
+% Rótulo pequeno em versalete espaçado — "PREPARADO PARA", "DATA".
+\RequirePackage[letterspace=120]{microtype}
+\newcommand{\rotulo}[1]{{\tiny\pesomedio\lsstyle\MakeUppercase{#1}}}
+
+% ----------------------------------------------------------------------------
+%  Logos — o caminho é relativo ao .tex principal
+% ----------------------------------------------------------------------------
+% Compilando dentro do repositório, as logos estão em ../assets/. O gerador
+% da PACEcalculator copia as logos para estaticas/ e troca a pasta em
+% dados.tex — o pacote entregue ao cliente precisa compilar sozinho.
+\newcommand{\pastalogos}{../assets/}
+\newcommand{\logoclara}{\pastalogos pace-logo-transparente.png}
+\newcommand{\logoescura}{\pastalogos pace-logo-escuro.png}
+\newcommand{\logoatual}{\logoescura}
+
+% ----------------------------------------------------------------------------
+%  Os dois modos
+% ----------------------------------------------------------------------------
+\newcommand{\modoescuro}{%
+  \setbeamercolor{background canvas}{bg=pretopace}%
+  \setbeamercolor{normal text}{fg=brancopace,bg=pretopace}%
+  \setbeamercolor{frametitle}{fg=brancopace}%
+  \setbeamercolor{framesubtitle}{fg=amarelopace}%
+  \setbeamercolor{itemize item}{fg=amarelopace}%
+  \setbeamercolor{enumerate item}{fg=amarelopace}%
+  \colorlet{corcanvas}{pretopace}%
+  \colorlet{cortexto}{brancopace}%
+  \colorlet{cortextosuave}{cinzatextoescuro}%
+  \colorlet{corcartao}{cartaoescuro}%
+  \colorlet{corcartaoborda}{cartaoescuro}%
+  \colorlet{corrotulo}{cartaoescuro}%
+  \colorlet{corrotulotexto}{cinzaclaro}%
+  \colorlet{corcelula}{brancopace}%
+  \colorlet{corcelulatexto}{pretopace}%
+  \colorlet{corcabecalho}{celulaescura}%
+  \colorlet{corlinha}{celulaescura}%
+  \colorlet{corpositivo}{verdeescuro}%
+  \colorlet{cornegativo}{vermelhoescuro}%
+  \colorlet{corpositivotexto}{brancopace}%
+  \colorlet{cornegativotexto}{brancopace}%
+  \colorlet{coricone}{amarelopace}%
+  \colorlet{coriconefundo}{celulaescura}%
+  \renewcommand{\logoatual}{\logoescura}%
+  \usebeamercolor[fg]{normal text}%
+}
+\newcommand{\modoclaro}{%
+  \setbeamercolor{background canvas}{bg=brancopace}%
+  \setbeamercolor{normal text}{fg=pretopace,bg=brancopace}%
+  \setbeamercolor{frametitle}{fg=pretopace}%
+  \setbeamercolor{framesubtitle}{fg=cinzatextoclaro}%
+  \setbeamercolor{itemize item}{fg=amarelopace}%
+  \setbeamercolor{enumerate item}{fg=amarelopace}%
+  \colorlet{corcanvas}{brancopace}%
+  \colorlet{cortexto}{pretopace}%
+  \colorlet{cortextosuave}{cinzatextoclaro}%
+  \colorlet{corcartao}{cartaoclaro}%
+  \colorlet{corcartaoborda}{cinzaclaro}%
+  \colorlet{corrotulo}{grafitepace}%
+  \colorlet{corrotulotexto}{brancopace}%
+  \colorlet{corcelula}{cartaoclaro}%
+  \colorlet{corcelulatexto}{pretopace}%
+  \colorlet{corcabecalho}{grafitepace}%
+  \colorlet{corlinha}{cinzaclaro}%
+  \colorlet{corpositivo}{verdeclaro}%
+  \colorlet{cornegativo}{vermelhoclaro}%
+  \colorlet{corpositivotexto}{verdepace!70!black}%
+  \colorlet{cornegativotexto}{vermelhoaviso!80!black}%
+  \colorlet{coricone}{pretopace}%
+  \colorlet{coriconefundo}{amarelopace}%
+  \renewcommand{\logoatual}{\logoclara}%
+  \usebeamercolor[fg]{normal text}%
+}
+
+% ----------------------------------------------------------------------------
+%  Moldura do beamer
+% ----------------------------------------------------------------------------
+\setbeamertemplate{navigation symbols}{}
+\setbeamersize{text margin left=0.9cm,text margin right=0.9cm}
+\setbeamerfont{frametitle}{size=\Large,series=\pesosemi}
+\setbeamerfont{framesubtitle}{size=\footnotesize,series=\pesoleve}
+\setbeamertemplate{itemize item}{\raisebox{0.35ex}{\scalebox{0.55}{$\blacksquare$}}}
+\setbeamertemplate{itemize subitem}{\raisebox{0.35ex}{\scalebox{0.45}{$\blacksquare$}}}
+\setbeamertemplate{caption}{\raggedright\insertcaption\par}
+\setlength{\leftmargini}{1.1em}
+
+% Cabeçalho: título e subtítulo à esquerda, logo à direita, um fio abaixo.
+% O fio é o mesmo do cabeçalho do estudo em PDF — a apresentação e o estudo
+% precisam parecer da mesma casa.
+\setbeamertemplate{frametitle}{%
+  \vspace*{0.32cm}%
+  \begin{minipage}[b]{0.80\textwidth}%
+    \raggedright
+    {\usebeamerfont{frametitle}\usebeamercolor[fg]{frametitle}\insertframetitle\par}%
+    \ifx\insertframesubtitle\@empty\else
+      \vspace{0.12cm}%
+      {\usebeamerfont{framesubtitle}\usebeamercolor[fg]{framesubtitle}\insertframesubtitle\par}%
+    \fi
+  \end{minipage}\hfill
+  \begin{minipage}[b]{0.18\textwidth}%
+    \raggedleft\includegraphics[height=0.62cm]{\logoatual}%
+  \end{minipage}\par
+  \vspace{0.16cm}%
+  {\color{corlinha}\rule{\textwidth}{0.4pt}}\par
+  \vspace{0.05cm}%
+}
+
+% Rodapé: empresa à esquerda, número da página à direita. Discreto.
+% \newcommand* de propósito: o \ifx abaixo compara com \@empty, que não é
+% \long, e um \newcommand comum seria \long e nunca daria igual.
+\newcommand*{\rodapeempresa}{PACE Inteligência Energética}
+\newcommand*{\rodapereferencia}{}
+\setbeamertemplate{footline}{%
+  \leavevmode\hbox to \paperwidth{%
+    \hspace*{0.9cm}%
+    {\tiny\pesomedio\color{cortextosuave}\rodapeempresa\ifx\rodapereferencia\@empty\else\ \textperiodcentered\ \rodapereferencia\fi}%
+    \hfill
+    {\tiny\pesomedio\color{cortextosuave}\insertframenumber}%
+    \hspace*{0.9cm}}%
+  \vskip 0.38cm
+}
+
+% ----------------------------------------------------------------------------
+%  Fundo de foto com véu escuro (capa e encerramento)
+% ----------------------------------------------------------------------------
+\newcommand{\fundofoto}[1]{%
+  \begin{tikzpicture}
+    \clip (0,0) rectangle (\paperwidth,\paperheight);
+    \node[anchor=center,inner sep=0pt] at (0.5\paperwidth,0.5\paperheight)
+      {\includegraphics[height=\paperheight]{#1}};
+    \fill[pretopace,opacity=0.42] (0,0) rectangle (\paperwidth,\paperheight);
+    \fill[pretopace,path fading=north,opacity=0.9] (0,0) rectangle (\paperwidth,0.55\paperheight);
+  \end{tikzpicture}%
+}
+
+% ----------------------------------------------------------------------------
+%  Peças de layout
+% ----------------------------------------------------------------------------
+% Um ícone do FontAwesome dentro de um círculo.
+\newcommand{\iconecirculo}[2][0.36cm]{%
+  \tikz[baseline=(c.base)]{%
+    \node[circle,fill=coriconefundo,minimum size=2.2*#1,inner sep=0pt] (c) {};
+    \node[text=coricone] at (c) {\large #2};
+  }%
+}
+% Ícone num círculo âmbar com o ícone preto — os passos do processo.
+\newcommand{\iconepasso}[1]{%
+  \tikz[baseline=(c.base)]{%
+    \node[circle,fill=amarelopace,minimum size=1.15cm,inner sep=0pt] (c) {};
+    \node[text=pretopace] at (c) {\LARGE #1};
+  }%
+}
+% O visto âmbar usado nas tabelas de "incluído".
+\newcommand{\visto}{\textcolor{amarelopace}{\faCheckCircle}}
+% Uma marca de "sim" âmbar para listas curtas.
+\newcommand{\itemvisto}{\item[\textcolor{amarelopace}{\faCheck}]}
+
+% Cartão: a superfície secundária, sobre o fundo do modo.
+\newtcolorbox{cartao}[1][]{%
+  enhanced,nobeforeafter,boxrule=0.4pt,arc=4pt,
+  % O tcolorbox pinta o texto de preto por padrão, ignorando a cor do
+  % beamer — no modo escuro isso é título preto em cartão preto.
+  colback=corcartao,colframe=corcartaoborda,coltext=cortexto,
+  left=9pt,right=9pt,top=8pt,bottom=8pt,
+  fontupper=\small,
+  #1
+}
+% Cartão de valor: ícone em cima, título em negrito, texto curto.
+\newcommand{\cartaovalor}[3]{%
+  \begin{minipage}[t]{0.47\linewidth}\centering
+    \iconecirculo{#1}\\[4pt]
+    {\small\pesosemi #2}\\[2pt]
+    {\scriptsize\color{cortextosuave}#3}
+  \end{minipage}%
+}
+% Título de bloco na coluna esquerda, com o texto embaixo.
+\newcommand{\blocotexto}[2]{%
+  {\small\pesosemi #1\par}\vspace{2pt}
+  {\footnotesize\color{cortextosuave}#2\par}\vspace{8pt}
+}
+
+% ----------------------------------------------------------------------------
+%  Tabela chave–valor: rótulo à esquerda em célula escura, valor à direita em
+%  célula clara. As linhas são separadas por um fio da cor do fundo, o que
+%  dá o efeito de células soltas sem desenhar borda nenhuma.
+% ----------------------------------------------------------------------------
+\newenvironment{tabelachave}[2][4.4cm]{%
+  \renewcommand{\arraystretch}{1.15}%
+  \setlength{\arrayrulewidth}{1.6pt}%
+  \arrayrulecolor{corcanvas}%
+  \footnotesize
+  \begin{tabular}{%
+    |>{\columncolor{corrotulo}\color{corrotulotexto}\pesomedio\centering\arraybackslash}p{#1}%
+    |>{\columncolor{corcelula}\color{corcelulatexto}\centering\arraybackslash}p{#2}|}
+  \hline
+}{%
+  \end{tabular}%
+  \arrayrulecolor{black}%
+}
+\newcommand{\linha}[2]{#1 & #2 \\ \hline}
+% A linha que importa — o investimento — em âmbar.
+\newcommand{\linhadestaque}[2]{%
+  \cellcolor{amarelopace}\color{pretopace}\pesosemi #1 & \cellcolor{corcelula}\pesosemi #2 \\ \hline}
+% Uma linha cujo valor é "está incluído".
+\newcommand{\linhavisto}[1]{#1 & \visto \\ \hline}
+
+% ----------------------------------------------------------------------------
+%  Tabela de dados (várias colunas): cabeçalho escuro, corpo claro, fio fino.
+% ----------------------------------------------------------------------------
+\newenvironment{tabeladados}[1]{%
+  \renewcommand{\arraystretch}{1.9}%
+  \setlength{\tabcolsep}{3pt}%
+  \setlength{\arrayrulewidth}{0.4pt}%
+  \arrayrulecolor{corlinha}%
+  \scriptsize
+  \begin{tabular}{#1}
+}{%
+  \end{tabular}%
+  \arrayrulecolor{black}%
+}
+\newcommand{\cab}[1]{\cellcolor{corcabecalho}\color{brancopace}\pesomedio #1}
+% Especificadores de coluna prontos: \colrotulo{largura} para a primeira
+% coluna (escura), \colvalor{largura} para as demais, \collogo{largura} para
+% uma coluna de imagens. As três centram na vertical, o que mantém alinhado
+% um cabeçalho que quebra em duas linhas.
+\newcolumntype{\colrotulo}[1]{>{\columncolor{corrotulo}\color{corrotulotexto}\pesomedio\centering\arraybackslash}m{#1}}
+\newcolumntype{\colvalor}[1]{>{\columncolor{corcelula}\color{corcelulatexto}\centering\arraybackslash}m{#1}}
+\newcolumntype{\collogo}[1]{>{\columncolor{corcelula}\centering\arraybackslash}m{#1}}
+% Célula com valor positivo ou negativo — o semáforo do fluxo de caixa.
+\newcommand{\positivo}[1]{\cellcolor{corpositivo}\color{corpositivotexto}#1}
+\newcommand{\negativo}[1]{\cellcolor{cornegativo}\color{cornegativotexto}#1}
+% ----------------------------------------------------------------------------
+%  Gráfico de linha no estilo do modo (eixos e grade discretos)
+% ----------------------------------------------------------------------------
+\pgfplotsset{
+  pace/.style={
+    width=\linewidth,height=5.4cm,
+    axis line style={cortextosuave!60},
+    tick style={cortextosuave!60},
+    ticklabel style={font=\tiny,color=cortextosuave},
+    label style={font=\tiny,color=cortextosuave},
+    grid=major,grid style={dotted,cortextosuave!35},
+    % Legenda embaixo do eixo, numa linha: dentro da área ela sempre acaba
+    % em cima de alguma curva.
+    legend style={font=\tiny,draw=none,fill=none,text=cortexto,
+                  at={(0.5,-0.2)},anchor=north,cells={anchor=west},
+                  /tikz/every even column/.append style={column sep=0.4cm}},
+    legend columns=-1,
+    scaled y ticks=false,
+    % Em milhares: "1.286.200" no eixo obriga o leitor a contar zeros.
+    y filter/.code={\pgfmathparse{\pgfmathresult/1000}},
+    yticklabel style={/pgf/number format/.cd,fixed,precision=0,use comma,1000 sep={.}},
+    every axis plot/.append style={thick,mark=*,mark size=1.4pt},
+    cycle list={
+      {amarelopace,mark options={fill=amarelopace}},
+      {cortexto,mark options={fill=cortexto}},
+      {azulapoio!80!white,mark options={fill=azulapoio!80!white}},
+    },
+  },
+}
+
+% Nota curta encostada no rodapé — a ressalva da visita técnica, o "valores
+% a valor presente". Fica fora do fluxo do texto para nunca empurrar a tabela.
+\newcommand{\notaderodape}[1]{%
+  \begin{tikzpicture}[remember picture,overlay]
+    \node[anchor=south,text width=\textwidth,align=center,
+          font=\scriptsize,text=cortextosuave]
+      at ($(current page.south)+(0,0.72)$) {#1};
+  \end{tikzpicture}%
+}
+
+% ----------------------------------------------------------------------------
+%  Slide divisor de seção
+% ----------------------------------------------------------------------------
+\newcommand{\slidedivisor}[2]{%
+  \modoescuro
+  \begin{frame}[plain]
+    \begin{tikzpicture}[remember picture,overlay]
+      \node[anchor=west,text=brancopace,font=\Huge\pesosemi] at ($(current page.west)+(1.1,0.4)$) {#1};
+      \node[anchor=west,text=amarelopace,font=\normalsize\pesoleve] at ($(current page.west)+(1.15,-0.45)$) {#2};
+      \fill[amarelopace] ($(current page.west)+(1.15,-0.05)$) rectangle ++(1.6,0.06);
+      \node[anchor=south east] at ($(current page.south east)+(-0.9,0.5)$) {\includegraphics[height=0.62cm]{\logoescura}};
+    \end{tikzpicture}
+  \end{frame}
+}
+
+% O documento começa no modo escuro: as cores dependentes do modo precisam
+% existir antes do \begin{document}, porque o beamer avalia os moldes cedo.
+\modoescuro

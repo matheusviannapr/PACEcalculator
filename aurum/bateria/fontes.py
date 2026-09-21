@@ -912,7 +912,15 @@ def _capex_do_conjunto(
         # Pela capacidade **nominal**, e não pela útil: o bloco é vendido pela
         # placa, e um banco de 5 kWh nominais entrega 4,6 kWh úteis. Contar
         # pelos úteis pedia um segundo bloco onde um basta.
-        baterias = preco_da_bateria(conjunto.capacidade_nominal_kwh)
+        # O bloco das premissas, e não o padrão do módulo de kits: a premissa
+        # é a única fonte do preço do banco, e com um bloco que não é de 5 kWh
+        # o padrão devolvia outro número — 12,8 kWh viravam três blocos de 5.
+        if premissas.bloco_bateria_kwh > 0 and premissas.bloco_bateria_brl > 0:
+            baterias = preco_da_bateria(
+                conjunto.capacidade_nominal_kwh,
+                premissas.bloco_bateria_kwh, premissas.bloco_bateria_brl)
+        else:
+            baterias = preco_da_bateria(conjunto.capacidade_nominal_kwh)
         if baterias > 0:
             # Sem os 35% de instalação: o bloco já é preço de módulo pronto,
             # com caixa, BMS e a instalação do módulo dentro.

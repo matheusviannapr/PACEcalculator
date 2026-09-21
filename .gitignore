@@ -8,6 +8,7 @@ _legacy/
 *.py[cod]
 .pytest_cache/
 .cache/
+.runtime-pace/
 outputs/
 propostas/
 leads/
@@ -17,3 +18,7 @@ leads/
 *.out
 *.toc
 *.synctex.gz
+*.nav
+*.snm
+*.vrb
+apresentacao/*.jpg
