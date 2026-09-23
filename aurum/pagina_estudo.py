@@ -2226,20 +2226,21 @@ def _passo_equipamento() -> None:
     # empacotamento usou, e o inversor é o menor que aceita o gerador com
     # razão CC/CA de até 1,35. O primeiro da lista é o maior do catálogo, e
     # numa casa de 10 kWp ele entrava na proposta como "80 kW string".
-    if "e_modulo_sel" not in st.session_state:
-        st.session_state["e_modulo_sel"] = next(
+    if "e_modulo_sel" not in st.session_state or "e_inversor_sel" not in st.session_state:
+        modulo_do_telhado = next(
             (m for m in modulos if layout is not None and m.modelo == layout.modulo.modelo),
-            modulos[0],
+            None,
         )
-    if "e_inversor_sel" not in st.session_state:
-        st.session_state["e_inversor_sel"] = _inversor_padrao(
-            inversores,
+        modulo_padrao, inversor_padrao = _par_padrao(
+            modulos, inversores,
             float(getattr(layout, "potencia_kwp", 0.0) or kwp_alvo
                   or st.session_state.get("e_kwp") or 0.0),
             float(st.session_state.get("e_tensao_rede") or 380.0),
-            modulo=st.session_state["e_modulo_sel"],
+            modulo_fixo=modulo_do_telhado,
             disponiveis=disponiveis,
         )
+        st.session_state.setdefault("e_modulo_sel", modulo_padrao)
+        st.session_state.setdefault("e_inversor_sel", inversor_padrao)
     escolha_modulo = colunas[0].selectbox(
         "Módulo fotovoltaico", modulos, format_func=str, key="e_modulo_sel")
     escolha_inversor = colunas[1].selectbox(
@@ -2311,33 +2312,40 @@ def _passo_equipamento() -> None:
     )
 
 
-def _inversor_padrao(inversores, kwp_alvo: float, tensao_rede_v: float, modulo=None,
-                     disponiveis: int | None = None):
+def _par_padrao(modulos, inversores, kwp_alvo: float, tensao_rede_v: float,
+                modulo_fixo=None, disponiveis: int | None = None):
     """
-    O menor inversor que aceita o gerador — e que fecha um arranjo de verdade.
+    O par módulo/inversor com que a tela abre: o menor que fecha um arranjo.
 
-    Só a potência não basta: o menor inversor do catálogo pode não acender com
-    o módulo escolhido (a string curta não chega à tensão de partida), e um
-    padrão que abre a tela com "este par não fecha" é pior que um padrão um
-    degrau maior. Por isso a viabilidade da memória entra no critério.
+    Módulo e inversor não se escolhem em separado. A corrente do módulo tem
+    que caber no MPPT: um inversor de 12,5 A por tracker — o degrau de 4 a
+    15 kW da GoodWe — não recebe módulo de 620 Wp, que puxa 14 A, e abrir a
+    tela nesse par mostra "este par não fecha" para quem ainda não escolheu
+    nada. Com telhado marcado o módulo é o do empacotamento e só o inversor
+    varia; sem ele, os dois variam, do maior módulo para o menor.
+
+    A ordem dos inversores é do menor para o maior entre os que aceitam o
+    gerador com razão CC/CA de até 1,35 — o primeiro da lista do catálogo é o
+    maior de todos, e numa casa de 10 kWp ele entrava na proposta como
+    "80 kW string".
     """
-    if kwp_alvo <= 0:
-        return inversores[0]
+    candidatos_modulo = [modulo_fixo] if modulo_fixo is not None else list(modulos)
     do_menor = sorted(inversores, key=lambda i: i.potencia_ca_w)
+    if kwp_alvo <= 0:
+        return candidatos_modulo[0], inversores[0]
     que_cabem = [
         i for i in do_menor
         if i.potencia_ca_w >= kwp_alvo * 1000.0 / 1.35
         and (not hasattr(i, "atende_rede") or i.atende_rede(tensao_rede_v))
     ] or do_menor
-    if modulo is None:
-        return que_cabem[0]
 
     from .pv.memoria import memoria_do_arranjo
 
     for inversor in que_cabem:
-        if memoria_do_arranjo(modulo, inversor, disponiveis).viavel:
-            return inversor
-    return que_cabem[0]
+        for modulo in candidatos_modulo:
+            if memoria_do_arranjo(modulo, inversor, disponiveis).viavel:
+                return modulo, inversor
+    return candidatos_modulo[0], que_cabem[0]
 
 
 def _para_latex(formula: str) -> str:

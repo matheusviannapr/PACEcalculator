@@ -219,17 +219,37 @@ def memoria_do_arranjo(
         return MemoriaCalculo(
         modulo, inversor, 0, 0, 1, 0, passos, avisos, temp_min_c, temp_max_c)
 
-    # Adota o máximo da faixa: string mais longa significa menos strings, menos
-    # cabo e menos perda, e a tensão mais alta melhora o rendimento do inversor.
+    # A string mais longa que a tensão permite é a preferida — menos cabo, menos
+    # perda, tensão em que o inversor rende mais. Mas ela precisa caber na
+    # potência do inversor: num inversor de 5 kW, uma string de 17 módulos de
+    # 640 Wp são 10,9 kWp, o dobro do que ele aceita, e o arranjo dava zero
+    # string — "este par não fecha" para um par que qualquer projetista monta
+    # encurtando a string. Por isso a busca desce da faixa até a primeira
+    # string que cabe.
+    teto_kwp = DC_AC_MAX * inversor.potencia_ca_kw
     n_serie = faixa_max
+    encurtou = False
+    for candidato in range(faixa_max, faixa_min - 1, -1):
+        if candidato * modulo.potencia_wp / 1000.0 <= teto_kwp:
+            n_serie = candidato
+            encurtou = candidato < faixa_max
+            break
     passos.append(PassoCalculo(
         titulo="Módulos em série adotados",
-        formula="N_mín ≤ N_série ≤ N_máx, adotando o máximo",
-        substituicao=f"{faixa_min} ≤ N_série ≤ {faixa_max}",
+        formula="N_mín ≤ N_série ≤ N_máx, o maior cuja string cabe no inversor",
+        substituicao=(
+            f"{faixa_min} ≤ N_série ≤ {faixa_max}"
+            + (f", limitado por {teto_kwp:.1f} kWp de teto CC" if encurtou else "")
+        ),
         resultado=f"{n_serie} módulos por string",
         comentario=(
-            "Adota-se o máximo da faixa: string mais longa usa menos cabo, tem menos "
-            "perda e trabalha numa tensão em que o inversor rende mais."
+            "A string mais longa usa menos cabo, tem menos perda e trabalha numa tensão "
+            "em que o inversor rende mais — então adota-se o máximo da faixa."
+            + (
+                " Aqui ela foi encurtada: no comprimento máximo, uma única string já "
+                "passaria do teto de potência CC deste inversor."
+                if encurtou else ""
+            )
         ),
     ))
 
