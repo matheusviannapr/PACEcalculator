@@ -72,7 +72,7 @@ def _ate_o_consumo(at: AppTest, simulacoes: int = 50) -> AppTest:
 def _ate_o_equipamento(at: AppTest, kwp: float = 50.0) -> AppTest:
     """Segue do consumo até o dimensionamento fechado."""
     _continuar(at)  # consumo -> telhado
-    at.radio[0].set_value("Já sei a potência").run()
+    at.radio[0].set_value("potencia").run()
     _por_rotulo(at.number_input, "Potência do sistema").set_value(kwp).run()
     _continuar(at)  # telhado -> equipamento
     return at
@@ -293,6 +293,66 @@ def test_a_curva_do_segmento_e_o_padrao_e_a_edicao_chega_ao_ajuste():
 
     _continuar(at)
     assert at.session_state["e_ensemble_total"].metadados["ajuste"]["editada"] is True
+
+
+def test_compensar_a_conta_dimensiona_pela_conta_e_a_tela_confirma():
+    """
+    Escolhido "compensar a conta", é a conta que define a potência.
+
+    Antes, um levantamento de rascunho dimensionava pela própria estimativa:
+    numa casa com conta de 300 kWh/mês o modelo simulava 1.240 kWh/mês e a
+    usina saía quatro vezes maior que a conta que ela deveria abater.
+    """
+    at = _ate_o_consumo(_abrir())
+    _continuar(at)  # consumo -> telhado
+    at.radio[0].set_value("compensar").run()
+    assert not at.exception, at.exception
+
+    simulado = at.session_state["e_ensemble_total"].energia_diaria_kwh().mean() * 365
+    alvo = 7200.0  # 600 kWh/mês — metade do que este levantamento de rascunho simula
+    _por_rotulo(at.number_input, "Consumo anual a abater").set_value(alvo).run()
+    assert alvo < simulado / 2, "o caso só prova algo se a conta for bem menor"
+    assert at.session_state["e_kwp"] == 0.0, "zero deixa o estudo dimensionar"
+    # A tela converte o alvo em potência antes de escolher equipamento.
+    kwp_alvo = at.session_state["e_kwp_alvo"]
+    assert 4.0 < kwp_alvo < 8.0, kwp_alvo
+
+    at = _ate_a_meta_sem_telhado(at)
+    _por_rotulo(at.select_slider, "Autonomia alvo").set_value(3).run()
+    _por_rotulo(at.multiselect, "Durações de falta").set_value([1.0, 3.0]).run()
+    _por_rotulo(at.slider, "Amostras por combinação").set_value(20).run()
+    _por_rotulo(at.slider, "Conjuntos a avaliar").set_value(2).run()
+    _por_rotulo(at.button, "Rodar o estudo").click().run()
+    assert not at.exception, at.exception
+
+    estudo = at.session_state["e_estudo"]
+    assert estudo.configuracao.consumo_anual_kwh == pytest.approx(alvo)
+    compensacao = estudo.compensacao
+    assert compensacao["definida_por"] == "consumo a compensar"
+    assert compensacao["alvo_kwh"] == pytest.approx(alvo)
+    # A usina segue a conta, não o levantamento. O arranjo fecha em módulos
+    # inteiros, então a cobertura não é exata — mas fica perto de 100%, e
+    # muito longe dos 200% que o consumo simulado produziria.
+    assert 0.75 <= compensacao["cobertura"] <= 1.25, compensacao
+    assert estudo.potencia_fv_kwp < simulado / estudo.serie.anual_kwh_por_kwp() * 0.7
+    # E a tela do resultado afirma isso, em vez de deixar implícito.
+    mensagens = (
+        [m.value for m in at.success]
+        + [m.value for m in at.warning]
+        + [m.value for m in at.info]
+    )
+    assert any("cobre" in m for m in mensagens), mensagens
+
+
+def _ate_a_meta_sem_telhado(at):
+    """Do passo do telhado até a Meta, sem marcar cobertura."""
+    _continuar(at)  # telhado -> equipamento
+    _por_rotulo(at.button, "Analisar com bateria").click().run()
+    _por_rotulo(at.slider, "Simulações de Monte Carlo").set_value(50).run()
+    _por_rotulo(at.button, "Simular a demanda").click().run()
+    _continuar(at)
+    assert at.session_state["e_passo"] == META
+    return at
 
 
 def test_o_inversor_padrao_cabe_no_gerador_e_a_escolha_sobrevive_a_navegacao():
@@ -565,7 +625,7 @@ def test_tirar_um_nivel_do_backup_e_definitivo():
     """
     at = _ate_o_consumo(_abrir())
     _continuar(at)                       # consumo -> telhado
-    at.radio[0].set_value("Já sei a potência").run()
+    at.radio[0].set_value("potencia").run()
     _por_rotulo(at.number_input, "Potência do sistema").set_value(20.0).run()
     _continuar(at)                       # telhado -> equipamento
     _por_rotulo(at.button, "Analisar com bateria").click().run()

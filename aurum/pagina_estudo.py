@@ -38,6 +38,7 @@ from .bateria.estudo import ConfiguracaoEstudo, executar_estudo
 from .bateria.excedencia import avaliar_inversores, potencia_para_excedencia
 from .bateria.fontes import Fatura, Gerador
 from .config import get_settings
+from .interface import guia, etapas, ajuda
 from .demanda import simular_ensemble
 from .demanda.analise import analisar
 from .demanda.biblioteca import (
@@ -70,16 +71,16 @@ PASSOS: tuple[tuple[int, str, str, str], ...] = (
     (0, "Cargas", "O que consome energia nesse lugar?",
      "Comece de um modelo, da sua planilha, ou monte equipamento por equipamento."),
     (0, "Consumo", "Como esse lugar consome energia?",
-     "A análise completa da demanda: distribuição dos picos, quem os causa, e quando."),
+     "Confira quanto o imóvel consome e quais aparelhos exigem mais energia ao mesmo tempo."),
     (0, "Telhado", "Onde os módulos vão ficar?",
      "Marque a cobertura no mapa; daí saem a área, a orientação e quantos módulos cabem."),
     (0, "Equipamento", "Que módulo e que inversor?",
-     "Escolha do catálogo e a memória de cálculo do arranjo, string por string."),
+     "Confira a combinação de painéis e inversor indicada para o sistema."),
     (1, "Backup", "O que não pode faltar quando a luz cai?",
-     "É a escolha que mais muda o preço: alimentar o prédio inteiro em ilha custa três vezes mais."),
+     "Selecione os equipamentos essenciais para dimensionar a energia de reserva."),
     (1, "Meta", "Quanto tempo sem luz precisa aguentar?",
      "A partir daqui é só cálculo: a varredura testa cada duração começando em cada hora do ano."),
-    (1, "Resultado", "O que comprar",
+    (1, "Resultado", "Seu resultado, explicado",
      "A resposta, e tudo que a sustenta."),
 )
 
@@ -135,6 +136,14 @@ _PADROES: dict[str, Any] = {
     #: Muda a cada "descartar": o editor precisa de chave nova para largar o
     #: que estava digitado e voltar à curva ajustada.
     "e_conta_edicao_geracao": 0,
+    #: O consumo anual que a usina existe para abater, e que fração dele. Só
+    #: valem quando a potência não vem do telhado nem é digitada à mão.
+    "e_consumo_compensar": 0.0,
+    "e_compensar_frac": 100,
+    "e_modo_solar": "telhado",
+    #: A potência que o alvo de compensação pede, estimada com a produtividade
+    #: do local. O passo do equipamento a usa como teto de módulos.
+    "e_kwp_alvo": 0.0,
     "e_ensemble_total": None,
     "e_ensemble_backup": None,
     "e_essenciais": [],
@@ -206,7 +215,10 @@ _PADROES: dict[str, Any] = {
 #: conta digitada continua lá quando o usuário volta ao passo das cargas, e a
 #: fração do backup chega ao estudo em vez de voltar a 100%.
 _CHAVES_PERSISTENTES = tuple(
-    chave for chave in _PADROES if chave.startswith("e_conta_") or chave == "e_fracao_backup"
+    chave for chave in _PADROES
+    if chave.startswith("e_conta_")
+    or chave in ("e_fracao_backup", "e_nome", "e_modo_solar", "e_consumo_compensar",
+                 "e_compensar_frac")
 )
 
 
@@ -282,12 +294,12 @@ def _cabecalho(indice: int) -> None:
     ativos = _passos_ativos()
     da_fase = [i for i, p in enumerate(PASSOS, start=1) if p[0] == fase and i in ativos]
     posicao = da_fase.index(indice) + 1
-    st.progress(
-        posicao / len(da_fase),
-        text=f"Fase {fase + 1} · {nome_fase} — passo {posicao} de {len(da_fase)}: {titulo}",
-    )
+    st.markdown(f'<div class="pace-eyebrow">PACE CALCULATOR / ETAPA {posicao} DE {len(da_fase)}</div>', unsafe_allow_html=True)
     st.title(pergunta)
-    st.caption(porque)
+    etapas(da_fase, indice, [p[1] for p in PASSOS])
+    guia(indice)
+    with st.sidebar:
+        ajuda(indice)
 
 
 def _rodape(
@@ -314,6 +326,8 @@ def _rodape(
         and PASSOS[seguintes[0] - 1][0] != PASSOS[passo - 1][0]
     ):
         rotulo_avancar = "Analisar com bateria →"
+    if rotulo_avancar == "Continuar →" and seguintes:
+        rotulo_avancar = f"Continuar → {PASSOS[seguintes[0] - 1][1]}"
     esquerda, direita = st.columns([1, 2])
     if passo > 1 and esquerda.button("← Voltar", width="stretch", key=f"voltar{passo}"):
         _ir(passo - 1)
@@ -344,13 +358,15 @@ def _barra_lateral() -> None:
         if fase != fase_anterior:
             st.sidebar.markdown(f"**Fase {fase + 1} · {FASES[fase][0]}**")
             fase_anterior = fase
-        icone = "✅" if indice < passo_atual else ("▶️" if indice == passo_atual else "⚪")
-        if st.sidebar.button(f"{icone} {titulo}", key=f"nav{indice}", width="stretch"):
+        icone = "←" if indice < passo_atual else ("•" if indice == passo_atual else "○")
+        if st.sidebar.button(f"{icone} {ativos.index(indice) + 1}. {titulo}", key=f"nav{indice}",
+                             width="stretch", disabled=indice > passo_atual,
+                             type="primary" if indice == passo_atual else "secondary"):
             if indice <= passo_atual:
                 _ir(indice)
 
     st.sidebar.divider()
-    st.sidebar.markdown("**O que já sei**")
+    st.sidebar.markdown("**Resumo do estudo**")
     linhas: list[str] = []
     estado = st.session_state
     if estado["e_nome"]:
@@ -358,7 +374,7 @@ def _barra_lateral() -> None:
     if estado["e_segmento"]:
         linhas.append(f"Tipo · {MODELOS[estado['e_segmento']].nome}")
     if estado["e_endereco"] or estado["e_lat"]:
-        linhas.append(f"Local · {estado['e_lat']:.3f}, {estado['e_lon']:.3f}")
+        linhas.append(f"Local · {estado['e_endereco']}" if estado["e_endereco"] else "Local · coordenadas iniciais; confirme no passo Cliente")
     cenario: Cenario | None = estado["e_cenario"]
     if cenario is not None:
         linhas.append(f"Cargas · {cenario.total_de_equipamentos()} equipamentos, "
@@ -394,10 +410,15 @@ def _barra_lateral() -> None:
             _catalogo.clear()
             st.rerun()
 
-    if st.sidebar.button("Recomeçar do zero", width="stretch"):
-        for chave, valor in _PADROES.items():
-            st.session_state[chave] = valor
-        st.rerun()
+    with st.sidebar.expander("Novo estudo"):
+        st.caption("Isso apaga os dados deste estudo nesta sessão. Baixe o relatório antes de recomeçar.")
+        confirmar = st.checkbox("Quero descartar o estudo atual", key="confirmar_reinicio")
+        if st.button("Recomeçar do zero", width="stretch", disabled=not confirmar):
+            for chave in list(st.session_state):
+                if chave.startswith("e_") or chave == "confirmar_reinicio":
+                    del st.session_state[chave]
+            _iniciar()
+            st.rerun()
 
 
 # ============================================================================
@@ -877,182 +898,188 @@ def _passo_cliente() -> None:
     # tela já nasce respondido.
     _vistoria_na_primeira_tela()
 
-    # `key=` em vez de atribuir o retorno: a barra lateral é desenhada antes
-    # do corpo da página e leria o valor anterior, ficando um rerun atrás do
-    # que o usuário acabou de digitar. Com a chave, o Streamlit guarda o valor
-    # no estado antes de qualquer widget rodar.
-    st.text_input(
-        "Nome do cliente ou do local",
-        key="e_nome",
-        placeholder="Ex.: Hotel Central",
-    )
-
-    st.markdown("##### Que tipo de instalação é?")
-    st.caption(
-        "Serve para duas coisas: montar o rascunho das cargas e escolher a curva de "
-        "consumo de referência com que o resultado será conferido depois."
-    )
-    ids = list(MODELOS)
-    atual = st.session_state["e_segmento"]
-    escolha = st.selectbox(
-        "Tipo", ids, index=ids.index(atual) if atual in ids else 0,
-        format_func=lambda i: MODELOS[i].nome, label_visibility="collapsed",
-    )
-    if escolha != st.session_state["e_segmento"]:
-        # Trocar de segmento invalida o rascunho de cargas montado do anterior.
-        st.session_state["e_segmento"] = escolha
-        st.session_state["e_cenario"] = None
-        st.session_state["e_ensemble_backup"] = None
-
-    modelo = MODELOS[escolha]
-    st.info(
-        f"**{modelo.nome}** vem com {len(modelo.comodos)} cômodos prontos: "
-        + ", ".join(c.nome for c in modelo.comodos)
-        + ". Você ajusta tudo no próximo passo."
-    )
-
-    st.divider()
-    st.markdown("##### Este estudo tem energia solar?")
-    st.caption(
-        "Se não tiver, os passos de telhado e de equipamento fotovoltaico não "
-        "aparecem — e o relatório não fala de geração em lugar nenhum."
-    )
-    com_solar = st.radio(
-        "Tem solar",
-        [True, False],
-        index=0 if st.session_state.get("e_com_solar", True) else 1,
-        horizontal=True,
-        format_func=lambda v: (
-            "Sim — dimensionar o sistema fotovoltaico" if v
-            else "Não — só armazenamento e continuidade"
-        ),
-        label_visibility="collapsed",
-    )
-    if com_solar != st.session_state.get("e_com_solar", True):
-        st.session_state["e_com_solar"] = com_solar
-        if not com_solar:
-            # O que foi dimensionado deixa de valer, e deixar para trás
-            # produziria um relatório com telhado marcado e sem seção de solar.
-            st.session_state.update({
-                "e_telhado": None, "e_layout": None, "e_layout_base": None,
-                "e_croqui": None, "e_edicao": None, "e_memoria": None, "e_kwp": 0.0,
-            })
-        st.rerun()
-
-    st.divider()
-    st.markdown("##### Qual é a tensão da rede?")
-    st.caption(
-        "Decide que inversores podem ser recomendados. A maior parte dos híbridos "
-        "trifásicos do mercado é de 220/380 V e **não liga** numa rede de 127/220 — "
-        "recomendar um deles é um erro que só aparece na entrega."
-    )
-    opcoes_rede = [220.0, 380.0]
-    st.session_state["e_tensao_rede"] = st.radio(
-        "Tensão de linha",
-        opcoes_rede,
-        index=opcoes_rede.index(float(st.session_state.get("e_tensao_rede") or 380.0)),
-        horizontal=True,
-        format_func=lambda v: (
-            "127/220 V — baixa tensão, a rede de boa parte do país" if v == 220.0
-            else "220/380 V — trifásico de 380 V"
-        ),
-        label_visibility="collapsed",
-    )
-    _resumo_do_catalogo(float(st.session_state["e_tensao_rede"]))
-
-    st.divider()
-    st.markdown("##### Onde fica?")
-    st.caption("A geração solar do local vem daqui — série horária de anos reais do PVGIS.")
-
-    aba_endereco, aba_coordenadas = st.tabs(["Buscar por endereço", "Digitar coordenadas"])
-    with aba_endereco:
-        consulta = st.text_input(
-            "Endereço", value=st.session_state["e_endereco"],
-            placeholder="Ex.: Avenida Sete de Setembro, Curitiba",
+    with st.container(border=True):
+        st.subheader("1. Identifique o imóvel")
+        # `key=` em vez de atribuir o retorno: a barra lateral é desenhada antes
+        # do corpo da página e leria o valor anterior, ficando um rerun atrás do
+        # que o usuário acabou de digitar. Com a chave, o Streamlit guarda o valor
+        # no estado antes de qualquer widget rodar.
+        st.text_input(
+            "Nome do cliente ou do local",
+            key="e_nome",
+            placeholder="Ex.: Hotel Central",
         )
-        if st.button("Localizar", disabled=not consulta):
-            st.session_state["e_lugares"] = _buscar_endereco(consulta)
-            st.rerun()
 
-        # As alternativas ficam à vista. Pegar a primeira em silêncio era o
-        # que fazia "Rua São João" cair na cidade errada -- e o erro só
-        # aparecia depois, na produtividade do PVGIS, onde ninguém procura.
-        lugares = st.session_state.get("e_lugares") or []
-        if len(lugares) > 1:
-            escolha = st.radio(
-                "Achei mais de um lugar. Qual é?",
-                range(len(lugares)),
-                format_func=lambda i: lugares[i]["nome"],
-            )
-            if st.button("Usar este", type="primary"):
-                _fixar_local(lugares[escolha])
-                st.rerun()
-        elif len(lugares) == 1:
-            _fixar_local(lugares[0])
-            st.session_state["e_lugares"] = []
-            st.rerun()
-
-        if st.session_state["e_endereco"]:
-            st.success(
-                f"📍 {st.session_state['e_endereco']}  \n"
-                f"`{st.session_state['e_lat']:.5f}, {st.session_state['e_lon']:.5f}`"
-            )
-
-    with aba_coordenadas:
+        st.markdown("##### Que tipo de instalação é?")
         st.caption(
-            "Cole a coordenada exata do telhado. É o caminho mais confiável: "
-            "endereço depende do que o geocodificador entende, e coordenada não "
-            "depende de nada."
+            "Serve para duas coisas: montar o rascunho das cargas e escolher a curva de "
+            "consumo de referência com que o resultado será conferido depois."
         )
-        colunas = st.columns([1, 1, 1])
-        lat = colunas[0].number_input(
-            "Latitude", min_value=-90.0, max_value=90.0, step=0.001, format="%.5f",
-            value=float(st.session_state["e_lat"]), key="e_lat_digitada")
-        lon = colunas[1].number_input(
-            "Longitude", min_value=-180.0, max_value=180.0, step=0.001, format="%.5f",
-            value=float(st.session_state["e_lon"]), key="e_lon_digitada")
-        # Um botão, e não a escrita direta no estado: o `number_input` só
-        # entrega o valor quando o campo perde o foco, e quem digitava e
-        # clicava direto em "Continuar" levava o valor anterior sem perceber.
-        # O botão torna o instante visível e encerra a dúvida.
-        colunas[2].markdown("<div style='height:1.85rem'></div>", unsafe_allow_html=True)
-        if colunas[2].button("Usar esta coordenada", width="stretch"):
-            st.session_state.update({
-                "e_lat": float(lat), "e_lon": float(lon), "e_lugares": [],
-                # O rótulo do lugar anterior morre aqui. Deixá-lo vivo fazia a
-                # tela dizer "Região Sudeste" com a coordenada certa embaixo.
-                "e_endereco": f"coordenada informada ({lat:.5f}, {lon:.5f})",
-            })
+        ids = list(MODELOS)
+        atual = st.session_state["e_segmento"]
+        escolha = st.selectbox(
+            "Tipo", ids, index=ids.index(atual) if atual in ids else 0,
+            format_func=lambda i: MODELOS[i].nome, label_visibility="collapsed",
+        )
+        if escolha != st.session_state["e_segmento"]:
+            # Trocar de segmento invalida o rascunho de cargas montado do anterior.
+            st.session_state["e_segmento"] = escolha
+            st.session_state["e_cenario"] = None
+            st.session_state["e_ensemble_backup"] = None
+
+        modelo = MODELOS[escolha]
+        st.info(
+            f"**{modelo.nome}** vem com {len(modelo.comodos)} cômodos prontos: "
+            + ", ".join(c.nome for c in modelo.comodos)
+            + ". Você ajusta tudo no próximo passo."
+        )
+
+    with st.container(border=True):
+        st.subheader("2. Defina o objetivo")
+        st.caption(
+            "Se não tiver, os passos de telhado e de equipamento fotovoltaico não "
+            "aparecem — e o relatório não fala de geração em lugar nenhum."
+        )
+        com_solar = st.radio(
+            "Tem solar",
+            [True, False],
+            index=0 if st.session_state.get("e_com_solar", True) else 1,
+            horizontal=True,
+            format_func=lambda v: (
+                "Sim — dimensionar o sistema fotovoltaico" if v
+                else "Não — só armazenamento e continuidade"
+            ),
+            label_visibility="collapsed",
+        )
+        if com_solar != st.session_state.get("e_com_solar", True):
+            st.session_state["e_com_solar"] = com_solar
+            if not com_solar:
+                # O que foi dimensionado deixa de valer, e deixar para trás
+                # produziria um relatório com telhado marcado e sem seção de solar.
+                st.session_state.update({
+                    "e_telhado": None, "e_layout": None, "e_layout_base": None,
+                    "e_croqui": None, "e_edicao": None, "e_memoria": None, "e_kwp": 0.0,
+                })
             st.rerun()
 
-    st.caption(
-        f"Coordenadas em uso: **{st.session_state['e_lat']:.5f}, "
-        f"{st.session_state['e_lon']:.5f}** — é daqui que sai a série do PVGIS e "
-        "é aqui que o mapa do telhado abre."
-    )
-    _rodape(pendencia="dar um nome ao cliente" if not st.session_state["e_nome"] else None)
+    with st.container(border=True):
+        st.subheader("3. Localize o imóvel")
+        st.caption("Busque o endereço e confira o local encontrado. Ele define os dados de sol usados no cálculo.")
+
+        aba_endereco, aba_coordenadas = st.tabs(["Buscar por endereço", "Digitar coordenadas"])
+        with aba_endereco:
+            consulta = st.text_input(
+                "Endereço", value=st.session_state["e_endereco"],
+                placeholder="Ex.: Avenida Sete de Setembro, Curitiba",
+            )
+            if st.button("Localizar", disabled=not consulta):
+                st.session_state["e_lugares"] = _buscar_endereco(consulta)
+                st.rerun()
+
+            # As alternativas ficam à vista. Pegar a primeira em silêncio era o
+            # que fazia "Rua São João" cair na cidade errada -- e o erro só
+            # aparecia depois, na produtividade do PVGIS, onde ninguém procura.
+            lugares = st.session_state.get("e_lugares") or []
+            if len(lugares) > 1:
+                escolha = st.radio(
+                    "Achei mais de um lugar. Qual é?",
+                    range(len(lugares)),
+                    format_func=lambda i: lugares[i]["nome"],
+                )
+                if st.button("Usar este", type="primary"):
+                    _fixar_local(lugares[escolha])
+                    st.rerun()
+            elif len(lugares) == 1:
+                _fixar_local(lugares[0])
+                st.session_state["e_lugares"] = []
+                st.rerun()
+
+            if st.session_state["e_endereco"]:
+                st.success(
+                    f"📍 {st.session_state['e_endereco']}  \n"
+                    f"`{st.session_state['e_lat']:.5f}, {st.session_state['e_lon']:.5f}`"
+                )
+
+        with aba_coordenadas:
+            st.caption(
+                "Cole a coordenada exata do telhado. É o caminho mais confiável: "
+                "endereço depende do que o geocodificador entende, e coordenada não "
+                "depende de nada."
+            )
+            colunas = st.columns([1, 1, 1])
+            lat = colunas[0].number_input(
+                "Latitude", min_value=-90.0, max_value=90.0, step=0.001, format="%.5f",
+                value=float(st.session_state["e_lat"]), key="e_lat_digitada")
+            lon = colunas[1].number_input(
+                "Longitude", min_value=-180.0, max_value=180.0, step=0.001, format="%.5f",
+                value=float(st.session_state["e_lon"]), key="e_lon_digitada")
+            # Um botão, e não a escrita direta no estado: o `number_input` só
+            # entrega o valor quando o campo perde o foco, e quem digitava e
+            # clicava direto em "Continuar" levava o valor anterior sem perceber.
+            # O botão torna o instante visível e encerra a dúvida.
+            colunas[2].markdown("<div style='height:1.85rem'></div>", unsafe_allow_html=True)
+            if colunas[2].button("Usar esta coordenada", width="stretch"):
+                st.session_state.update({
+                    "e_lat": float(lat), "e_lon": float(lon), "e_lugares": [],
+                    # O rótulo do lugar anterior morre aqui. Deixá-lo vivo fazia a
+                    # tela dizer "Região Sudeste" com a coordenada certa embaixo.
+                    "e_endereco": f"coordenada informada ({lat:.5f}, {lon:.5f})",
+                })
+                st.rerun()
+
+        st.caption(
+            f"Coordenadas em uso: **{st.session_state['e_lat']:.5f}, "
+            f"{st.session_state['e_lon']:.5f}** — é daqui que sai a série do PVGIS e "
+            "é aqui que o mapa do telhado abre."
+        )
+
+    with st.container(border=True):
+        st.subheader("4. Confira a rede elétrica")
+        st.caption(
+            "Confira a tensão na conta de luz ou com o responsável pela instalação. "
+            "Ela define quais inversores são compatíveis. Se ainda não souber, "
+            "confirme esse dado antes de usar a recomendação de equipamentos."
+        )
+        opcoes_rede = [220.0, 380.0]
+        st.session_state["e_tensao_rede"] = st.radio(
+            "Tensão de linha",
+            opcoes_rede,
+            index=opcoes_rede.index(float(st.session_state.get("e_tensao_rede") or 380.0)),
+            horizontal=True,
+            format_func=lambda v: (
+                "127/220 V — baixa tensão, a rede de boa parte do país" if v == 220.0
+                else "220/380 V — trifásico de 380 V"
+            ),
+            label_visibility="collapsed",
+        )
+        _resumo_do_catalogo(float(st.session_state["e_tensao_rede"]))
+
+
+    if not st.session_state["e_endereco"]:
+        st.warning("Local ainda não confirmado: o estudo está usando as coordenadas iniciais de Curitiba. Busque o endereço ou confirme as coordenadas antes de usar o resultado.")
+    _rodape(pendencia="dar um nome ao cliente" if not st.session_state["e_nome"].strip() else None)
 
 
 # ============================================================================
 # Passo 2 — cargas
 # ============================================================================
 _OPCOES_CARGA = {
+    "modelo": "Usar o rascunho do modelo",
+    "conta": "Só tenho a conta de luz",
     "coleta": "Tenho a coleta residencial (app do cliente)",
     "vistoria": "Tenho uma vistoria técnica",
-    "modelo": "Usar o rascunho do modelo",
     "planilha": "Tenho a planilha do D²",
-    "conta": "Só tenho a conta de luz",
 }
 
 
 def _passo_cargas() -> None:
     escolha = st.radio(
-        "De onde vêm as cargas",
+        "Quais dados você tem para começar?",
         list(_OPCOES_CARGA),
         format_func=lambda k: _OPCOES_CARGA[k],
         index=list(_OPCOES_CARGA).index(st.session_state["e_modo_carga"]),
-        horizontal=True,
-        label_visibility="collapsed",
+        horizontal=False,
+        label_visibility="visible",
     )
     st.session_state["e_modo_carga"] = escolha
 
@@ -1071,7 +1098,8 @@ def _passo_cargas() -> None:
         )
     cenario: Cenario | None = st.session_state["e_cenario"]
     if cenario is None:
-        _rodape(pendencia="carregar a planilha de cargas")
+        motivos = {"coleta": "importar a coleta residencial acima", "vistoria": "importar a vistoria técnica acima", "planilha": "carregar a planilha de cargas acima"}
+        _rodape(pendencia=motivos.get(escolha, "informar os equipamentos"))
         return
 
     _painel_da_vistoria()
@@ -2166,10 +2194,20 @@ def _passo_equipamento() -> None:
 
     layout = st.session_state.get("e_layout")
     disponiveis = layout.quantidade if layout is not None else None
+    kwp_alvo = float(st.session_state.get("e_kwp_alvo") or 0.0)
+    compensando = st.session_state.get("e_modo_solar") == "compensar" and kwp_alvo > 0
     if disponiveis:
         st.caption(
             f"O telhado marcado comporta **{disponiveis} módulos**. A escolha abaixo "
             "define quantos deles o arranjo consegue de fato usar."
+        )
+    elif compensando:
+        # Sem este teto, o arranjo cheio do inversor virava a potência do
+        # estudo — e quem pediu para abater uma conta de 300 kWh/mês recebia a
+        # usina que o inversor aceita, não a que a conta pede.
+        st.caption(
+            f"A conta a abater pede cerca de **{kwp_alvo:.1f} kWp**. O arranjo abaixo "
+            "é fechado nesse alvo, em módulos inteiros."
         )
     else:
         st.caption(
@@ -2196,8 +2234,11 @@ def _passo_equipamento() -> None:
     if "e_inversor_sel" not in st.session_state:
         st.session_state["e_inversor_sel"] = _inversor_padrao(
             inversores,
-            float(getattr(layout, "potencia_kwp", 0.0) or st.session_state.get("e_kwp") or 0.0),
+            float(getattr(layout, "potencia_kwp", 0.0) or kwp_alvo
+                  or st.session_state.get("e_kwp") or 0.0),
             float(st.session_state.get("e_tensao_rede") or 380.0),
+            modulo=st.session_state["e_modulo_sel"],
+            disponiveis=disponiveis,
         )
     escolha_modulo = colunas[0].selectbox(
         "Módulo fotovoltaico", modulos, format_func=str, key="e_modulo_sel")
@@ -2206,7 +2247,25 @@ def _passo_equipamento() -> None:
     st.session_state["e_modulo"] = escolha_modulo.modelo
     st.session_state["e_inversor"] = escolha_inversor.modelo
 
+    teto_do_alvo = None
+    if compensando and not disponiveis:
+        teto_do_alvo = max(1, int(kwp_alvo * 1000.0 / escolha_modulo.potencia_wp))
+        disponiveis = teto_do_alvo
     memoria = memoria_do_arranjo(escolha_modulo, escolha_inversor, disponiveis)
+    if teto_do_alvo is not None and not memoria.viavel:
+        # O alvo não é um limite físico: é uma meta de energia. Quando o menor
+        # arranjo válido do par escolhido passa dele — a string precisa de mais
+        # módulos para acender o inversor —, o certo é entregar esse arranjo e
+        # dizer que ficou acima, não devolver "não fecha" para quem só queria
+        # abater a conta.
+        memoria = memoria_do_arranjo(escolha_modulo, escolha_inversor, None)
+        if memoria.viavel:
+            st.warning(
+                f"O menor arranjo válido deste par tem {memoria.modulos_do_sistema} "
+                f"módulos ({memoria.potencia_do_sistema_kwp:.1f} kWp) e passa do alvo de "
+                f"{kwp_alvo:.1f} kWp — abaixo disso a string não acende o inversor. "
+                "Um inversor menor, ou um módulo de menor potência, aproxima do alvo."
+            )
     st.session_state["e_memoria"] = memoria
 
     if not memoria.viavel:
@@ -2252,8 +2311,16 @@ def _passo_equipamento() -> None:
     )
 
 
-def _inversor_padrao(inversores, kwp_alvo: float, tensao_rede_v: float):
-    """O menor inversor que aceita o gerador com razão CC/CA de até 1,35."""
+def _inversor_padrao(inversores, kwp_alvo: float, tensao_rede_v: float, modulo=None,
+                     disponiveis: int | None = None):
+    """
+    O menor inversor que aceita o gerador — e que fecha um arranjo de verdade.
+
+    Só a potência não basta: o menor inversor do catálogo pode não acender com
+    o módulo escolhido (a string curta não chega à tensão de partida), e um
+    padrão que abre a tela com "este par não fecha" é pior que um padrão um
+    degrau maior. Por isso a viabilidade da memória entra no critério.
+    """
     if kwp_alvo <= 0:
         return inversores[0]
     do_menor = sorted(inversores, key=lambda i: i.potencia_ca_w)
@@ -2261,8 +2328,16 @@ def _inversor_padrao(inversores, kwp_alvo: float, tensao_rede_v: float):
         i for i in do_menor
         if i.potencia_ca_w >= kwp_alvo * 1000.0 / 1.35
         and (not hasattr(i, "atende_rede") or i.atende_rede(tensao_rede_v))
-    ]
-    return (que_cabem or do_menor)[0]
+    ] or do_menor
+    if modulo is None:
+        return que_cabem[0]
+
+    from .pv.memoria import memoria_do_arranjo
+
+    for inversor in que_cabem:
+        if memoria_do_arranjo(modulo, inversor, disponiveis).viavel:
+            return inversor
+    return que_cabem[0]
 
 
 def _para_latex(formula: str) -> str:
@@ -2605,22 +2680,20 @@ def _passo_solar() -> None:
     consumo_anual = float(np.mean(st.session_state["e_ensemble_total"].energia_diaria_kwh())) * 365
     st.caption(f"Consumo anual estimado da instalação: **{_milhar(consumo_anual)} kWh**.")
 
+    rotulos = {
+        "telhado": "Marcar o telhado no mapa (recomendado)",
+        "compensar": "Compensar a conta de luz",
+        "potencia": "Já sei a potência",
+    }
     modo = st.radio(
-        "Como definir o sistema",
-        ["Marcar o telhado no mapa (recomendado)", "Compensar o consumo", "Já sei a potência"],
-        horizontal=True, label_visibility="collapsed",
+        "Como definir o sistema", list(rotulos), format_func=rotulos.get,
+        key="e_modo_solar", horizontal=True, label_visibility="collapsed",
     )
 
-    if modo.startswith("Marcar"):
+    if modo == "telhado":
         _solar_pelo_telhado()
-    elif modo.startswith("Compensar"):
-        st.info(
-            "O sistema será dimensionado para compensar o consumo anual, usando a "
-            "produtividade real do local. É o padrão de uma proposta de geração "
-            "distribuída — mas não confere se cabe no telhado."
-        )
-        st.session_state["e_kwp"] = 0.0  # zero = o estudo dimensiona sozinho
-        st.session_state["e_telhado"] = None
+    elif modo == "compensar":
+        _solar_pelo_consumo(consumo_anual)
     else:
         st.session_state["e_kwp"] = st.number_input(
             "Potência do sistema (kWp)", 0.5, 5000.0,
@@ -2643,12 +2716,88 @@ def _passo_solar() -> None:
     # Sem telhado marcado o estudo ainda roda — só não confere se cabe. Avisar
     # é melhor que bloquear: quem não tem a imagem do telhado à mão continua, e
     # a ressalva vai junto para o relatório em vez de virar uma promessa muda.
-    if modo.startswith("Marcar") and st.session_state.get("e_telhado") is None:
+    if modo == "telhado" and st.session_state.get("e_telhado") is None:
         st.caption(
             "Sem telhado marcado, o sistema será dimensionado pelo consumo anual — "
             "e o estudo não terá como afirmar que ele cabe na cobertura."
         )
     _rodape()
+
+
+def _solar_pelo_consumo(consumo_simulado_kwh: float) -> None:
+    """
+    A usina dimensionada para abater uma conta — e a conta é escolhida aqui.
+
+    O consumo que o levantamento simula e o que a fatura mede são números
+    diferentes, e num levantamento de rascunho eles diferem por múltiplos. Qual
+    dos dois a usina existe para abater é decisão comercial, não detalhe de
+    cálculo: por isso a tela pergunta, em vez de escolher em silêncio.
+    """
+    estado = st.session_state
+    ajuste = estado.get("e_ajuste_conta") if estado.get("e_cenario") is None else None
+    da_conta = float(ajuste.consumo_anual_kwh) if ajuste is not None else 0.0
+    padrao = da_conta or consumo_simulado_kwh
+    if not estado.get("e_consumo_compensar"):
+        estado["e_consumo_compensar"] = round(padrao, 0)
+
+    colunas = st.columns([1.3, 1])
+    alvo = colunas[0].number_input(
+        "Consumo anual a abater (kWh)", min_value=100.0, max_value=50_000_000.0,
+        step=100.0, key="e_consumo_compensar",
+        help="É este número que define a potência. Por padrão, o da conta de luz "
+             "quando o estudo partiu dela; senão, o que o levantamento simula.",
+    )
+    fracao = colunas[1].slider(
+        "Quanto dele compensar (%)", 10, 130, step=5, key="e_compensar_frac",
+        help="100% abate a conta inteira. Abaixo disso, o sistema cobre uma parte — "
+             "é o que se faz quando o telhado ou o orçamento não comportam o todo.",
+    )
+
+    if da_conta and abs(da_conta - consumo_simulado_kwh) / max(da_conta, 1.0) > 0.15:
+        st.caption(
+            f"A conta de luz diz **{_milhar(da_conta)} kWh/ano** e o levantamento "
+            f"simula **{_milhar(consumo_simulado_kwh)} kWh/ano**. A conta é medida; "
+            "o levantamento, estimativa."
+        )
+    elif not da_conta:
+        botao = st.button(f"Usar o consumo simulado ({_milhar(consumo_simulado_kwh)} kWh)")
+        if botao:
+            estado["e_consumo_compensar"] = round(consumo_simulado_kwh, 0)
+            st.rerun()
+        st.caption(
+            "Se o cliente tem a conta de luz à mão, o número dela vale mais que o do "
+            "levantamento — ela é medida."
+        )
+
+    pedido_kwh = alvo * fracao / 100.0
+    produtividade = _produtividade_estimada(estado["e_lat"], estado["e_lon"])
+    kwp_alvo = pedido_kwh / produtividade if produtividade > 0 else 0.0
+    estado["e_kwp_alvo"] = kwp_alvo
+    st.info(
+        f"O sistema será dimensionado para gerar **{_milhar(pedido_kwh)} kWh/ano** "
+        f"({fracao}% de {_milhar(alvo)} kWh). A esta latitude isso pede cerca de "
+        f"**{kwp_alvo:.1f} kWp** ({_milhar(produtividade)} kWh/kWp ao ano); o passo "
+        "seguinte fecha o arranjo em módulos inteiros e a tela de resultado confere "
+        "quanto ele de fato cobre. O estudo não verifica se cabe no telhado."
+    )
+    estado["e_kwp"] = 0.0  # zero = o estudo dimensiona sozinho
+    estado["e_telhado"] = None
+
+
+@st.cache_data(show_spinner=False)
+def _produtividade_estimada(latitude: float, longitude: float) -> float:
+    """
+    kWh por kWp ao ano no local, pela série sintética — sem tocar a rede.
+
+    Serve para converter o alvo de energia em potência antes de escolher o
+    equipamento. O estudo depois refaz a conta com a série do PVGIS; a
+    diferença entre as duas é pequena perto do arredondamento em módulos
+    inteiros, e a tela de resultado mostra a cobertura que de fato saiu.
+    """
+    from .bateria.geracao import serie_sintetica
+
+    serie = serie_sintetica(latitude, longitude, 0.0, 20.0, 14.0, anos=(2019, 2020))
+    return float(serie.anual_kwh_por_kwp())
 
 
 _TILES_SATELITE = (
@@ -3290,7 +3439,7 @@ def _passo_meta() -> None:
              36: "Um dia e meio: atravessa duas noites, e é a segunda que decide."}[autonomia]
         )
     with colunas[1]:
-        st.markdown("##### Com que garantia?")
+        st.markdown("##### Em quantos casos simulados deve funcionar?")
         confiabilidade = st.select_slider(
             "Confiabilidade", options=[0.80, 0.90, 0.95, 0.99], value=0.95,
             format_func=lambda p: f"{p:.0%}", label_visibility="collapsed",
@@ -3822,6 +3971,12 @@ def _montar_configuracao(
     ajuste_conta = estado.get("e_ajuste_conta") if cenario is None else None
     if ajuste_conta is not None:
         consumo_anual = float(ajuste_conta.consumo_anual_kwh)
+    # Compensar a conta: o alvo digitado na tela do solar manda, e é ele que
+    # o estudo usa para dimensionar. Sem isto, um levantamento de rascunho
+    # dimensionava pela sua própria estimativa e entregava um sistema quatro
+    # vezes maior que a conta que ele deveria abater.
+    if estado.get("e_modo_solar") == "compensar" and estado.get("e_consumo_compensar"):
+        consumo_anual = float(estado["e_consumo_compensar"])
 
     # O banco declarado: N blocos, com os inversores que o catálogo oferece
     # para esse tamanho. Vira a lista de candidatos do estudo — o produto, e
@@ -3863,6 +4018,8 @@ def _montar_configuracao(
         tabelas_cenario=(levantado or cenario).comodos if cenario else None,
         ocupacao=ocupacao_dados,
         consumo_anual_kwh=consumo_anual,
+        compensar_frac=float(estado.get("e_compensar_frac") or 100) / 100.0,
+        objetivo_fv=str(estado.get("e_modo_solar") or ""),
         ajuste_conta=ajuste_conta,
         fracao_backup=float(estado.get("e_fracao_backup") or 1.0),
         dispersao_diaria=float(estado.get("e_conta_dispersao_dia", 15)) / 100.0,
@@ -3913,15 +4070,17 @@ def _passo_resultado() -> None:
     estudo = st.session_state["e_estudo"]
     if estudo is None:
         st.warning("O estudo ainda não foi rodado.")
-        _rodape(rotulo_avancar="—", pendencia="voltar ao passo 5 e rodar o estudo")
+        st.info("Volte à etapa Meta e execute o cálculo para ver a recomendação.")
+        if st.button("Ir para Meta", type="primary"):
+            _ir(7)
         return
 
     cfg = estudo.configuracao
     _resposta_em_uma_frase(estudo)
 
     abas = st.tabs([
-        "Cenários", "Resiliência", "Alternativas", "Excedência", "Dinheiro",
-        "Vida útil", "Baixar",
+        "Cenários", "Durante a falta de luz", "Alternativas", "Limites de potência", "Custos e economia",
+        "Vida útil", "Baixar relatório",
     ])
 
     # As mesmas figuras do dossiê, e não uma segunda versão desenhada de
@@ -4150,10 +4309,43 @@ def _resposta_em_uma_frase(estudo) -> None:
     else:
         _diagnostico_da_falha(estudo)
 
+    _confirmar_compensacao(estudo)
+
     for aviso in avisos[:6]:
         st.markdown(f'<div class="aviso-suave">⚠️ {aviso}</div>', unsafe_allow_html=True)
     if avisos:
         st.write("")
+
+
+def _confirmar_compensacao(estudo) -> None:
+    """
+    Quanto da conta a usina abate — conferido, não prometido.
+
+    O número sai da geração que a série de fato produz para a potência
+    adotada, medida contra o consumo que o estudo usou para dimensionar. É a
+    resposta à pergunta que o cliente faz primeiro, e ela precisa estar na
+    tela do resultado, não só no dossiê.
+    """
+    dados = getattr(estudo, "compensacao", None)
+    if not dados or not estudo.configuracao.considerar_solar:
+        return
+    cobertura = float(dados["cobertura"])
+    alvo = float(dados["alvo_kwh"])
+    pedida = float(dados["fracao_pedida"])
+    texto = (
+        f"O sistema de **{dados['potencia_kwp']:.1f} kWp** gera "
+        f"**{_milhar(dados['geracao_kwh'])} kWh/ano** e cobre **{cobertura:.0%}** do "
+        f"{dados['origem']} ({_milhar(alvo)} kWh/ano)."
+    )
+    if dados["definida_por"] == "consumo a compensar":
+        alcancou = abs(cobertura - pedida) <= 0.02
+        pedido = f"Pedido: compensar {pedida:.0%}."
+        (st.success if alcancou else st.warning)(f"{texto} {pedido}")
+    else:
+        st.info(
+            f"{texto} A potência veio do **{dados['definida_por']}** — a cobertura é "
+            "a consequência, não a meta."
+        )
 
 
 def _diagnostico_da_falha(estudo) -> None:

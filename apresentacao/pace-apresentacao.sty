@@ -272,6 +272,11 @@
   \arrayrulecolor{black}%
 }
 \newcommand{\linha}[2]{#1 & #2 \\ \hline}
+% Os slides de valor com e sem bateria só existem quando o estudo avaliou os
+% dois cenários. O dados.tex liga ou desliga o par; o esqueleto não decide.
+\newif\ifcombateria
+\combateriafalse
+
 % A linha que importa — o investimento — em âmbar.
 \newcommand{\linhadestaque}[2]{%
   \cellcolor{amarelopace}\color{pretopace}\pesosemi #1 & \cellcolor{corcelula}\pesosemi #2 \\ \hline}

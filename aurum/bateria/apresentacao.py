@@ -304,8 +304,12 @@ def dados_da_apresentacao(
         {"ano": a, **{k: v[a] for k, v in acumulados.items()}} for a in anos
     ]
 
+    # -- os dois sistemas, lado a lado ---------------------------------------
+    comparativo = _comparativo_de_bateria(estudo, opcoes, servicos_mes)
+
     cliente = opcoes.cliente or cfg.nome
     return {
+        "comparativo": comparativo,
         "cliente": cliente,
         "local": cfg.nome,
         "data": opcoes.data,
@@ -356,6 +360,61 @@ def dados_da_apresentacao(
 # ----------------------------------------------------------------------------
 # dados.tex
 # ----------------------------------------------------------------------------
+def _comparativo_de_bateria(
+    estudo: ResultadoEstudo,
+    opcoes: OpcoesComerciais,
+    servicos_mes: float,
+) -> dict[str, Any] | None:
+    """
+    O mesmo gerador solar com e sem o banco — em dinheiro, lado a lado.
+
+    São duas compras diferentes, e a diferença entre elas não é só o preço: o
+    banco não gera energia, ele guarda a que o sol já produziu, então ele
+    acrescenta pouca economia e muita autonomia. Somar os dois num número só
+    esconde justamente a pergunta que o cliente faz — "quanto me custa não
+    ficar sem luz?" —, e é ela que estes dois slides respondem.
+
+    ``None`` quando o estudo não tem os dois cenários: sem bateria avaliada,
+    ou sem solar, não há comparação a fazer, e um slide vazio é pior que
+    nenhum slide.
+    """
+    if estudo.cenarios is None:
+        return None
+    sem = estudo.cenarios.por_chave("solar")
+    com = estudo.cenarios.por_chave("solar+bateria")
+    if sem is None or com is None:
+        return None
+
+    def bloco(cenario, com_banco: bool) -> dict[str, Any]:
+        capex = float(cenario.capex_brl)
+        economia_anual = float(cenario.economia_anual_brl)
+        return {
+            "capex_brl": capex,
+            "economia_anual_brl": economia_anual,
+            "economia_mensal_brl": economia_anual / 12.0,
+            "payback_anos": cenario.payback_anos,
+            "tir": cenario.tir,
+            "autonomia_h": float(cenario.autonomia_garantida_h),
+            "parcela_brl_mes": parcela_price(
+                capex, opcoes.juros_financiamento_am,
+                opcoes.prazo_financiamento_meses, opcoes.carencia_financiamento_meses,
+            ),
+            "saldo_mensal_brl": economia_anual / 12.0 - servicos_mes,
+            "com_banco": com_banco,
+        }
+
+    sem_banco, com_banco = bloco(sem, False), bloco(com, True)
+    return {
+        "sem_bateria": sem_banco,
+        "com_bateria": com_banco,
+        "capex_da_bateria_brl": com_banco["capex_brl"] - sem_banco["capex_brl"],
+        "economia_da_bateria_brl_ano": (
+            com_banco["economia_anual_brl"] - sem_banco["economia_anual_brl"]
+        ),
+        "autonomia_ganha_h": com_banco["autonomia_h"] - sem_banco["autonomia_h"],
+    }
+
+
 def _brl(valor: float | None, casas: int = 0) -> str:
     """``R\\$ 1.234`` com o cifrão já escapado; negativo com travessão curto."""
     if valor is None:
@@ -537,12 +596,64 @@ def dados_tex(dados: dict[str, Any]) -> str:
         "\\hspace{0.6cm}%\n".join(f"  {f}" for f in fotos),
         "}",
         "",
+        "% ---- Sistema com e sem bateria",
+        *_tex_do_comparativo(dados),
+        "",
         "% ---- Institucional",
         _cmd("clientesgeridos", esc(o["clientes_geridos"])),
         _cmd("potenciagerida", esc(o["potencia_gerida"])),
         "",
     ]
     return "\n".join(partes)
+
+
+def _tex_do_comparativo(dados: dict[str, Any]) -> list[str]:
+    r"""
+    Os comandos dos dois slides de valor: sem bateria e com bateria.
+
+    O esqueleto desenha os dois slides quando ``\combateriatrue``; sem os dois
+    cenários no estudo, o booleano fica falso e os slides não entram — em vez
+    de saírem com travessões no lugar dos números.
+    """
+    c = dados.get("comparativo")
+    o = dados["opcoes"]
+    if not c:
+        return [r"\combateriafalse"]
+    sem, com = c["sem_bateria"], c["com_bateria"]
+
+    def payback(bloco: dict[str, Any]) -> str:
+        anos = bloco["payback_anos"]
+        return f"{br_float(anos, 1)} anos" if anos else "não se paga no horizonte"
+
+    def tir(bloco: dict[str, Any]) -> str:
+        return f"{br_float(bloco['tir'] * 100, 1)}\\% a.a." if bloco["tir"] else "---"
+
+    linhas = [r"\combateriatrue"]
+    for chave, bloco in (("sem", sem), ("com", com)):
+        linhas += [
+            _cmd(f"inv{chave}bateria", _brl(bloco["capex_brl"], 2)),
+            _cmd(f"economiaanual{chave}bateria", f"{_brl(bloco['economia_anual_brl'], 2)} no 1º ano"),
+            _cmd(f"economiamensal{chave}bateria", _brl(bloco["economia_mensal_brl"], 2)),
+            _cmd(f"payback{chave}bateria", payback(bloco)),
+            _cmd(f"tir{chave}bateria", tir(bloco)),
+            _cmd(f"mensalidade{chave}bateria", _brl(bloco["parcela_brl_mes"], 2)),
+        ]
+    autonomia = com["autonomia_h"]
+    linhas += [
+        _cmd("autonomiacombateria",
+             f"{br_float(autonomia, 1)} h sem rede" if autonomia > 0 else "não avaliada"),
+        _cmd("custodabateria", _brl(c["capex_da_bateria_brl"], 2)),
+        _cmd("ganhodabateria", f"{_brl(c['economia_da_bateria_brl_ano'], 2)}/ano"),
+        _cmd("notasembateria",
+             "O gerador solar sozinho: abate a conta, e para quando a rede para."),
+        _cmd("notacombateria",
+             f"O mesmo gerador com o banco: {_brl(c['capex_da_bateria_brl'])} a mais "
+             f"de investimento compram {br_float(autonomia, 1)} h de autonomia"
+             + (f" e {_brl(c['economia_da_bateria_brl_ano'])}/ano de economia adicional."
+                if c["economia_da_bateria_brl_ano"] > 0 else "."),),
+        _cmd("prazofinanciamentocurto", f"{o['prazo_financiamento_meses']}x"),
+    ]
+    return linhas
 
 
 # ----------------------------------------------------------------------------

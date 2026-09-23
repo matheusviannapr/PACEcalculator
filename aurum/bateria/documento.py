@@ -518,6 +518,11 @@ def _secao_solar(estudo: ResultadoEstudo, figuras: dict[str, Path]) -> str:
         f"{_n(serie.anual_kwh_por_kwp(), 0, 'kWh/kWp')}, e o sistema de "
         f"{_n(estudo.potencia_fv_kwp, 1, 'kWp')} gera cerca de "
         f"{_n(estudo.potencia_fv_kwp * serie.anual_kwh_por_kwp(), 0, 'kWh')} por ano.",
+        # A frase da compensação vai aqui quando não há arranjo: a seção do
+        # sistema fotovoltaico só existe com layout, e a pergunta "abate a
+        # minha conta?" não pode depender de ter telhado marcado.
+        *([_paragrafo_da_compensacao(estudo)]
+          if estudo.configuracao.layout is None else []),
         "Trabalhar com a série horária de anos reais, e não com a média mensal, é o que "
         "carrega a persistência do tempo para dentro do estudo: sequências de dias "
         "encobertos existem na série porque existiram no céu, e um apagão longo que cai "
@@ -1238,6 +1243,49 @@ def _analise_completa(analise, figuras: dict[str, Path]) -> list[str]:
     return [x for x in partes if x]
 
 
+def _paragrafo_da_compensacao(estudo: ResultadoEstudo) -> str:
+    """
+    A frase que afirma — com número conferido — quanto da conta a usina abate.
+
+    Dimensionar "para compensar o consumo" e não dizer quanto se compensou de
+    fato deixa a promessa sem prestação de contas. O alvo é o mesmo que
+    dimensionou; a geração é a que a série produz para a potência adotada.
+    """
+    dados = getattr(estudo, "compensacao", None)
+    if not dados or not estudo.configuracao.considerar_solar:
+        return ""
+    alvo = float(dados["alvo_kwh"])
+    pedida = float(dados["fracao_pedida"])
+    cobertura = float(dados["cobertura"])
+    # `esc` no percentual porque estes são parágrafos soltos, e não células de
+    # tabela: aqui ninguém escapa por mim, e um `%` cru comenta o resto da
+    # linha no LaTeX.
+    frase = (
+        f"O sistema de {_n(dados['potencia_kwp'], 1, 'kWp')} gera "
+        f"{_n(dados['geracao_kwh'], 0, 'kWh')} por ano, contra o "
+        f"{esc(dados['origem'])} de {_n(alvo, 0, 'kWh')}: cobre "
+        f"{esc(_pct(cobertura, 0))} dele."
+    )
+    if dados["definida_por"] == "consumo a compensar":
+        alvo_pedido = esc(_pct(pedida, 0))
+        frase += (
+            f" A potência foi definida por este consumo, com a meta de compensar "
+            f"{alvo_pedido}"
+            + (
+                "; a meta foi cumprida."
+                if abs(cobertura - pedida) <= 0.02
+                else " — a diferença vem do arredondamento do arranjo e da "
+                     "produtividade do local."
+            )
+        )
+    else:
+        frase += (
+            f" A potência foi definida pelo {esc(dados['definida_por'])}, e a cobertura "
+            "é a consequência disso — não uma meta perseguida."
+        )
+    return frase
+
+
 def _secao_fotovoltaico(estudo: ResultadoEstudo) -> str:
     layout = estudo.configuracao.layout
     if layout is None:
@@ -1245,6 +1293,9 @@ def _secao_fotovoltaico(estudo: ResultadoEstudo) -> str:
         # já foram ditas na seção do telhado, que nesse caso as reúne.
         return ""
     partes = [secao("O sistema fotovoltaico")]
+    compensacao = _paragrafo_da_compensacao(estudo)
+    if compensacao:
+        partes.append(compensacao)
     if layout is not None:
         modulo = layout.modulo
         partes.append(tabela(

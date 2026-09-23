@@ -169,6 +169,49 @@
 \end{frame}
 
 % ============================================================================
+%  5b. O valor do sistema, sem e com bateria — um slide para cada
+%
+%  São duas compras diferentes: a segunda acrescenta autonomia, não geração.
+%  Num slide só, o cliente lê a diferença de preço sem ler o que ela compra.
+% ============================================================================
+\ifcombateria
+\begin{frame}{Sistema sem Bateria -- \cliente}
+  \framesubtitle{\notasembateria}
+  \vspace{0.05cm}\centering
+  \begin{tabelachave}[4.6cm]{4.2cm}
+    \linha{Solução}{Gerador solar}
+    \linha{Potência do Sistema}{\potenciaprojeto}
+    \linha{Geração Anual}{\geracaoanual}
+    \linhadestaque{Investimento}{\invsembateria}
+    \linha{Economia Anual}{\economiaanualsembateria}
+    \linha{Economia Mensal}{\economiamensalsembateria}
+    \linha{Mensalidade (\prazofinanciamentocurto)}{\mensalidadesembateria}
+    \linha{Payback simples}{\paybacksembateria}
+    \linha{Retorno anual (TIR)}{\tirsembateria}
+    \linha{Autonomia na falta de energia}{Nenhuma}
+  \end{tabelachave}
+  \notaderodape{Sem armazenamento, o sistema desliga junto com a rede: é exigência de segurança da norma de conexão, não limitação do equipamento.}
+\end{frame}
+
+\begin{frame}{Sistema com Bateria -- \cliente}
+  \framesubtitle{\notacombateria}
+  \vspace{0.05cm}\centering
+  \begin{tabelachave}[4.6cm]{4.2cm}
+    \linha{Solução}{Gerador solar + BESS}
+    \linha{Potência do Sistema}{\potenciaprojeto}
+    \linha{Banco de Baterias}{\bess}
+    \linhadestaque{Investimento}{\invcombateria}
+    \linha{Diferença para o sem bateria}{\custodabateria}
+    \linha{Economia Anual}{\economiaanualcombateria}
+    \linha{Mensalidade (\prazofinanciamentocurto)}{\mensalidadecombateria}
+    \linha{Payback simples}{\paybackcombateria}
+    \linha{Autonomia na falta de energia}{\autonomiacombateria}
+  \end{tabelachave}
+  \notaderodape{A autonomia é a garantida no pior horário e na pior estação do ano, com a carga do quadro de backup deste estudo.}
+\end{frame}
+\fi
+
+% ============================================================================
 %  6. Compra à vista
 % ============================================================================
 \begin{frame}{Compra do Sistema -- \cliente}

@@ -321,9 +321,26 @@ def _balanco_anual(
     reserva_backup_frac: float,
     dias_por_estacao: int,
     semente: int,
+    fator_carga: float = 1.0,
+    fv_no_hibrido: bool = True,
 ) -> dict[str, float]:
     """
     Um ano típico com a rede disponível, dia a dia, para um arranjo de fontes.
+
+    ``fv_no_hibrido`` diz por onde o sol entra. Num sistema residencial o
+    híbrido é o único inversor, e o que passa dele é perdido. Num sistema com
+    inversor de rede próprio o acoplamento é em corrente alternada: o gerador
+    entrega no quadro, o híbrido só carrega o banco com o excedente, e cortar
+    a geração pela entrada CC dele é descrever outra usina — 106 kWp
+    aparecendo como 22 kW porque o híbrido de backup aceita 5 kW de painel.
+
+    ``fator_carga`` escala a carga simulada para a que a fatura mede. Ele entra
+    **aqui**, antes do despacho, e não sobre o resultado: escalar o resultado
+    multiplicaria junto a geração, o autoconsumo e a injeção, que vêm da
+    potência instalada e da série solar e nada têm a ver com o erro do
+    levantamento — uma usina de 2,8 kWp saía do estudo gerando 871 kWh/ano no
+    lugar de 3.600. Escalada a carga, o despacho refaz sozinho o que sobra e o
+    que falta.
 
     A ordem de despacho é a única que faz sentido economicamente com tarifa
     simples: o sol atende a carga, o excedente carrega o banco, o que sobra é
@@ -355,7 +372,7 @@ def _balanco_anual(
 
     for estacao in ensemble.estacoes:
         carga, _ = ensemble.amostrar_dias(estacao, dias_por_estacao, rng)
-        carga = carga / 1000.0
+        carga = carga / 1000.0 * float(fator_carga)
         geracao = (
             serie.amostrar_janelas(
                 estacao, 0, passos_dia, ensemble.passo_min, dias_por_estacao, rng
@@ -363,7 +380,7 @@ def _balanco_anual(
             * float(potencia_fv_kwp)
             / 1000.0
         )
-        if limites is not None and limites.potencia_fv_kw > 0:
+        if limites is not None and limites.potencia_fv_kw > 0 and fv_no_hibrido:
             geracao = np.minimum(geracao, limites.potencia_fv_kw)
 
         def rodar(soc: np.ndarray, acumular: bool) -> np.ndarray:
@@ -649,6 +666,7 @@ def comparar_fontes(
     composicoes: Sequence[Composicao] | None = None,
     dias_por_estacao: int = 45,
     semente: int = 20260902,
+    fv_no_hibrido: bool = True,
     progresso=None,
 ) -> ComparacaoFontes:
     """
@@ -687,6 +705,11 @@ def comparar_fontes(
     fator, aviso_fatura = _fator_de_fatura(base_balanco["consumo"], fatura)
     if aviso_fatura:
         avisos.append(aviso_fatura)
+    if fator != 1.0:
+        # O referencial "só a rede" é todo carga: escalar as suas grandezas é
+        # a mesma coisa que refazer o balanço com a carga escalada, e sai de
+        # graça. Os demais cenários recebem o fator dentro do despacho.
+        base_balanco = {k: v * fator for k, v in base_balanco.items()}
 
     limites_conjunto = LimitesDespacho.do_conjunto(conjunto) if conjunto is not None else None
     # Cotação de verdade passa na frente de qualquer curva; sem ela, o padrão
@@ -733,9 +756,10 @@ def comparar_fontes(
                 premissas.reserva_backup_frac,
                 dias_por_estacao,
                 semente,
+                fator_carga=fator,
+                fv_no_hibrido=fv_no_hibrido,
             )
         )
-        balanco = {k: v * fator for k, v in balanco.items()}
         conta = fatura.conta_anual_brl(balanco["compra"], balanco["injecao"])
 
         capex_bat = capex_bat_com_kit if composicao.solar else capex_bat_sozinho

@@ -177,6 +177,15 @@ class ConfiguracaoEstudo:
     cenario_rotina: Any = None
     rotina: Any = None
 
+    #: Um ensemble de carga total pronto, que entra no lugar da simulação.
+    #:
+    #: Para quando o dia que dimensiona não é uma simulação de cenário, mas
+    #: uma curva construída — a borda superior da faixa de horários, por
+    #: exemplo, que é o 90º percentil de 170 arranjos e não corresponde a
+    #: arranjo nenhum. Quem constrói o ensemble fora responde pela sua
+    #: coerência; o estudo só o consome.
+    ensemble_total: Any = None
+
     #: O envelope da varredura de horários, quando ela foi rodada.
     #:
     #: É a tabela que `aurum.demanda.rotina.envelope_de_rotina` devolve. Vem
@@ -218,6 +227,16 @@ class ConfiguracaoEstudo:
     #: dos dias. Dimensionar o solar pelo pior dia o deixa 40% maior que o
     #: consumo real, e um sistema que gera o que ninguém consome não se paga.
     consumo_anual_kwh: float | None = None
+    #: Que fração desse consumo o sistema fotovoltaico deve compensar quando a
+    #: potência não vem de telhado marcado nem informada à mão. 1,0 abate a
+    #: conta inteira; 0,7, setenta por cento dela.
+    compensar_frac: float = 1.0
+    #: O que decidiu a potência fotovoltaica, como o operador pediu:
+    #: ``"telhado"``, ``"compensar"`` ou ``"potencia"``. O estudo usa isto só
+    #: para prestar contas do resultado — um sistema dimensionado para abater
+    #: a conta continua sendo isso mesmo quando chega aqui como potência
+    #: fechada, já arredondada em módulos inteiros pelo arranjo.
+    objetivo_fv: str = ""
 
     # -- geração -----------------------------------------------------------
     potencia_fv_kwp: float | None = None
@@ -345,6 +364,11 @@ class ResultadoEstudo:
     envelope_rotina: Any = None
     #: A comparação entre metas de autonomia, quando pedida.
     autonomia: Any = None
+    #: A conferência do dimensionamento contra o consumo que ele existe para
+    #: abater: ``{"alvo_kwh", "origem", "fracao_pedida", "geracao_kwh",
+    #: "cobertura", "definida_por"}``. É o que permite à tela e ao documento
+    #: afirmarem — em vez de prometerem — que a usina abate a conta.
+    compensacao: dict[str, Any] | None = None
     #: A comparação entre geometrias de instalação, quando pedida.
     orientacao: Any = None
     escopos: Any = None
@@ -585,26 +609,50 @@ def _dimensionar_fv(cfg: ConfiguracaoEstudo, ensemble: EnsembleCarga, serie: Ser
         return kwp, [aviso]
     if cfg.potencia_fv_kwp is not None:
         return float(cfg.potencia_fv_kwp), []
-    # O consumo informado vence o do ensemble: o ensemble é do perfil que
-    # dimensiona o equipamento, e não do ano médio.
-    do_ensemble = float(np.mean(ensemble.energia_diaria_kwh())) * 365.0
-    consumo_anual = float(cfg.consumo_anual_kwh or do_ensemble)
+    consumo_anual, origem = consumo_a_compensar(cfg, ensemble)
+    fracao = float(np.clip(cfg.compensar_frac, 0.0, 5.0)) or 1.0
+    alvo = consumo_anual * fracao
     rendimento = serie.anual_kwh_por_kwp()
-    kwp = consumo_anual / rendimento if rendimento > 0 else 0.0
+    kwp = alvo / rendimento if rendimento > 0 else 0.0
     consumo_texto = f"{consumo_anual:,.0f}".replace(",", ".")
-    if cfg.ajuste_conta is not None:
-        origem = "consumo anual da conta de luz"
-    elif cfg.consumo_anual_kwh:
-        origem = "consumo anual ponderado entre os perfis de ocupação"
-    else:
-        origem = "consumo anual estimado"
+    parte = "" if fracao >= 0.999 else f" {fracao:.0%} do"
     aviso = (
-        f"Potência FV não informada: dimensionada em {kwp:.1f} kWp para compensar o "
-        f"{origem} de {consumo_texto} kWh a {rendimento:.0f} kWh/kWp. "
+        f"Potência FV não informada: dimensionada em {kwp:.1f} kWp para compensar"
+        f"{parte} o {origem} de {consumo_texto} kWh a {rendimento:.0f} kWh/kWp. "
         "O estudo não verifica se esse sistema cabe na cobertura — para isso, marque "
         "o telhado no mapa."
     )
     return kwp, [aviso]
+
+
+def consumo_a_compensar(
+    cfg: ConfiguracaoEstudo, ensemble: EnsembleCarga
+) -> tuple[float, str]:
+    """
+    O consumo anual que o sistema fotovoltaico existe para abater, e de onde veio.
+
+    A ordem não é de gosto. **A fatura vence**: ela é medida, e é a conta que o
+    cliente quer ver cair; o levantamento de cargas é estimativa, e num
+    levantamento de rascunho ele erra por múltiplos — numa casa com conta de
+    300 kWh/mês o cenário de modelo simulava 1.240 kWh/mês e o sistema saía
+    quatro vezes maior que a conta que ele deveria abater. Depois dela vem o
+    consumo declarado no estudo (a ponderação entre perfis de ocupação, ou a
+    curva ajustada à conta), e por último o do ensemble — que é do perfil que
+    dimensiona o equipamento, e não do ano médio.
+    """
+    da_fatura = cfg.fatura.consumo_anual_kwh if cfg.fatura is not None else None
+    if da_fatura:
+        return float(da_fatura), "consumo anual da conta de luz informada"
+    if cfg.consumo_anual_kwh:
+        origem = (
+            "consumo anual da curva ajustada à conta de luz" if cfg.ajuste_conta is not None
+            else "consumo anual ponderado entre os perfis de ocupação"
+        )
+        return float(cfg.consumo_anual_kwh), origem
+    return (
+        float(np.mean(ensemble.energia_diaria_kwh())) * 365.0,
+        "consumo anual estimado pelo levantamento de cargas",
+    )
 
 
 def _podar_perto_do_alvo(
@@ -918,8 +966,12 @@ def executar_estudo(cfg: ConfiguracaoEstudo, progresso=None) -> ResultadoEstudo:
     else:
         avisar("Simulando a demanda (Monte Carlo por estação)", 0.05)
         comodos, instancias = _carregar_cargas(cfg)
-        ensemble_total = _simular(
-            cfg, comodos, instancias, apenas_essenciais=False,
+        # Um ensemble entregue pronto vence a simulação: é como a borda da
+        # faixa de horários — uma curva construída, e não um cenário — entra
+        # no estudo sem que o motor precise saber construí-la.
+        ensemble_total = (
+            cfg.ensemble_total if cfg.ensemble_total is not None
+            else _simular(cfg, comodos, instancias, apenas_essenciais=False)
         )
         ensemble_backup, avisos_backup = _ensemble_de_backup(cfg, comodos, instancias)
         avisos.extend(avisos_backup)
@@ -1230,6 +1282,43 @@ def executar_estudo(cfg: ConfiguracaoEstudo, progresso=None) -> ResultadoEstudo:
             LOGGER.warning("comparação de cenários de uso falhou: %s", exc)
             avisos.append(f"A comparação entre cenários de uso falhou: {exc}")
 
+    # A conferência do que o sistema abate. Sai do mesmo número que o estudo
+    # usou para dimensionar, e é medida contra a geração que a série de fato
+    # produz — é isto que separa "dimensionado para compensar" de "compensa".
+    alvo_kwh, origem_consumo = consumo_a_compensar(cfg, ensemble_total)
+    geracao_kwh = float(kwp) * serie.anual_kwh_por_kwp()
+    if cfg.objetivo_fv == "compensar":
+        definida_por = "consumo a compensar"
+    elif cfg.aguas or cfg.layout is not None:
+        definida_por = "telhado marcado"
+    elif cfg.potencia_fv_kwp is not None:
+        definida_por = "potência informada"
+    else:
+        definida_por = "consumo a compensar"
+    compensacao = {
+        "alvo_kwh": alvo_kwh,
+        "origem": origem_consumo,
+        "fracao_pedida": float(cfg.compensar_frac),
+        "geracao_kwh": geracao_kwh,
+        "cobertura": geracao_kwh / alvo_kwh if alvo_kwh > 0 else 0.0,
+        "definida_por": definida_por,
+        "potencia_kwp": float(kwp),
+    }
+    if cfg.considerar_solar and definida_por == "consumo a compensar":
+        # Com arranjo fechado, a diferença é o arredondamento em módulos
+        # inteiros; sem ele, é o estudo que errou o alvo. A tolerância maior
+        # no primeiro caso evita transformar "16 módulos em vez de 15,7" em
+        # ressalva de documento.
+        folga = 0.10 if cfg.potencia_fv_kwp is not None else 0.02
+        erro = abs(compensacao["cobertura"] - cfg.compensar_frac)
+        if erro > folga:
+            avisos.append(
+                f"O sistema dimensionado gera {geracao_kwh:,.0f} kWh/ano contra os "
+                f"{alvo_kwh * cfg.compensar_frac:,.0f} kWh/ano que se pediu compensar "
+                f"({compensacao['cobertura']:.0%} do {origem_consumo})."
+                .replace(",", ".")
+            )
+
     avisar("Estudo concluído", 1.0)
     return ResultadoEstudo(
         configuracao=cfg,
@@ -1249,6 +1338,7 @@ def executar_estudo(cfg: ConfiguracaoEstudo, progresso=None) -> ResultadoEstudo:
         cenarios=cenarios,
         envelope_rotina=cfg.envelope_rotina,
         autonomia=autonomia,
+        compensacao=compensacao,
         orientacao=orientacao,
         escopos=escopos,
         uso=uso,
@@ -1371,7 +1461,34 @@ def _comparar_fontes(
         material_ca_brl_kwp=cfg.material_ca_brl_kwp,
         composicoes=fontes,
         semente=cfg.semente,
+        fv_no_hibrido=fv_no_hibrido(cfg, potencia_fv_kwp, conjunto),
     )
+
+
+def fv_no_hibrido(
+    cfg: ConfiguracaoEstudo,
+    potencia_fv_kwp: float,
+    conjunto: ConjuntoArmazenamento | None,
+) -> bool:
+    """
+    O sol entra pelo inversor híbrido, ou por um inversor de rede próprio?
+
+    Decide a arquitetura, e ela muda a conta: acoplado em **corrente contínua**
+    (residencial típico), todo o gerador passa pela entrada FV do híbrido e o
+    que excede a capacidade dele se perde; acoplado em **corrente alternada**,
+    o gerador tem o seu inversor de rede, entrega no quadro, e o híbrido só
+    cuida do banco e do backup.
+
+    A regra: passa pelo híbrido quando cabe nele. Um gerador de 106 kWp não
+    cabe num híbrido que aceita 5 kW de painel — e supor que passa fazia o
+    cenário com bateria relatar 26.700 kWh/ano onde o mesmo sistema sem
+    bateria relata 127.599, como se comprar o banco apagasse quatro quintos da
+    usina. Com folga de 35% na razão CC/CA, que é a mesma que o dimensionador
+    de arranjo aceita.
+    """
+    if conjunto is None or potencia_fv_kwp <= 0:
+        return False
+    return float(potencia_fv_kwp) <= conjunto.inversor.potencia_fv_max_kw * 1.35
 
 
 def combinacoes_pedidas(

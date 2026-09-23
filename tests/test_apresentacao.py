@@ -24,6 +24,9 @@ from aurum.bateria.apresentacao import (
 from aurum.bateria.documento import DadosCapa, escrever_dossie, zip_do_dossie
 from aurum.proposal.render import encontrar_compilador
 
+#: A pasta do esqueleto, para os testes que conferem o que o LaTeX desenha.
+RAIZ_APRES = Path(__file__).resolve().parent.parent / "apresentacao"
+
 from test_documento import estudo_com_telhado  # noqa: F401 — fixture compartilhada
 
 
@@ -99,7 +102,7 @@ def test_cliente_da_capa_vem_das_opcoes_e_cai_no_nome_do_estudo(estudo_com_telha
     tex = dados_tex(dados)
     assert "\\newcommand{\\cliente}{Condomínio Sol}" in tex
     # O esqueleto põe o cliente em destaque na capa, não só no "preparado para".
-    capa = (Path(__file__).resolve().parent.parent / "apresentacao" / "apresentacao.tex").read_text(encoding="utf-8")
+    capa = (RAIZ_APRES / "apresentacao.tex").read_text(encoding="utf-8")
     inicio = capa.index("1. Capa"); fim = capa.index("2. Quem somos")
     assert capa[inicio:fim].count(r"\cliente") >= 2
 
@@ -123,6 +126,11 @@ def test_dados_tex_define_todos_os_comandos_do_esqueleto(estudo_com_telhado):
         "economiaanual", "payback", "tir", "mensalidadefinanciada", "mensalidadeleasing",
         "linhasdesembolso", "linhasfluxo", "fluxoanos", "fluxoavista", "fluxofinanciado",
         "fluxoservico", "fluxozero", "notafluxo", "linhasequipamentos", "fotosequipamentos",
+        "invsembateria", "invcombateria", "economiaanualsembateria",
+        "economiaanualcombateria", "paybacksembateria", "paybackcombateria",
+        "autonomiacombateria", "custodabateria", "notasembateria", "notacombateria",
+        "mensalidadesembateria", "mensalidadecombateria", "prazofinanciamentocurto",
+        "tirsembateria",
     ):
         assert f"\\newcommand{{\\{comando}}}" in tex, comando
     # Texto vindo do operador passa pelo escape — o & e o % derrubariam o LaTeX.
@@ -130,6 +138,50 @@ def test_dados_tex_define_todos_os_comandos_do_esqueleto(estudo_com_telhado):
     assert r"Eng. 100\%" in tex
     # As logos passam a vir da pasta copiada, não do repositório.
     assert r"\renewcommand{\pastalogos}{estaticas/}" in tex
+
+
+def test_os_dois_sistemas_saem_em_slides_distintos(estudo_com_telhado):
+    """
+    Sem bateria e com bateria são duas compras, e cada uma tem o seu slide.
+
+    O que se fixa aqui é que os números de cada slide são os do seu cenário —
+    e não os do outro, nem a soma dos dois.
+    """
+    estudo = estudo_com_telhado
+    dados = dados_da_apresentacao(estudo)
+    c = dados["comparativo"]
+    assert c is not None, "o estudo tem solar e bateria: a comparação tem que existir"
+    sem_cenario = estudo.cenarios.por_chave("solar")
+    com_cenario = estudo.cenarios.por_chave("solar+bateria")
+    assert c["sem_bateria"]["capex_brl"] == pytest.approx(sem_cenario.capex_brl)
+    assert c["com_bateria"]["capex_brl"] == pytest.approx(com_cenario.capex_brl)
+    # O banco custa dinheiro e compra autonomia — é essa a leitura dos slides.
+    assert c["capex_da_bateria_brl"] == pytest.approx(
+        com_cenario.capex_brl - sem_cenario.capex_brl)
+    assert c["com_bateria"]["autonomia_h"] > c["sem_bateria"]["autonomia_h"]
+
+    tex = dados_tex(dados)
+    assert "\\combateriatrue" in tex
+    esqueleto = (RAIZ_APRES / "apresentacao.tex").read_text(encoding="utf-8")
+    assert "\\begin{frame}{Sistema sem Bateria" in esqueleto
+    assert "\\begin{frame}{Sistema com Bateria" in esqueleto
+
+
+def test_sem_os_dois_cenarios_os_slides_de_valor_nao_entram(estudo_com_telhado):
+    """Sem bateria avaliada não há comparação: o par de slides fica de fora."""
+    from dataclasses import replace as _replace
+
+    estudo = estudo_com_telhado
+    so_solar = _replace(
+        estudo.cenarios,
+        cenarios=[c for c in estudo.cenarios.cenarios if not c.composicao.bateria],
+    )
+    dados = dados_da_apresentacao(
+        _replace(estudo, cenarios=so_solar, recomendado=None),
+        opcoes=OpcoesComerciais(cenario="solar"),
+    )
+    assert dados["comparativo"] is None
+    assert "\\combateriafalse" in dados_tex(dados)
 
 
 def test_apresentacao_sai_autocontida(estudo_com_telhado, tmp_path):
