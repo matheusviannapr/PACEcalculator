@@ -362,3 +362,48 @@ def test_bateria_de_tabela_para_em_40_kwp():
     assert bateria_caso_a_caso(90.0, tem_bateria=False) is None, "sem banco, sem ruído"
     aviso = bateria_caso_a_caso(90.0)
     assert aviso and "caso a caso" in aviso and "cotação" in aviso
+
+
+# ----------------------------------------------------------------------------
+# As duas topologias da proposta
+# ----------------------------------------------------------------------------
+def test_o_preco_de_cada_topologia_sai_da_sua_coluna():
+    """Micro e split são produtos diferentes, e a tabela sabe disso."""
+    from aurum.pv.kits import capex_por_topologia, preco_da_bateria, preco_kit
+
+    precos = capex_por_topologia(10.0, bateria_kwh=9.3)
+    micro, split = precos["microinversor"], precos["splitphase"]
+    assert micro["capex_brl"] == pytest.approx(preco_kit(10.0, "microinversor"))
+    # O banco entra só onde ele existe: microinversor não recebe bateria.
+    assert micro["com_bateria"] is False and micro["bateria_kwh"] == 0.0
+    assert split["capex_brl"] == pytest.approx(
+        preco_kit(10.0, "splitphase") + preco_da_bateria(9.3))
+    assert split["capex_brl"] > micro["capex_brl"]
+
+
+def test_acima_da_coluna_o_preco_ainda_sai_da_tabela():
+    """
+    A coluna micro para em 40 kWp; o preço continua sendo de tabela.
+
+    Cair para a curva de R$/kWp aqui seria trocar a origem do número no meio
+    da proposta. A tabela tem a coluna trifásica até 125 kWp, que é o que o
+    distribuidor de fato oferece nessa faixa — e a substituição fica dita.
+    """
+    from aurum.pv.kits import capex_por_topologia, preco_kit
+
+    precos = capex_por_topologia(60.0)
+    micro = precos["microinversor"]
+    assert micro["coluna"] == "trifasico"
+    assert micro["substituicao"] == "microinversor"
+    assert micro["capex_brl"] == pytest.approx(preco_kit(60.0, "trifasico"))
+    assert "Trifásico" in micro["aviso"]
+
+
+def test_fora_de_toda_a_tabela_nao_ha_preco_de_tabela():
+    """Sem coluna que alcance, o preço não é inventado."""
+    from aurum.pv.kits import POTENCIA_MAXIMA_KWP, capex_por_topologia
+
+    precos = capex_por_topologia(POTENCIA_MAXIMA_KWP + 50.0)
+    for dados in precos.values():
+        assert dados["capex_brl"] is None
+        assert "não cobre" in dados["aviso"]

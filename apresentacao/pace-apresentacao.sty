@@ -272,10 +272,15 @@
   \arrayrulecolor{black}%
 }
 \newcommand{\linha}[2]{#1 & #2 \\ \hline}
-% Os slides de valor com e sem bateria só existem quando o estudo avaliou os
-% dois cenários. O dados.tex liga ou desliga o par; o esqueleto não decide.
-\newif\ifcombateria
-\combateriafalse
+% Cada slide de valor existe se a sua topologia foi precificada: o de
+% microinversor e o de split-phase são produtos diferentes, e o comercial pode
+% levar os dois ou um só. O dados.tex liga cada um; o esqueleto não decide.
+\newif\ifmicro
+\newif\ifsplit
+\microfalse
+\splitfalse
+% Atalho para o dados.tex dizer "nenhum dos dois".
+\newcommand{\semslidesdevalor}{\microfalse\splitfalse}
 
 % A linha que importa — o investimento — em âmbar.
 \newcommand{\linhadestaque}[2]{%

@@ -38,6 +38,57 @@ from aurum.pv.solar import (
 # ----------------------------------------------------------------------
 # Recurso solar — o bug do azimute
 # ----------------------------------------------------------------------
+def test_a_melhor_combinacao_fica_na_faixa_de_projeto_e_perto_do_alvo():
+    """
+    O par que o programa elege não é o primeiro que fecha: é o melhor.
+
+    O que se fixa: razão CC/CA dentro da faixa que o projeto assina, potência
+    perto do alvo pedido, e nenhum par viável do catálogo com nota melhor.
+    """
+    from aurum.pv.equipment import carregar_base
+    from aurum.pv.memoria import melhor_arranjo, memoria_do_arranjo
+    from aurum.pv.sizing import DC_AC_MAX, DC_AC_MIN
+
+    base = carregar_base()
+    modulos, inversores = list(base.modulos), list(base.inversores)
+    for alvo in (5.0, 12.0, 24.0, 50.0):
+        arranjo = melhor_arranjo(modulos, inversores, alvo_kwp=alvo)
+        assert arranjo is not None, alvo
+        memoria = arranjo.memoria
+        assert DC_AC_MIN <= memoria.razao_cc_ca <= DC_AC_MAX, (alvo, memoria.razao_cc_ca)
+        # Perto do alvo: nada de entregar o dobro do que se pediu.
+        assert 0.75 * alvo <= memoria.potencia_do_sistema_kwp <= 1.25 * alvo, alvo
+        # E nenhum outro par viável chega mais perto com razão igualmente boa.
+        melhores = [
+            m for m in (
+                memoria_do_arranjo(mod, inv, None)
+                for mod in modulos for inv in inversores
+            )
+            if m.viavel
+            and DC_AC_MIN <= m.razao_cc_ca <= DC_AC_MAX
+            and abs(m.potencia_do_sistema_kwp - alvo) < abs(
+                memoria.potencia_do_sistema_kwp - alvo) - 0.5
+            and abs(m.razao_cc_ca - 1.15) <= abs(memoria.razao_cc_ca - 1.15)
+        ]
+        assert not melhores, (
+            alvo, [(m.inversor.modelo, m.potencia_do_sistema_kwp) for m in melhores[:3]])
+
+
+def test_a_melhor_combinacao_aproveita_o_telhado():
+    """Sem alvo de energia, o critério é instalar o máximo que o telhado dá."""
+    from aurum.pv.equipment import carregar_base
+    from aurum.pv.memoria import melhor_arranjo
+
+    base = carregar_base()
+    arranjo = melhor_arranjo(list(base.modulos), list(base.inversores),
+                             modulos_disponiveis=40)
+    assert arranjo is not None
+    # O módulo de maior potência entre os que cabem: 40 módulos pequenos
+    # entregam menos kWp que 40 grandes, e o telhado é o mesmo.
+    assert arranjo.modulo.potencia_wp >= 600
+    assert arranjo.memoria.potencia_do_sistema_kwp >= 20.0
+
+
 def test_ha_inversor_para_cada_modulo_do_catalogo():
     """
     Todo módulo do catálogo precisa ter inversor utilizável, e não só no topo

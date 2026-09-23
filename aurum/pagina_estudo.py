@@ -144,6 +144,13 @@ _PADROES: dict[str, Any] = {
     #: A potência que o alvo de compensação pede, estimada com a produtividade
     #: do local. O passo do equipamento a usa como teto de módulos.
     "e_kwp_alvo": 0.0,
+    #: Por que o par módulo/inversor atual foi eleito, quando foi o programa
+    #: que o elegeu.
+    "e_motivo_arranjo": "",
+    "e_refazer_arranjo": False,
+    #: As topologias que a proposta compara. Microinversor não faz backup;
+    #: split-phase faz. O comercial decide se leva as duas ou uma só.
+    "e_topologias_proposta": ["microinversor", "splitphase"],
     "e_ensemble_total": None,
     "e_ensemble_backup": None,
     "e_essenciais": [],
@@ -2226,12 +2233,15 @@ def _passo_equipamento() -> None:
     # empacotamento usou, e o inversor é o menor que aceita o gerador com
     # razão CC/CA de até 1,35. O primeiro da lista é o maior do catálogo, e
     # numa casa de 10 kWp ele entrava na proposta como "80 kW string".
+    if st.session_state.pop("e_refazer_arranjo", False):
+        st.session_state.pop("e_modulo_sel", None)
+        st.session_state.pop("e_inversor_sel", None)
     if "e_modulo_sel" not in st.session_state or "e_inversor_sel" not in st.session_state:
         modulo_do_telhado = next(
             (m for m in modulos if layout is not None and m.modelo == layout.modulo.modelo),
             None,
         )
-        modulo_padrao, inversor_padrao = _par_padrao(
+        modulo_padrao, inversor_padrao, motivo_padrao = _par_padrao(
             modulos, inversores,
             float(getattr(layout, "potencia_kwp", 0.0) or kwp_alvo
                   or st.session_state.get("e_kwp") or 0.0),
@@ -2241,12 +2251,22 @@ def _passo_equipamento() -> None:
         )
         st.session_state.setdefault("e_modulo_sel", modulo_padrao)
         st.session_state.setdefault("e_inversor_sel", inversor_padrao)
+        st.session_state["e_motivo_arranjo"] = motivo_padrao
     escolha_modulo = colunas[0].selectbox(
         "Módulo fotovoltaico", modulos, format_func=str, key="e_modulo_sel")
     escolha_inversor = colunas[1].selectbox(
         "Inversor de rede", inversores, format_func=str, key="e_inversor_sel")
     st.session_state["e_modulo"] = escolha_modulo.modelo
     st.session_state["e_inversor"] = escolha_inversor.modelo
+
+    # O botão só **pede** a escolha; quem a executa é o run seguinte, antes de
+    # os seletores existirem. O Streamlit proíbe escrever na chave de um
+    # widget já instanciado, e é isso que faria um botão que decide na hora.
+    if st.button("Escolher a melhor combinação do catálogo"):
+        st.session_state["e_refazer_arranjo"] = True
+        st.rerun()
+    if st.session_state.get("e_motivo_arranjo"):
+        st.caption(f"Combinação escolhida pelo catálogo: {st.session_state['e_motivo_arranjo']}.")
 
     teto_do_alvo = None
     if compensando and not disponiveis:
@@ -2315,37 +2335,37 @@ def _passo_equipamento() -> None:
 def _par_padrao(modulos, inversores, kwp_alvo: float, tensao_rede_v: float,
                 modulo_fixo=None, disponiveis: int | None = None):
     """
-    O par módulo/inversor com que a tela abre: o menor que fecha um arranjo.
+    O par módulo/inversor com que a tela abre: o **melhor** que o catálogo dá.
 
     Módulo e inversor não se escolhem em separado. A corrente do módulo tem
-    que caber no MPPT: um inversor de 12,5 A por tracker — o degrau de 4 a
-    15 kW da GoodWe — não recebe módulo de 620 Wp, que puxa 14 A, e abrir a
-    tela nesse par mostra "este par não fecha" para quem ainda não escolheu
-    nada. Com telhado marcado o módulo é o do empacotamento e só o inversor
-    varia; sem ele, os dois variam, do maior módulo para o menor.
+    que caber no MPPT, a string tem que acender o inversor, e o conjunto tem
+    que ficar na faixa de razão CC/CA que o projeto assina — escolher o maior
+    módulo e depois procurar inversor produz "este par não fecha", e escolher
+    o primeiro que fecha raramente dá o melhor sistema. Quem pontua os pares é
+    :func:`aurum.pv.memoria.melhor_arranjo`.
 
-    A ordem dos inversores é do menor para o maior entre os que aceitam o
-    gerador com razão CC/CA de até 1,35 — o primeiro da lista do catálogo é o
-    maior de todos, e numa casa de 10 kWp ele entrava na proposta como
-    "80 kW string".
+    Com telhado marcado o módulo é o do empacotamento (foi ele que definiu
+    quantos cabem) e só o inversor varia; sem ele, variam os dois.
     """
+    from .pv.memoria import melhor_arranjo
+
     candidatos_modulo = [modulo_fixo] if modulo_fixo is not None else list(modulos)
-    do_menor = sorted(inversores, key=lambda i: i.potencia_ca_w)
-    if kwp_alvo <= 0:
-        return candidatos_modulo[0], inversores[0]
-    que_cabem = [
-        i for i in do_menor
-        if i.potencia_ca_w >= kwp_alvo * 1000.0 / 1.35
-        and (not hasattr(i, "atende_rede") or i.atende_rede(tensao_rede_v))
-    ] or do_menor
-
-    from .pv.memoria import memoria_do_arranjo
-
-    for inversor in que_cabem:
-        for modulo in candidatos_modulo:
-            if memoria_do_arranjo(modulo, inversor, disponiveis).viavel:
-                return modulo, inversor
-    return candidatos_modulo[0], que_cabem[0]
+    elegiveis = [
+        i for i in inversores
+        if not hasattr(i, "atende_rede") or i.atende_rede(tensao_rede_v)
+    ] or list(inversores)
+    arranjo = melhor_arranjo(
+        candidatos_modulo, elegiveis,
+        alvo_kwp=kwp_alvo if kwp_alvo > 0 else None,
+        modulos_disponiveis=disponiveis,
+    )
+    if arranjo is None:
+        return (
+            candidatos_modulo[0],
+            sorted(elegiveis, key=lambda i: i.potencia_ca_w)[0],
+            "nenhum par do catálogo fecha um arranjo válido para este caso",
+        )
+    return arranjo.modulo, arranjo.inversor, arranjo.motivo
 
 
 def _para_latex(formula: str) -> str:
@@ -3747,9 +3767,13 @@ def _controles_do_kit() -> tuple[str | None, float, float]:
         MATERIAL_CA_BRL_KWP,
         POTENCIA_MAXIMA_KWP,
         TOPOLOGIAS,
+        TOPOLOGIAS_DE_PROPOSTA,
         potencia_maxima,
         topologia_para_rede,
     )
+
+    def TOPOLOGIA_DE_PROPOSTA_NOME(chave: str) -> str:
+        return str(TOPOLOGIAS_DE_PROPOSTA[chave]["nome"])
 
     kwp = float(st.session_state.get("e_kwp") or 0.0)
     sugerida = topologia_para_rede(float(st.session_state.get("e_tensao_rede") or 380.0))
@@ -3817,6 +3841,20 @@ def _controles_do_kit() -> tuple[str | None, float, float]:
             key="e_bateria_bloco_brl_w",
             value=float(st.session_state.get("e_bateria_bloco_brl") or BATERIA_BLOCO_BRL),
         )
+        st.markdown("###### O que a proposta compara")
+        st.multiselect(
+            "Topologias na proposta",
+            list(TOPOLOGIAS_DE_PROPOSTA),
+            format_func=lambda t: TOPOLOGIAS_DE_PROPOSTA[t]["nome"],
+            key="e_topologias_proposta",
+            help="Cada uma vira um slide de valor na apresentação, com o preço da "
+                 "coluna correspondente da tabela interna. Microinversor não atravessa "
+                 "a falta de energia; split-phase é o híbrido com banco.",
+        )
+        for topologia in st.session_state["e_topologias_proposta"]:
+            st.caption(f"**{TOPOLOGIA_DE_PROPOSTA_NOME(topologia)}** — "
+                       f"{TOPOLOGIAS_DE_PROPOSTA[topologia]['resumo']}")
+
         st.session_state.setdefault("e_blocos_bateria", 0)
         bloco[2].number_input(
             "Blocos no banco (0 = o estudo escolhe)", 0, 12, step=1,
@@ -4028,6 +4066,7 @@ def _montar_configuracao(
         consumo_anual_kwh=consumo_anual,
         compensar_frac=float(estado.get("e_compensar_frac") or 100) / 100.0,
         objetivo_fv=str(estado.get("e_modo_solar") or ""),
+        topologias_proposta=tuple(estado.get("e_topologias_proposta") or ()),
         ajuste_conta=ajuste_conta,
         fracao_backup=float(estado.get("e_fracao_backup") or 1.0),
         dispersao_diaria=float(estado.get("e_conta_dispersao_dia", 15)) / 100.0,

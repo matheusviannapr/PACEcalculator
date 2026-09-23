@@ -46,7 +46,8 @@ from .sizing import (
     voc_corrigida,
 )
 
-__all__ = ["MemoriaCalculo", "PassoCalculo", "memoria_do_arranjo"]
+__all__ = ["Arranjo", "MemoriaCalculo", "PassoCalculo", "melhor_arranjo",
+           "memoria_do_arranjo"]
 
 
 @dataclass(frozen=True)
@@ -453,3 +454,127 @@ def memoria_do_arranjo(
         passos=passos, avisos=avisos,
         temp_min_c=temp_min_c, temp_max_c=temp_max_c,
     )
+
+
+# ----------------------------------------------------------------------------
+# A melhor combinação
+# ----------------------------------------------------------------------------
+#: A razão CC/CA que se persegue quando há liberdade de escolher.
+#:
+#: Não é o meio da faixa de projeto: é o ponto em que o inversor passa o dia
+#: perto do nominal sem cortar energia em volume relevante. Abaixo dele o
+#: equipamento fica ocioso e o kWp sai caro; acima, os dias claros começam a
+#: bater no teto e a energia cortada não volta.
+FDI_IDEAL = 1.15
+
+
+@dataclass(frozen=True)
+class Arranjo:
+    """Um par módulo/inversor já fechado, com a nota que o elegeu."""
+
+    memoria: MemoriaCalculo
+    pontuacao: float
+    motivo: str
+
+    @property
+    def modulo(self) -> Modulo:
+        return self.memoria.modulo
+
+    @property
+    def inversor(self) -> Inversor:
+        return self.memoria.inversor
+
+
+def melhor_arranjo(
+    modulos: Sequence[Modulo],
+    inversores: Sequence[Inversor],
+    alvo_kwp: float | None = None,
+    modulos_disponiveis: int | None = None,
+    temp_min_c: float = TEMP_MIN_PROJETO_C,
+    temp_max_c: float = TEMP_MAX_CELULA_C,
+) -> Arranjo | None:
+    """
+    O melhor par módulo/inversor do catálogo para este caso.
+
+    Módulo e inversor não se escolhem em separado: a corrente do módulo tem
+    que caber no MPPT, a tensão da string tem que acender o inversor, e a
+    potência do conjunto tem que ficar na faixa de projeto. Escolher o maior
+    módulo e depois procurar inversor é o caminho que produz "este par não
+    fecha" — ou, pior, o primeiro par que fecha, que raramente é o melhor.
+
+    O critério, em ordem de peso:
+
+    1. **Razão CC/CA** perto de :data:`FDI_IDEAL`, e dentro da faixa de
+       projeto. É o que decide se o investimento em inversor está sendo usado.
+    2. **Potência entregue**: perto do alvo, quando há um (a conta a abater);
+       o máximo que o telhado comporta, quando o limite é a área.
+    3. **Menos inversores** para o mesmo sistema — menos equipamento, menos
+       pontos de falha, menos comissionamento.
+    4. No empate, **módulo de maior potência**: menos módulos para o mesmo
+       kWp significa menos estrutura e menos horas de montagem.
+
+    Devolve ``None`` quando nenhum par fecha — o que, com catálogo pequeno e
+    telhado apertado, é uma resposta legítima e melhor que um arranjo inválido.
+    """
+    viaveis: list[MemoriaCalculo] = []
+    alvo = float(alvo_kwp) if alvo_kwp and alvo_kwp > 0 else None
+    for modulo in modulos:
+        for inversor in inversores:
+            memoria = memoria_do_arranjo(
+                modulo, inversor, modulos_disponiveis, temp_min_c, temp_max_c)
+            if memoria.viavel and memoria.potencia_do_sistema_kwp > 0:
+                viaveis.append(memoria)
+    if not viaveis:
+        return None
+    # Sem alvo declarado, o alvo é implícito: a maior potência que este
+    # catálogo consegue instalar no caso. Sem essa referência, "aproveitar
+    # 100% do telhado" premiava igualmente o módulo de 450 Wp e o de 640 Wp,
+    # e o de 450 entregava 90 kWp onde o outro entrega 128.
+    teto_kwp = max(m.potencia_do_sistema_kwp for m in viaveis)
+    candidatos = [_pontuar(m, alvo, teto_kwp) for m in viaveis]
+    return min(candidatos, key=lambda a: (a.pontuacao, -a.modulo.potencia_wp))
+
+
+def _pontuar(
+    memoria: MemoriaCalculo,
+    alvo_kwp: float | None,
+    teto_kwp: float,
+) -> "Arranjo":
+    """
+    Traduz o arranjo numa nota, em que menos é melhor.
+
+    As penalidades são somadas em unidades comparáveis — fração de desvio —,
+    para que nenhuma delas domine por acidente de escala.
+    """
+    kwp = memoria.potencia_do_sistema_kwp
+    fdi = memoria.razao_cc_ca
+
+    # 1. Razão CC/CA: desvio relativo do ideal, com degrau para quem sai da
+    #    faixa de projeto — fora dela não é uma escolha um pouco pior, é uma
+    #    escolha que o projeto não assina.
+    fora_da_faixa = not (DC_AC_MIN <= fdi <= DC_AC_MAX)
+    nota = abs(fdi - FDI_IDEAL) / FDI_IDEAL + (1.0 if fora_da_faixa else 0.0)
+
+    # 2. Potência: perto do alvo, ou o máximo que o telhado permite.
+    if alvo_kwp:
+        nota += 2.0 * abs(kwp - alvo_kwp) / alvo_kwp
+        motivo_potencia = f"{kwp:.1f} kWp para um alvo de {alvo_kwp:.1f} kWp"
+    elif teto_kwp > 0:
+        nota += 2.0 * (1.0 - kwp / teto_kwp)
+        motivo_potencia = (
+            f"{kwp:.1f} kWp, o máximo que o catálogo instala aqui"
+            if kwp >= teto_kwp - 1e-9
+            else f"{kwp:.1f} kWp de {teto_kwp:.1f} kWp possíveis"
+        )
+    else:
+        motivo_potencia = f"{kwp:.1f} kWp"
+
+    # 3. Cada inversor a mais é meia unidade de desvio: pesa, sem vetar.
+    nota += 0.5 * (memoria.inversores - 1)
+
+    motivo = (
+        f"{motivo_potencia}, razão CC/CA {fdi:.2f}"
+        + (" (fora da faixa de projeto)" if fora_da_faixa else "")
+        + (f", {memoria.inversores} inversores" if memoria.inversores > 1 else "")
+    )
+    return Arranjo(memoria=memoria, pontuacao=nota, motivo=motivo)

@@ -237,6 +237,12 @@ class ConfiguracaoEstudo:
     #: a conta continua sendo isso mesmo quando chega aqui como potência
     #: fechada, já arredondada em módulos inteiros pelo arranjo.
     objetivo_fv: str = ""
+    #: As topologias de kit que a proposta compara — microinversor (sem
+    #: armazenamento) e split-phase (com o banco). O preço de cada uma sai da
+    #: tabela interna (:mod:`aurum.pv.kits`), nunca de curva de R$/kWp: é a
+    #: planilha do distribuidor que a PACE mantém, e é dela que o comercial
+    #: responde quando o cliente pergunta de onde veio o número.
+    topologias_proposta: tuple[str, ...] = ("microinversor", "splitphase")
 
     # -- geração -----------------------------------------------------------
     potencia_fv_kwp: float | None = None
@@ -364,6 +370,10 @@ class ResultadoEstudo:
     envelope_rotina: Any = None
     #: A comparação entre metas de autonomia, quando pedida.
     autonomia: Any = None
+    #: O investimento de cada topologia pedida, direto da tabela de kit:
+    #: ``{topologia: {capex_brl, coluna, com_bateria, aviso, ...}}``. É o que a
+    #: apresentação usa nos slides de valor.
+    precos_por_topologia: dict[str, Any] | None = None
     #: A conferência do dimensionamento contra o consumo que ele existe para
     #: abater: ``{"alvo_kwh", "origem", "fracao_pedida", "geracao_kwh",
     #: "cobertura", "definida_por"}``. É o que permite à tela e ao documento
@@ -1179,8 +1189,42 @@ def executar_estudo(cfg: ConfiguracaoEstudo, progresso=None) -> ResultadoEstudo:
         if aviso_banco:
             avisos.append(aviso_banco)
 
+    # -- o preço, e só da tabela -------------------------------------------
+    # Microinversor e split-phase são produtos diferentes, e cada cenário
+    # recebe o preço do seu. Antes, o estudo levava um capex fotovoltaico só
+    # para todos os arranjos: a mesma usina custava o mesmo com e sem banco, e
+    # a diferença entre as duas propostas era só o preço dos blocos.
+    energia_banco = (
+        conjunto_dos_cenarios.energia_util_kwh if conjunto_dos_cenarios is not None else 0.0
+    )
+    precos_por_topologia = None
+    capex_por_cenario: dict[str, float] = {}
+    if cfg.considerar_solar and kwp > 0 and cfg.topologias_proposta:
+        from ..pv.kits import capex_por_topologia
+
+        precos_por_topologia = capex_por_topologia(
+            kwp, cfg.topologias_proposta,
+            mao_de_obra_brl_kwp=cfg.mao_de_obra_brl_kwp or 0.0,
+            material_ca_brl_kwp=cfg.material_ca_brl_kwp or 0.0,
+            bateria_kwh=energia_banco,
+            bloco_kwh=cfg.premissas.bloco_bateria_kwh or 5.0,
+            bloco_brl=cfg.premissas.bloco_bateria_brl or 0.0,
+        )
+        for topologia, dados in precos_por_topologia.items():
+            if dados["aviso"]:
+                avisos.append(f"{dados['nome']}: {dados['aviso']}")
+            if dados["capex_brl"] is None:
+                continue
+            chave = str(dados["cenario"])
+            # O banco entra no preço do kit split-phase; deixá-lo aqui e
+            # somá-lo de novo no cenário cobraria a bateria duas vezes.
+            capex_por_cenario[chave] = float(dados["capex_brl"]) - (
+                _preco_do_banco(cfg, energia_banco) if dados["com_bateria"] else 0.0
+            )
+
     cenarios = _comparar_fontes(
         cfg, ensemble_total, ensemble_backup_passo, serie, kwp, conjunto_dos_cenarios,
+        capex_fv_por_cenario=capex_por_cenario or None,
     )
     if cenarios is not None:
         avisos.extend(cenarios.avisos)
@@ -1339,6 +1383,7 @@ def executar_estudo(cfg: ConfiguracaoEstudo, progresso=None) -> ResultadoEstudo:
         envelope_rotina=cfg.envelope_rotina,
         autonomia=autonomia,
         compensacao=compensacao,
+        precos_por_topologia=precos_por_topologia,
         orientacao=orientacao,
         escopos=escopos,
         uso=uso,
@@ -1416,6 +1461,18 @@ def _dimensionar_gerador(
     return grupo, aviso
 
 
+def _preco_do_banco(cfg: ConfiguracaoEstudo, energia_kwh: float) -> float:
+    """O que os blocos de bateria custam, pelas premissas do estudo."""
+    from ..pv.kits import preco_da_bateria
+
+    if energia_kwh <= 0 or cfg.premissas.bloco_bateria_brl <= 0:
+        return 0.0
+    return preco_da_bateria(
+        energia_kwh, cfg.premissas.bloco_bateria_kwh or 5.0,
+        cfg.premissas.bloco_bateria_brl,
+    )
+
+
 def _comparar_fontes(
     cfg: ConfiguracaoEstudo,
     ensemble_total: EnsembleCarga,
@@ -1423,6 +1480,7 @@ def _comparar_fontes(
     serie: SerieGeracao,
     potencia_fv_kwp: float,
     conjunto: ConjuntoArmazenamento | None,
+    capex_fv_por_cenario: dict[str, float] | None = None,
 ) -> ComparacaoFontes | None:
     """
     Monta o quadro de cenários, ou explica por que ele não existe.
@@ -1462,6 +1520,7 @@ def _comparar_fontes(
         composicoes=fontes,
         semente=cfg.semente,
         fv_no_hibrido=fv_no_hibrido(cfg, potencia_fv_kwp, conjunto),
+        capex_fv_por_cenario=capex_fv_por_cenario,
     )
 
 

@@ -365,13 +365,20 @@ def test_o_inversor_padrao_cabe_no_gerador_e_a_escolha_sobrevive_a_navegacao():
     at = _ate_o_equipamento(_ate_o_consumo(_abrir()), kwp=20.0)
     assert at.session_state["e_passo"] == EQUIPAMENTO
     from aurum.pv.equipment import carregar_base
+    from aurum.pv.memoria import memoria_do_arranjo
+    from aurum.pv.sizing import DC_AC_MAX, DC_AC_MIN
 
+    base = carregar_base()
     padrao = at.session_state["e_inversor_sel"]
-    # O menor do catálogo que aceita 20 kWp com razão CC/CA de até 1,35 — e
-    # não o maior da lista, que é o primeiro do seletor.
-    que_cabem = [i for i in carregar_base().inversores if i.potencia_ca_w >= 20_000.0 / 1.35]
-    assert padrao.potencia_ca_w == min(i.potencia_ca_w for i in que_cabem), padrao.modelo
-    assert padrao.potencia_ca_w < max(i.potencia_ca_w for i in carregar_base().inversores)
+    modulo = at.session_state["e_modulo_sel"]
+    memoria = memoria_do_arranjo(modulo, padrao, None)
+    # O par que abre a tela fecha arranjo e fica na faixa de projeto — não é
+    # o primeiro da lista, que é o maior inversor do catálogo.
+    assert memoria.viavel, f"{modulo.modelo} + {padrao.modelo}"
+    assert DC_AC_MIN <= memoria.razao_cc_ca <= DC_AC_MAX, memoria.razao_cc_ca
+    assert padrao.potencia_ca_w < max(i.potencia_ca_w for i in base.inversores)
+    # E entrega perto dos 20 kWp pedidos, em vez do arranjo cheio do inversor.
+    assert 12.0 <= memoria.potencia_do_sistema_kwp <= 28.0, memoria.potencia_do_sistema_kwp
 
     # Escolhe outro, sai e volta: a escolha tem que estar lá.
     inversores = [i for i in _por_rotulo(at.selectbox, "Inversor de rede").options]
@@ -716,6 +723,64 @@ def test_a_meta_pergunta_o_padrao_da_obra():
     _por_rotulo(at.number_input, "Ou informe o investimento no solar")
 
 
+def test_o_preco_do_estudo_vem_da_tabela_de_kit_e_nao_da_curva():
+    """
+    O investimento sai da planilha interna, e de mais lugar nenhum.
+
+    A curva de R$/kWp continua existindo para o que a tabela não cobre, mas
+    ela não pode decidir o preço de um sistema que a tabela precifica: duas
+    origens para o mesmo número é como o mesmo sistema aparecia com dois
+    investimentos diferentes conforme o caminho da tela.
+    """
+    at = _ate_a_meta(_abrir())
+    seletor = _por_rotulo(at.selectbox, "Padrão da obra")
+    alto = next(o for o in seletor.options if "Alto padrão" in str(o))
+    seletor.set_value(alto).run()
+    assert not at.exception, at.exception
+
+    _por_rotulo(at.select_slider, "Autonomia alvo").set_value(1).run()
+    _por_rotulo(at.multiselect, "Durações de falta").set_value([1.0]).run()
+    _por_rotulo(at.slider, "Amostras por combinação").set_value(20).run()
+    _por_rotulo(at.slider, "Conjuntos a avaliar").set_value(2).run()
+    _por_rotulo(at.button, "Rodar o estudo").click().run()
+    assert not at.exception, at.exception
+
+    from aurum.pv.financials import estimar_capex
+
+    estudo = at.session_state["e_estudo"]
+    assert estudo.configuracao.padrao_capex == "alto"
+    precos = estudo.precos_por_topologia
+    assert precos and set(precos) == {"microinversor", "splitphase"}
+
+    # O cenário sem bateria é o kit de microinversor; o com bateria, o
+    # split-phase — e o banco entra uma vez só, no preço do kit.
+    solar = estudo.cenarios.por_chave("solar")
+    assert solar.capex_brl == pytest.approx(precos["microinversor"]["capex_brl"], rel=1e-6)
+    com_banco = estudo.cenarios.por_chave("solar+bateria")
+    assert com_banco.capex_brl == pytest.approx(precos["splitphase"]["capex_brl"], rel=1e-6)
+    # E nenhum dos dois é a curva do padrão de obra escolhido.
+    assert solar.capex_brl != pytest.approx(
+        estimar_capex(estudo.potencia_fv_kwp, padrao="alto"), rel=1e-3)
+
+
+def test_o_operador_escolhe_as_topologias_da_proposta():
+    """Split e micro, ou só um dos dois — a escolha chega ao estudo."""
+    at = _ate_a_meta(_abrir())
+    _por_rotulo(at.multiselect, "Topologias na proposta").set_value(["splitphase"]).run()
+    assert not at.exception, at.exception
+
+    _por_rotulo(at.select_slider, "Autonomia alvo").set_value(1).run()
+    _por_rotulo(at.multiselect, "Durações de falta").set_value([1.0]).run()
+    _por_rotulo(at.slider, "Amostras por combinação").set_value(20).run()
+    _por_rotulo(at.slider, "Conjuntos a avaliar").set_value(2).run()
+    _por_rotulo(at.button, "Rodar o estudo").click().run()
+    assert not at.exception, at.exception
+
+    estudo = at.session_state["e_estudo"]
+    assert estudo.configuracao.topologias_proposta == ("splitphase",)
+    assert set(estudo.precos_por_topologia) == {"splitphase"}
+
+
 def test_padrao_da_obra_chega_ao_estudo():
     """De nada adianta o seletor existir se a configuração ignora a escolha."""
     at = _ate_a_meta(_abrir())
@@ -732,14 +797,9 @@ def test_padrao_da_obra_chega_ao_estudo():
     assert not at.exception, at.exception
 
     estudo = at.session_state["e_estudo"]
+    # A escolha chega à configuração. Ela decide o preço apenas onde a tabela
+    # de kit não alcança — dentro dela, quem manda é a tabela.
     assert estudo.configuracao.padrao_capex == "alto"
-    # E o preço estimado tem de refletir a escolha, não a curva média.
-    from aurum.pv.financials import estimar_capex
-
-    solar = estudo.cenarios.por_chave("solar")
-    assert solar.capex_brl == pytest.approx(
-        estimar_capex(estudo.potencia_fv_kwp, padrao="alto"), rel=1e-6
-    )
 
 
 def test_estudo_completo_pela_interface():

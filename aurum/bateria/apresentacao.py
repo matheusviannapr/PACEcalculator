@@ -80,6 +80,10 @@ class OpcoesComerciais:
     #: Nome que aparece na capa e nos títulos. ``None`` usa o nome do estudo.
     cliente: str | None = None
     data: date = field(default_factory=date.today)
+    #: As topologias que os slides de valor comparam. ``None`` leva as que o
+    #: estudo precificou. Vazio nenhum slide de valor — é a proposta de quem
+    #: só quer o dossiê técnico.
+    topologias: Sequence[str] | None = None
     #: Chave do cenário de fontes que a proposta apresenta (``solar``,
     #: ``solar+bateria``...). ``None`` escolhe: solar com o banco recomendado
     #: quando o estudo tem os dois, senão só solar.
@@ -366,33 +370,48 @@ def _comparativo_de_bateria(
     servicos_mes: float,
 ) -> dict[str, Any] | None:
     """
-    O mesmo gerador solar com e sem o banco — em dinheiro, lado a lado.
+    As duas topologias da proposta, em dinheiro, lado a lado.
 
-    São duas compras diferentes, e a diferença entre elas não é só o preço: o
-    banco não gera energia, ele guarda a que o sol já produziu, então ele
-    acrescenta pouca economia e muita autonomia. Somar os dois num número só
-    esconde justamente a pergunta que o cliente faz — "quanto me custa não
-    ficar sem luz?" —, e é ela que estes dois slides respondem.
+    **Microinversor** e **split-phase** não são dois preços do mesmo sistema:
+    são dois produtos. O micro não atravessa a falta de energia — desliga com
+    a rede, como manda a norma de conexão, e não há onde ligar bateria. O
+    split-phase é híbrido e segue alimentando o quadro de backup. Por isso um
+    slide para cada, e por isso a comparação entre eles é também a comparação
+    entre ter e não ter autonomia.
 
-    ``None`` quando o estudo não tem os dois cenários: sem bateria avaliada,
-    ou sem solar, não há comparação a fazer, e um slide vazio é pior que
-    nenhum slide.
+    O preço de cada um vem da **tabela interna de kit**, da coluna da sua
+    topologia — nunca de curva de R$/kWp. O resto (economia, payback, TIR)
+    vem do cenário de fontes correspondente, que o estudo rodou com esse
+    mesmo capex.
+
+    ``None`` quando o estudo não precificou nenhuma das topologias pedidas.
     """
-    if estudo.cenarios is None:
+    precos = getattr(estudo, "precos_por_topologia", None)
+    if not precos or estudo.cenarios is None:
         return None
-    sem = estudo.cenarios.por_chave("solar")
-    com = estudo.cenarios.por_chave("solar+bateria")
-    if sem is None or com is None:
-        return None
+    pedidas = list(opcoes.topologias) if opcoes.topologias is not None else list(precos)
 
-    def bloco(cenario, com_banco: bool) -> dict[str, Any]:
-        capex = float(cenario.capex_brl)
+    blocos: dict[str, dict[str, Any]] = {}
+    for topologia in pedidas:
+        dados = precos.get(topologia)
+        if not dados or dados.get("capex_brl") is None:
+            continue
+        cenario = estudo.cenarios.por_chave(str(dados["cenario"]))
+        if cenario is None:
+            continue
+        capex = float(dados["capex_brl"])
         economia_anual = float(cenario.economia_anual_brl)
-        return {
+        blocos[topologia] = {
+            "nome": dados["nome"],
+            "resumo": dados["resumo"],
+            "com_banco": bool(dados["com_bateria"]),
+            "bateria_kwh": float(dados["bateria_kwh"]),
+            "coluna": dados["coluna"],
+            "substituicao": dados["substituicao"],
             "capex_brl": capex,
             "economia_anual_brl": economia_anual,
             "economia_mensal_brl": economia_anual / 12.0,
-            "payback_anos": cenario.payback_anos,
+            "payback_anos": capex / economia_anual if economia_anual > 0 else None,
             "tir": cenario.tir,
             "autonomia_h": float(cenario.autonomia_garantida_h),
             "parcela_brl_mes": parcela_price(
@@ -400,19 +419,24 @@ def _comparativo_de_bateria(
                 opcoes.prazo_financiamento_meses, opcoes.carencia_financiamento_meses,
             ),
             "saldo_mensal_brl": economia_anual / 12.0 - servicos_mes,
-            "com_banco": com_banco,
         }
+    if not blocos:
+        return None
 
-    sem_banco, com_banco = bloco(sem, False), bloco(com, True)
-    return {
-        "sem_bateria": sem_banco,
-        "com_bateria": com_banco,
-        "capex_da_bateria_brl": com_banco["capex_brl"] - sem_banco["capex_brl"],
-        "economia_da_bateria_brl_ano": (
-            com_banco["economia_anual_brl"] - sem_banco["economia_anual_brl"]
-        ),
-        "autonomia_ganha_h": com_banco["autonomia_h"] - sem_banco["autonomia_h"],
+    sem = blocos.get("microinversor")
+    com = blocos.get("splitphase")
+    comparativo: dict[str, Any] = {
+        "topologias": blocos,
+        "sem_bateria": sem,
+        "com_bateria": com,
     }
+    if sem and com:
+        comparativo["capex_da_bateria_brl"] = com["capex_brl"] - sem["capex_brl"]
+        comparativo["economia_da_bateria_brl_ano"] = (
+            com["economia_anual_brl"] - sem["economia_anual_brl"]
+        )
+        comparativo["autonomia_ganha_h"] = com["autonomia_h"] - sem["autonomia_h"]
+    return comparativo
 
 
 def _brl(valor: float | None, casas: int = 0) -> str:
@@ -618,8 +642,8 @@ def _tex_do_comparativo(dados: dict[str, Any]) -> list[str]:
     c = dados.get("comparativo")
     o = dados["opcoes"]
     if not c:
-        return [r"\combateriafalse"]
-    sem, com = c["sem_bateria"], c["com_bateria"]
+        return [r"\semslidesdevalor"]
+    sem, com = c.get("sem_bateria"), c.get("com_bateria")
 
     def payback(bloco: dict[str, Any]) -> str:
         anos = bloco["payback_anos"]
@@ -628,8 +652,11 @@ def _tex_do_comparativo(dados: dict[str, Any]) -> list[str]:
     def tir(bloco: dict[str, Any]) -> str:
         return f"{br_float(bloco['tir'] * 100, 1)}\\% a.a." if bloco["tir"] else "---"
 
-    linhas = [r"\combateriatrue"]
-    for chave, bloco in (("sem", sem), ("com", com)):
+    linhas = [
+        r"\micro" + ("true" if sem else "false"),
+        r"\split" + ("true" if com else "false"),
+    ]
+    for chave, bloco in (("sem", sem or com), ("com", com or sem)):
         linhas += [
             _cmd(f"inv{chave}bateria", _brl(bloco["capex_brl"], 2)),
             _cmd(f"economiaanual{chave}bateria", f"{_brl(bloco['economia_anual_brl'], 2)} no 1º ano"),
@@ -638,20 +665,31 @@ def _tex_do_comparativo(dados: dict[str, Any]) -> list[str]:
             _cmd(f"tir{chave}bateria", tir(bloco)),
             _cmd(f"mensalidade{chave}bateria", _brl(bloco["parcela_brl_mes"], 2)),
         ]
-    autonomia = com["autonomia_h"]
+    autonomia = float(com["autonomia_h"]) if com else 0.0
+    diferenca = c.get("capex_da_bateria_brl")
+    ganho = c.get("economia_da_bateria_brl_ano") or 0.0
     linhas += [
         _cmd("autonomiacombateria",
              f"{br_float(autonomia, 1)} h sem rede" if autonomia > 0 else "não avaliada"),
-        _cmd("custodabateria", _brl(c["capex_da_bateria_brl"], 2)),
-        _cmd("ganhodabateria", f"{_brl(c['economia_da_bateria_brl_ano'], 2)}/ano"),
+        _cmd("custodabateria", _brl(diferenca, 2) if diferenca is not None else "---"),
+        _cmd("ganhodabateria", f"{_brl(ganho, 2)}/ano"),
+        _cmd("nomesembateria", esc(sem["nome"]) if sem else "---"),
+        _cmd("nomecombateria", esc(com["nome"]) if com else "---"),
+        _cmd("bancocombateria",
+             f"{br_float(com['bateria_kwh'], 1)} kWh úteis" if com and com["bateria_kwh"]
+             else "---"),
         _cmd("notasembateria",
-             "O gerador solar sozinho: abate a conta, e para quando a rede para."),
+             esc(sem["resumo"]) if sem else "Gerador solar conectado à rede."),
         _cmd("notacombateria",
-             f"O mesmo gerador com o banco: {_brl(c['capex_da_bateria_brl'])} a mais "
-             f"de investimento compram {br_float(autonomia, 1)} h de autonomia"
-             + (f" e {_brl(c['economia_da_bateria_brl_ano'])}/ano de economia adicional."
-                if c["economia_da_bateria_brl_ano"] > 0 else "."),),
+             (f"{_brl(diferenca)} a mais de investimento compram "
+              f"{br_float(autonomia, 1)} h de autonomia"
+              + (f" e {_brl(ganho)}/ano de economia adicional." if ganho > 0 else "."))
+             if (com and diferenca is not None) else (esc(com["resumo"]) if com else "---")),
         _cmd("prazofinanciamentocurto", f"{o['prazo_financiamento_meses']}x"),
+        _cmd("origemdopreco",
+             "Preços da tabela de kit vigente"
+             + (f", coluna {esc(str(sem['coluna']))}" if sem and not com else "")
+             + "."),
     ]
     return linhas
 

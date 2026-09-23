@@ -150,38 +150,46 @@ def test_os_dois_sistemas_saem_em_slides_distintos(estudo_com_telhado):
     estudo = estudo_com_telhado
     dados = dados_da_apresentacao(estudo)
     c = dados["comparativo"]
-    assert c is not None, "o estudo tem solar e bateria: a comparação tem que existir"
-    sem_cenario = estudo.cenarios.por_chave("solar")
-    com_cenario = estudo.cenarios.por_chave("solar+bateria")
-    assert c["sem_bateria"]["capex_brl"] == pytest.approx(sem_cenario.capex_brl)
-    assert c["com_bateria"]["capex_brl"] == pytest.approx(com_cenario.capex_brl)
+    assert c is not None, "o estudo precificou as duas topologias"
+    micro, split = c["sem_bateria"], c["com_bateria"]
+    precos = estudo.precos_por_topologia
+    # Cada slide traz o preço da sua coluna da tabela de kit.
+    assert micro["capex_brl"] == pytest.approx(precos["microinversor"]["capex_brl"])
+    assert split["capex_brl"] == pytest.approx(precos["splitphase"]["capex_brl"])
     # O banco custa dinheiro e compra autonomia — é essa a leitura dos slides.
     assert c["capex_da_bateria_brl"] == pytest.approx(
-        com_cenario.capex_brl - sem_cenario.capex_brl)
-    assert c["com_bateria"]["autonomia_h"] > c["sem_bateria"]["autonomia_h"]
+        split["capex_brl"] - micro["capex_brl"])
+    assert split["autonomia_h"] > micro["autonomia_h"]
+    assert micro["com_banco"] is False and split["com_banco"] is True
 
     tex = dados_tex(dados)
-    assert "\\combateriatrue" in tex
+    assert "\\microtrue" in tex and "\\splittrue" in tex
     esqueleto = (RAIZ_APRES / "apresentacao.tex").read_text(encoding="utf-8")
-    assert "\\begin{frame}{Sistema sem Bateria" in esqueleto
-    assert "\\begin{frame}{Sistema com Bateria" in esqueleto
+    assert "\\ifmicro" in esqueleto and "\\ifsplit" in esqueleto
 
 
-def test_sem_os_dois_cenarios_os_slides_de_valor_nao_entram(estudo_com_telhado):
-    """Sem bateria avaliada não há comparação: o par de slides fica de fora."""
-    from dataclasses import replace as _replace
-
+def test_o_comercial_escolhe_quais_topologias_a_proposta_leva(estudo_com_telhado):
+    """Só o microinversor, só o split-phase, ou os dois — a proposta obedece."""
     estudo = estudo_com_telhado
-    so_solar = _replace(
-        estudo.cenarios,
-        cenarios=[c for c in estudo.cenarios.cenarios if not c.composicao.bateria],
-    )
+    so_micro = dados_da_apresentacao(
+        estudo, opcoes=OpcoesComerciais(topologias=["microinversor"]))
+    assert set(so_micro["comparativo"]["topologias"]) == {"microinversor"}
+    tex = dados_tex(so_micro)
+    assert "\\microtrue" in tex and "\\splitfalse" in tex
+
+    so_split = dados_da_apresentacao(
+        estudo, opcoes=OpcoesComerciais(topologias=["splitphase"]))
+    assert set(so_split["comparativo"]["topologias"]) == {"splitphase"}
+    tex = dados_tex(so_split)
+    assert "\\splittrue" in tex and "\\microfalse" in tex
+
+
+def test_sem_topologia_precificada_os_slides_de_valor_nao_entram(estudo_com_telhado):
+    """Nenhuma topologia pedida: os slides ficam de fora, em vez de sair vazios."""
     dados = dados_da_apresentacao(
-        _replace(estudo, cenarios=so_solar, recomendado=None),
-        opcoes=OpcoesComerciais(cenario="solar"),
-    )
+        estudo_com_telhado, opcoes=OpcoesComerciais(topologias=[]))
     assert dados["comparativo"] is None
-    assert "\\combateriafalse" in dados_tex(dados)
+    assert "\\semslidesdevalor" in dados_tex(dados)
 
 
 def test_apresentacao_sai_autocontida(estudo_com_telhado, tmp_path):

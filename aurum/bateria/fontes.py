@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field, replace
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
@@ -667,10 +667,16 @@ def comparar_fontes(
     dias_por_estacao: int = 45,
     semente: int = 20260902,
     fv_no_hibrido: bool = True,
+    capex_fv_por_cenario: Mapping[str, float] | None = None,
     progresso=None,
 ) -> ComparacaoFontes:
     """
     Avalia cada arranjo de fontes e devolve os cenários lado a lado.
+
+    ``capex_fv_por_cenario`` dá a cada arranjo o preço da **sua** topologia:
+    o gerador sem bateria é um kit de microinversor e o com bateria é um kit
+    split-phase, e eles não custam o mesmo por kWp. Um preço único para os
+    dois faria a bateria parecer de graça num e caríssima no outro.
 
     ``padrao_capex`` escolhe a referência de R$/kWp do sistema fotovoltaico
     entre os :data:`aurum.pv.financials.PADROES_CAPEX`. O mesmo kWp custa
@@ -763,8 +769,11 @@ def comparar_fontes(
         conta = fatura.conta_anual_brl(balanco["compra"], balanco["injecao"])
 
         capex_bat = capex_bat_com_kit if composicao.solar else capex_bat_sozinho
+        capex_fv_do_cenario = float(
+            (capex_fv_por_cenario or {}).get(composicao.chave, capex_fv)
+        )
         capex = (
-            (capex_fv if composicao.solar else 0.0)
+            (capex_fv_do_cenario if composicao.solar else 0.0)
             + (capex_bat if composicao.bateria else 0.0)
             + (float(gerador.capex_brl) if composicao.gerador and gerador else 0.0)
         )
