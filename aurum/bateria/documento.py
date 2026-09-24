@@ -35,7 +35,7 @@ import re
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import TYPE_CHECKING, Any, Iterable, Sequence
 
 import numpy as np
 import pandas as pd
@@ -55,6 +55,9 @@ from ..proposal.latex import (
 from ..proposal.render import compilar_pdf, encontrar_compilador
 from ..proposal.sections import PREAMBULO
 from .estudo import ResultadoEstudo
+
+if TYPE_CHECKING:  # só para a assinatura: apresentacao importa este módulo
+    from .apresentacao import OpcoesComerciais
 
 LOGGER = logging.getLogger(__name__)
 
@@ -76,6 +79,9 @@ class DadosCapa:
     nomear_marcas: bool = False
     responsavel: str = ""
     crea: str = ""
+    #: Formação e título, como aparecem na capa da apresentação
+    #: ("Engenheiro Eletricista -- MSc ..."). O dossiê não os usa.
+    credenciais: str = ""
     telefone: str = ""
     email: str = ""
     site: str = ""
@@ -512,6 +518,11 @@ def _secao_solar(estudo: ResultadoEstudo, figuras: dict[str, Path]) -> str:
         f"{_n(serie.anual_kwh_por_kwp(), 0, 'kWh/kWp')}, e o sistema de "
         f"{_n(estudo.potencia_fv_kwp, 1, 'kWp')} gera cerca de "
         f"{_n(estudo.potencia_fv_kwp * serie.anual_kwh_por_kwp(), 0, 'kWh')} por ano.",
+        # A frase da compensação vai aqui quando não há arranjo: a seção do
+        # sistema fotovoltaico só existe com layout, e a pergunta "abate a
+        # minha conta?" não pode depender de ter telhado marcado.
+        *([_paragrafo_da_compensacao(estudo)]
+          if estudo.configuracao.layout is None else []),
         "Trabalhar com a série horária de anos reais, e não com a média mensal, é o que "
         "carrega a persistência do tempo para dentro do estudo: sequências de dias "
         "encobertos existem na série porque existiram no céu, e um apagão longo que cai "
@@ -872,18 +883,20 @@ def _secao_demanda(estudo: ResultadoEstudo, figuras: dict[str, Path]) -> str:
     cfg = estudo.configuracao
     total = estudo.ensemble_total.resumo()
     backup = estudo.ensemble_backup.resumo()
-    partes = [
-        secao("A demanda elétrica"),
-        secao("Método", nivel=2),
-        "A carga não foi representada por uma curva única, e sim por uma distribuição "
-        "de curvas. Cada equipamento entra com potência, quantidade, probabilidade de "
-        "uso no dia, fator de demanda e janela de operação; a simulação de Monte Carlo "
-        f"sorteia {cfg.simulacoes} dias por estação do ano e devolve o conjunto de "
-        "curvas diárias possíveis.",
-        "A diferença importa para o dimensionamento: o inversor não é decidido pela "
-        "média, e sim pela cauda. Uma curva média esconde exatamente o pico raro que "
-        "faz o equipamento desarmar.",
-    ]
+    partes = [secao("A demanda elétrica"), secao("Método", nivel=2)]
+    if cfg.ajuste_conta is not None:
+        partes.extend(_metodo_da_conta(estudo))
+    else:
+        partes.extend([
+            "A carga não foi representada por uma curva única, e sim por uma distribuição "
+            "de curvas. Cada equipamento entra com potência, quantidade, probabilidade de "
+            "uso no dia, fator de demanda e janela de operação; a simulação de Monte Carlo "
+            f"sorteia {cfg.simulacoes} dias por estação do ano e devolve o conjunto de "
+            "curvas diárias possíveis.",
+            "A diferença importa para o dimensionamento: o inversor não é decidido pela "
+            "média, e sim pela cauda. Uma curva média esconde exatamente o pico raro que "
+            "faz o equipamento desarmar.",
+        ])
 
     linhas = [
         ("Pico diário médio", _n(total["geral"]["pico_medio_kw"], 1, "kW"),
@@ -949,6 +962,124 @@ def _secao_demanda(estudo: ResultadoEstudo, figuras: dict[str, Path]) -> str:
     ]
     return "\n\n".join(p for p in partes if p)
 
+
+
+def _metodo_da_conta(estudo: ResultadoEstudo) -> list[str]:
+    """
+    O método quando não houve levantamento: a curva típica ajustada à conta.
+
+    É a seção que separa este estudo de um feito com levantamento, e ela
+    precisa dizer três coisas sem rodeio: de onde veio a forma, a que números
+    da conta ela foi ajustada (e com que erro), e que a variabilidade que
+    dimensiona o inversor foi assumida, não medida.
+    """
+    cfg = estudo.configuracao
+    ajuste = cfg.ajuste_conta
+    conta = ajuste.conta
+    resumo = ajuste.resumo()
+
+    if conta.abertura_h is None:
+        funcionamento = "24 horas por dia"
+    else:
+        funcionamento = f"das {int(conta.abertura_h):02d}h às {int(conta.fechamento_h):02d}h"
+    dias = int(conta.dias_operacao_semana)
+    partes: list[str] = [
+        "Este estudo não parte de um levantamento de equipamentos. A forma da "
+        f"curva de carga vem do perfil típico do segmento ({esc(ajuste.perfil.nome)}) e "
+        "o tamanho, da conta de luz do cliente: a curva foi ajustada para que, somada "
+        f"ao longo de um ciclo de {int(conta.dias_ciclo)} dias, reproduza a fatura. "
+        f"O lugar foi considerado em operação {dias} dia(s) por semana, {funcionamento}; "
+        "fora do horário e nos dias fechados, a carga cai para a base do perfil — o que "
+        "fica ligado com o prédio vazio.",
+    ]
+    if conta.grupo == "A":
+        partes.append(
+            "A conta é do Grupo A: ponta e fora de ponta receberam cada uma o seu fator, "
+            f"de modo que a energia de cada posto (ponta das {int(conta.ponta_inicio_h):02d}h "
+            f"às {int(conta.ponta_fim_h):02d}h, em dia útil) fechasse com a fatura."
+        )
+    if conta.tem_demanda:
+        partes.append(
+            "A demanda medida na conta é o maior intervalo de 15 minutos do mês, e o pico "
+            "de um dia típico fica abaixo dela; o ajuste adotou a razão de "
+            f"{ajuste.fator_demanda_medida:.2f} entre as duas. A forma foi então deformada "
+            f"por um expoente de {ajuste.expoente:.2f} sobre o que excede a carga de base — "
+            "preservando a energia de cada posto — até o pico bater com a demanda medida "
+            "descontada dessa razão. Expoente acima de um afina o pico; abaixo, achata."
+        )
+    if ajuste.editada:
+        partes.append(
+            "Sobre a curva ajustada, o operador **editou** a curva do dia de operação "
+            "hora a hora, com o que conhece da instalação e a curva típica não modela"
+            + (
+                "; a energia do ciclo foi mantida na da conta, de modo que a edição "
+                "mudou a forma, não o tamanho."
+                if ajuste.fechou or ajuste.erros_pct.get("energia_mensal_kwh", 0) <= 5.0
+                else ". A energia do ciclo não foi mantida: a tabela abaixo mostra o "
+                "quanto a curva editada se afasta da conta."
+            )
+        )
+    if ajuste.sazonalidade_aplicada:
+        fatores = ", ".join(
+            f"{estacao} {valor:+.0%}".replace("+0%", "0%")
+            for estacao, valor in ((e, f - 1.0) for e, f in ajuste.fatores_sazonais.items())
+        )
+        partes.append(
+            "O histórico de consumo mensal deu a cada estação o seu fator em relação à "
+            f"média do ano: {esc(fatores)}."
+        )
+
+    rotulos = {
+        "energia_mensal_kwh": ("Energia do mês", "kWh"),
+        "energia_ponta_kwh": ("Energia na ponta", "kWh"),
+        "energia_fora_ponta_kwh": ("Energia fora de ponta", "kWh"),
+        "demanda_ponta_kw": ("Demanda na ponta", "kW"),
+        "demanda_fora_ponta_kw": ("Demanda fora de ponta", "kW"),
+    }
+    linhas = []
+    for chave, (rotulo, unidade) in rotulos.items():
+        alvo = resumo["alvos"].get(chave)
+        if not alvo:
+            continue
+        erro = resumo["erros_pct"].get(chave)
+        linhas.append((
+            rotulo, _n(alvo, 0, unidade), _n(resumo["obtidos"][chave], 0, unidade),
+            "--" if erro is None else _pct(erro / 100.0, 1),
+        ))
+    partes.append(tabela(
+        ["Grandeza da conta", "Na fatura", "Na curva ajustada", "Diferença"], linhas,
+        alinhamento="lrrr", largura_primeira_coluna="5cm",
+        legenda="O ajuste da curva típica contra a conta de luz",
+    ))
+    partes.append(
+        f"A curva de um dia de operação tem pico de {_n(ajuste.demanda_maxima_kw, 1, 'kW')}, "
+        f"média de {_n(ajuste.demanda_media_kw, 1, 'kW')} e fator de carga de "
+        f"{_pct(ajuste.fator_de_carga, 0)}; a carga de base, que fica ligada com o lugar "
+        f"fechado, é de {_n(ajuste.carga_base_kw, 1, 'kW')}."
+    )
+    meta = estudo.ensemble_total.metadados
+    partes.append(caixa(
+        "O que este caminho assume",
+        "Uma curva ajustada à conta é uma curva média: não tem o dia mais movimentado "
+        "nem a hora em que tudo liga junto, e é essa cauda que decide o inversor. Para "
+        "que o estudo tivesse uma cauda, a variabilidade foi assumida: um fator "
+        f"log-normal por dia, com desvio de {meta.get('dispersao_diaria', 0):.0%}, e "
+        f"outro por hora, com desvio de {meta.get('dispersao_horaria', 0):.0%}, sobre "
+        f"{cfg.simulacoes} dias sorteados por estação. Esses desvios são a ordem de "
+        "grandeza da carga comercial, não uma medição desta instalação. O levantamento de "
+        "equipamentos deriva essa distribuição do comportamento de cada aparelho; este "
+        "atalho a arbitra. Antes de fechar o dimensionamento, o levantamento deve "
+        "substituir a curva.",
+        cor="vermelhoaviso",
+    ))
+    if not ajuste.fechou:
+        partes.append(nota(
+            "O ajuste não fechou dentro de 5% em todas as grandezas da conta — a tabela "
+            "acima mostra onde. Isso quase sempre quer dizer que a forma do perfil não é "
+            "a desta instalação, ou que a demanda medida vem de um pico que uma curva "
+            "típica não modela. As ressalvas do cálculo, ao fim do documento, detalham."
+        ))
+    return partes
 
 
 def _analise_completa(analise, figuras: dict[str, Path]) -> list[str]:
@@ -1112,6 +1243,49 @@ def _analise_completa(analise, figuras: dict[str, Path]) -> list[str]:
     return [x for x in partes if x]
 
 
+def _paragrafo_da_compensacao(estudo: ResultadoEstudo) -> str:
+    """
+    A frase que afirma — com número conferido — quanto da conta a usina abate.
+
+    Dimensionar "para compensar o consumo" e não dizer quanto se compensou de
+    fato deixa a promessa sem prestação de contas. O alvo é o mesmo que
+    dimensionou; a geração é a que a série produz para a potência adotada.
+    """
+    dados = getattr(estudo, "compensacao", None)
+    if not dados or not estudo.configuracao.considerar_solar:
+        return ""
+    alvo = float(dados["alvo_kwh"])
+    pedida = float(dados["fracao_pedida"])
+    cobertura = float(dados["cobertura"])
+    # `esc` no percentual porque estes são parágrafos soltos, e não células de
+    # tabela: aqui ninguém escapa por mim, e um `%` cru comenta o resto da
+    # linha no LaTeX.
+    frase = (
+        f"O sistema de {_n(dados['potencia_kwp'], 1, 'kWp')} gera "
+        f"{_n(dados['geracao_kwh'], 0, 'kWh')} por ano, contra o "
+        f"{esc(dados['origem'])} de {_n(alvo, 0, 'kWh')}: cobre "
+        f"{esc(_pct(cobertura, 0))} dele."
+    )
+    if dados["definida_por"] == "consumo a compensar":
+        alvo_pedido = esc(_pct(pedida, 0))
+        frase += (
+            f" A potência foi definida por este consumo, com a meta de compensar "
+            f"{alvo_pedido}"
+            + (
+                "; a meta foi cumprida."
+                if abs(cobertura - pedida) <= 0.02
+                else " — a diferença vem do arredondamento do arranjo e da "
+                     "produtividade do local."
+            )
+        )
+    else:
+        frase += (
+            f" A potência foi definida pelo {esc(dados['definida_por'])}, e a cobertura "
+            "é a consequência disso — não uma meta perseguida."
+        )
+    return frase
+
+
 def _secao_fotovoltaico(estudo: ResultadoEstudo) -> str:
     layout = estudo.configuracao.layout
     if layout is None:
@@ -1119,6 +1293,9 @@ def _secao_fotovoltaico(estudo: ResultadoEstudo) -> str:
         # já foram ditas na seção do telhado, que nesse caso as reúne.
         return ""
     partes = [secao("O sistema fotovoltaico")]
+    compensacao = _paragrafo_da_compensacao(estudo)
+    if compensacao:
+        partes.append(compensacao)
     if layout is not None:
         modulo = layout.modulo
         partes.append(tabela(
@@ -2462,6 +2639,68 @@ def _subsecao_gerador(comparacao, figuras: dict[str, Path]) -> list[str]:
     return partes
 
 
+def _secao_propostas(estudo: ResultadoEstudo) -> str:
+    """
+    O que cada kit custa, e o que cada um entrega.
+
+    Microinversor e split-phase resolvem problemas diferentes — um abate a
+    conta, o outro abate a conta e atravessa a falta — e custam diferente.
+    Apresentar um investimento só, sem dizer de qual dos dois se fala,
+    é o que fazia a mesma proposta ter dois preços conforme quem a lia.
+
+    Os valores vêm da tabela interna de kit, coluna por coluna. Nenhum deles
+    sai de curva de R$/kWp.
+    """
+    precos = getattr(estudo, "precos_por_topologia", None)
+    if not precos or estudo.cenarios is None:
+        return ""
+    linhas = []
+    avisos: list[str] = []
+    for dados in precos.values():
+        capex = dados["capex_brl"]
+        cenario = estudo.cenarios.por_chave(str(dados["cenario"]))
+        if capex is None or cenario is None:
+            continue
+        economia = float(cenario.economia_anual_brl)
+        linhas.append((
+            esc(str(dados["nome"])),
+            _brl(capex),
+            _brl(economia),
+            f"{_n(capex / economia, 1)} anos" if economia > 0 else "--",
+            (_n(cenario.autonomia_garantida_h, 1, "h")
+             if cenario.autonomia_garantida_h > 0 else "nenhuma"),
+        ))
+        if dados["aviso"]:
+            avisos.append(f"{dados['nome']}: {dados['aviso']}")
+    if not linhas:
+        return ""
+
+    partes = [
+        secao("As propostas: o que cada kit custa"),
+        "O mesmo gerador fotovoltaico pode ser montado com topologias diferentes, e "
+        "elas não entregam a mesma coisa. O microinversor abate a conta e desliga "
+        "junto com a rede -- é exigência da norma de conexão, não limitação do "
+        "equipamento. O split-phase é híbrido: com o banco dimensionado neste "
+        "estudo, segue alimentando o quadro de backup durante a falta.",
+        tabela(
+            ["Proposta", "Investimento", "Economia no 1º ano", "Payback simples",
+             "Autonomia"],
+            linhas, alinhamento="lrrrr", largura_primeira_coluna="4.4cm",
+            legenda="Investimento e retorno de cada topologia de kit",
+        ),
+        nota(
+            "Os investimentos vêm da tabela de kit vigente, coluna por coluna, e não "
+            "de curva de R$/kWp: é o preço do material que o distribuidor pratica, "
+            "acrescido da mão de obra e do material CA informados no estudo. A "
+            "economia e o payback saem do balanço horário de cada arranjo, com esse "
+            "investimento."
+        ),
+    ]
+    if avisos:
+        partes.append(lista(avisos))
+    return "\n\n".join(partes)
+
+
 def _secao_economia(estudo: ResultadoEstudo) -> str:
     if estudo.recomendado is None:
         return ""
@@ -2918,6 +3157,7 @@ def montar_documento(
         _secao_vies_de_horario(estudo),
         _secao_vida_util(estudo, figuras),
         _secao_cenarios(estudo, figuras),
+        _secao_propostas(estudo),
         _secao_economia(estudo),
         _secao_procedencia(estudo),
         _referencias_de_equipamento(estudo),
@@ -2939,6 +3179,7 @@ def escrever_dossie(
     destino: str | Path,
     capa: DadosCapa | None = None,
     compilar: bool = True,
+    comercial: "OpcoesComerciais | None" = None,
 ) -> dict[str, Path]:
     """
     Grava o dossiê completo: ``.tex``, figuras, planilhas e — se houver LaTeX — o PDF.
@@ -2946,6 +3187,12 @@ def escrever_dossie(
     As figuras vão para ``figuras/`` e as tabelas para ``tabelas/``, que é a
     organização que o ``.tex`` referencia. Compilar no Overleaf exige só subir
     a pasta inteira.
+
+    Com ``comercial``, a apresentação de 19 slides sai junto, em
+    ``apresentacao/`` dentro da mesma pasta — ver
+    :mod:`aurum.bateria.apresentacao`. Ela precisa de um cenário com solar;
+    num estudo sem sol ela é pulada com aviso, não com erro: o dossiê continua
+    sendo a entrega principal.
     """
     from .relatorio import escrever_relatorio
 
@@ -2974,6 +3221,18 @@ def escrever_dossie(
         pdf = compilar_pdf(caminho_tex)
         if pdf is not None:
             resultado["pdf"] = pdf
+
+    if comercial is not None:
+        from .apresentacao import escrever_apresentacao
+
+        try:
+            resultado.update(escrever_apresentacao(
+                estudo, pasta / "apresentacao", capa, comercial,
+                foto_telhado=figuras.get("foto_telhado"), compilar=compilar,
+            ))
+        except ValueError as exc:
+            LOGGER.warning("Apresentação não gerada: %s", exc)
+            estudo.avisos.append(f"A apresentação comercial não foi gerada: {exc}")
     return resultado
 
 
@@ -2981,6 +3240,7 @@ def zip_do_dossie(
     estudo: ResultadoEstudo,
     capa: DadosCapa | None = None,
     compilar: bool = True,
+    comercial: "OpcoesComerciais | None" = None,
 ) -> bytes:
     """
     O dossiê inteiro num ZIP em memória, pronto para download.
@@ -2992,12 +3252,12 @@ def zip_do_dossie(
 
     with tempfile.TemporaryDirectory() as temporario:
         pasta = Path(temporario) / "estudo"
-        escrever_dossie(estudo, pasta, capa, compilar=compilar)
+        escrever_dossie(estudo, pasta, capa, compilar=compilar, comercial=comercial)
         buffer = io.BytesIO()
         with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
             zf.writestr("LEIA-ME.txt", _leia_me(estudo))
             for arquivo in sorted(pasta.rglob("*")):
-                if arquivo.is_file() and arquivo.suffix not in {".aux", ".log", ".out", ".toc"}:
+                if arquivo.is_file() and arquivo.suffix not in {".aux", ".log", ".out", ".toc", ".nav", ".snm"}:
                     zf.write(arquivo, arquivo.relative_to(pasta.parent))
         return buffer.getvalue()
 
@@ -3013,6 +3273,7 @@ def _leia_me(estudo: ResultadoEstudo) -> str:
         "estudo/resumo.md      resumo em Markdown, para colar em e-mail",
         "estudo/figuras/       todas as figuras em PNG",
         "estudo/tabelas/       todas as tabelas em CSV (separador ';', decimal ',')",
+        "estudo/apresentacao/  a proposta comercial em slides (apresentacao.pdf), quando gerada",
         "",
         "Para compilar sem LaTeX instalado: suba a pasta 'estudo' inteira no",
         "Overleaf (overleaf.com) e compile estudo.tex. Nenhum ajuste é necessário.",

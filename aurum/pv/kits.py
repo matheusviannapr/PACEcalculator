@@ -49,7 +49,9 @@ __all__ = [
     "TABELA_KIT",
     "TOPOLOGIAS",
     "APURADO_EM",
+    "TOPOLOGIAS_DE_PROPOSTA",
     "capex_de_kit",
+    "capex_por_topologia",
     "composicao_de_kit",
     "fora_da_tabela",
     "revisao_defasada",
@@ -87,6 +89,44 @@ DESCRICAO_TOPOLOGIA: dict[str, str] = {
     "trifasico":
         "Entrada trifásica, a partir de 20 kWp. É o caminho de qualquer "
         "sistema maior, e o único disponível acima de 40 kWp.",
+}
+
+#: As duas topologias que a proposta compara, e o que cada uma entrega.
+#:
+#: Não são duas maneiras de montar o mesmo sistema: **microinversor não faz
+#: backup**. Ele desliga junto com a rede, como qualquer inversor de string
+#: conectado à rede, e não há onde ligar bateria. O split-phase é híbrido:
+#: atravessa a falta com o banco, e é o único dos dois que responde à pergunta
+#: "o que acontece quando a luz cai".
+#:
+#: Por isso a comparação entre os dois é a comparação entre sistema sem
+#: armazenamento e sistema com armazenamento — e é essa a leitura dos dois
+#: slides de valor da proposta.
+TOPOLOGIAS_DE_PROPOSTA: dict[str, dict[str, object]] = {
+    "microinversor": {
+        "nome": "Microinversor",
+        "coluna": "microinversor",
+        "bateria": False,
+        "cenario": "solar",
+        "resumo": "Cada módulo trabalha por conta própria; sombra num deles não "
+                  "arrasta os outros. Não atravessa a falta de energia.",
+    },
+    "splitphase": {
+        "nome": "SplitPhase sem bateria",
+        "coluna": "splitphase",
+        "bateria": False,
+        "cenario": "solar",
+        "resumo": "Inversor híbrido já instalado, sem banco: abate a conta hoje e "
+                  "recebe as baterias depois, sem trocar o inversor.",
+    },
+    "splitphase_bateria": {
+        "nome": "SplitPhase com bateria",
+        "coluna": "splitphase",
+        "bateria": True,
+        "cenario": "solar+bateria",
+        "resumo": "Inversor híbrido com banco de baterias: segue alimentando o "
+                  "quadro de backup quando a rede cai.",
+    },
 }
 
 #: A topologia que um sistema com bateria pede.
@@ -456,6 +496,77 @@ def capex_de_kit(
     adicional = max(0.0, float(mao_de_obra_brl_kwp)) + max(0.0, float(material_ca_brl_kwp))
     bateria = preco_da_bateria(bateria_kwh, bloco_kwh, bloco_brl)
     return kit + adicional * float(potencia_kwp) + bateria
+
+
+def capex_por_topologia(
+    potencia_kwp: float,
+    topologias: Iterable[str] | None = None,
+    mao_de_obra_brl_kwp: float = MAO_DE_OBRA_BRL_KWP,
+    material_ca_brl_kwp: float = MATERIAL_CA_BRL_KWP,
+    bateria_kwh: float = 0.0,
+    bloco_kwh: float = BATERIA_BLOCO_KWH,
+    bloco_brl: float = BATERIA_BLOCO_BRL,
+) -> dict[str, dict[str, object]]:
+    """
+    O investimento de cada topologia da proposta, **só pela tabela**.
+
+    Devolve, por topologia: ``capex_brl``, a ``coluna`` da tabela que deu o
+    preço, se houve ``substituicao`` de coluna, e o ``aviso`` quando houve.
+    O banco de baterias só é somado onde ele existe — cobrar bateria no
+    microinversor seria vender um produto que não se monta.
+
+    Quando a coluna pedida não alcança a potência, o preço **continua saindo
+    da tabela**: cai para a coluna trifásica, que vai até 125 kWp, e a
+    substituição fica registrada. É o que o distribuidor faz de fato — acima
+    de 40 kWp a entrada é trifásica e as outras colunas somem do catálogo. Só
+    quando nem o trifásico cobre é que ``capex_brl`` volta ``None``, e aí quem
+    chama decide: sem tabela, não há preço de tabela a apresentar.
+    """
+    escolhidas = list(topologias or TOPOLOGIAS_DE_PROPOSTA)
+    kwp = float(potencia_kwp)
+    resultado: dict[str, dict[str, object]] = {}
+    for topologia in escolhidas:
+        perfil = TOPOLOGIAS_DE_PROPOSTA.get(topologia, {})
+        com_banco = bool(perfil.get("bateria", False))
+        energia = float(bateria_kwh) if com_banco else 0.0
+        # A coluna da tabela não é a chave da proposta: "SplitPhase sem
+        # bateria" e "SplitPhase com bateria" leem a mesma coluna e diferem
+        # no banco, que é como o distribuidor vende.
+        coluna = str(perfil.get("coluna", topologia))
+        substituicao, aviso = None, None
+        capex = capex_de_kit(kwp, coluna, mao_de_obra_brl_kwp, material_ca_brl_kwp,
+                             energia, bloco_kwh, bloco_brl)
+        if capex is None and coluna != "trifasico":
+            capex = capex_de_kit(kwp, "trifasico", mao_de_obra_brl_kwp,
+                                 material_ca_brl_kwp, energia, bloco_kwh, bloco_brl)
+            if capex is not None:
+                substituicao, coluna_pedida = coluna, coluna
+                coluna = "trifasico"
+                aviso = (
+                    f"A coluna {TOPOLOGIAS.get(coluna_pedida, coluna_pedida)} da tabela "
+                    f"vai até {potencia_maxima(coluna_pedida):.0f} kWp e o sistema tem "
+                    f"{kwp:.1f} kWp: "
+                    "o preço veio da coluna Trifásico, que é o que o distribuidor "
+                    "oferece nessa faixa."
+                )
+        if capex is None:
+            aviso = (
+                f"A tabela de kit não cobre {kwp:.1f} kWp em nenhuma coluna (vai até "
+                f"{POTENCIA_MAXIMA_KWP:.0f} kWp). Sem cotação, não há preço de tabela "
+                "para esta topologia."
+            )
+        resultado[topologia] = {
+            "capex_brl": capex,
+            "coluna": coluna,
+            "substituicao": substituicao,
+            "com_bateria": com_banco,
+            "bateria_kwh": energia,
+            "nome": perfil.get("nome", TOPOLOGIAS.get(topologia, topologia)),
+            "cenario": perfil.get("cenario", "solar"),
+            "resumo": perfil.get("resumo", ""),
+            "aviso": aviso,
+        }
+    return resultado
 
 
 def composicao_de_kit(

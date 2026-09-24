@@ -909,6 +909,10 @@ def _grafico_escopos(escopos, destino: Path) -> Path:
     eixos[1].set_xticks(posicoes)
     eixos[1].set_xticklabels(rotulos, fontsize=8)
     eixos[1].set_ylabel("kWh")
+    # Folga para a anotação de duas linhas acima da barra mais alta: sem ela,
+    # num banco de 25 kWh o "pico ... kW / 12 h" entrava no título.
+    teto = max(max(m.energia_diaria_kwh, m.energia_util_kwh) for m in medidas)
+    eixos[1].set_ylim(0, teto * 1.22)
     eixos[1].set_title("O que cada quadro consome e exige")
     eixos[1].legend(fontsize=8, frameon=False)
 

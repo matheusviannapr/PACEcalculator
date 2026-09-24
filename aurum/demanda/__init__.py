@@ -5,7 +5,10 @@ Modelagem probabilística de demanda elétrica — núcleo do D² tornado biblio
   repositório ``matheusviannapr/DemandaDados``, sem a camada Streamlit.
 * :mod:`aurum.demanda.ensemble` — o que o estudo de baterias consome: curvas
   diárias por estação, curvas de excedência e análise de duração de eventos.
+* :mod:`aurum.demanda.ajuste` — a curva típica ajustada à conta de luz, para
+  o estudo de quem não tem levantamento de equipamentos.
 """
+from .ajuste import AjusteCurva, ContaDeLuz, ajustar, ajustar_melhor_perfil
 from .correcoes import intervalos_circulares
 from .ensemble import (
     CurvaExcedencia,
@@ -17,8 +20,12 @@ from .ensemble import (
 )
 
 __all__ = [
+    "AjusteCurva",
+    "ContaDeLuz",
     "CurvaExcedencia",
     "EnsembleCarga",
+    "ajustar",
+    "ajustar_melhor_perfil",
     "carregar_cenario_excel",
     "cenario_exemplo",
     "estatisticas_de_eventos",

@@ -487,6 +487,56 @@ def test_premissa_com_modo_invalido_falha_cedo():
 
 
 # ----------------------------------------------------------------------------
+# Por onde o sol entra
+# ----------------------------------------------------------------------------
+def test_gerador_grande_nao_e_cortado_pela_entrada_do_hibrido():
+    """
+    Comprar bateria não pode apagar quatro quintos da usina.
+
+    Um gerador de 100 kWp com inversor de rede próprio entrega no quadro; o
+    híbrido de backup, que aceita 5 kW de painel, só cuida do banco. Cortar a
+    geração pela entrada CC dele fazia o cenário com bateria relatar 26.700
+    kWh/ano onde o mesmo sistema sem bateria relatava 127.599 — e a proposta
+    saía com a bateria destruindo a economia que ela não toca.
+    """
+    from aurum.bateria.estudo import ConfiguracaoEstudo, fv_no_hibrido
+
+    base = carregar_catalogo(None)
+    # O menor híbrido que tem entrada FV: os que não têm não acoplam sol
+    # nenhum, e o caso interessante é o do que tem — e é pequena.
+    com_fv = [i for i in base.inversores if i.potencia_fv_max_kw > 0]
+    inversor = min(com_fv, key=lambda i: i.potencia_fv_max_kw)
+    conjunto = ConjuntoArmazenamento(inversor, base.baterias[0], 1)
+    cfg = ConfiguracaoEstudo(latitude=-25.43, longitude=-49.27)
+    # Não cabe: acoplamento em corrente alternada, a geração não é cortada.
+    assert not fv_no_hibrido(cfg, 100.0, conjunto)
+    # Cabe com a folga usual de razão CC/CA: o híbrido é o único inversor.
+    assert fv_no_hibrido(cfg, inversor.potencia_fv_max_kw, conjunto)
+    assert not fv_no_hibrido(cfg, 10.0, None)
+
+
+def test_bateria_nao_muda_a_geracao_do_mesmo_gerador(catalogo, serie, ensemble):
+    """A bateria guarda energia; ela não gera nem deixa de gerar."""
+    from aurum.bateria.fontes import Fatura, PremissasBateria, comparar_fontes
+
+    com_fv = [i for i in catalogo.inversores if i.potencia_fv_max_kw > 0]
+    conjunto = ConjuntoArmazenamento(
+        min(com_fv, key=lambda i: i.potencia_fv_max_kw), catalogo.baterias[0], 1)
+    comparacao = comparar_fontes(
+        ensemble_total=ensemble, ensemble_backup=ensemble, serie=serie,
+        potencia_fv_kwp=100.0, fatura=Fatura(tarifa_brl_kwh=0.96),
+        conjunto=conjunto, premissas=PremissasBateria(),
+        malha=MalhaApagao(duracoes_h=(1.0,), horas_inicio=(0, 12), amostras=5, passo_min=30),
+        dias_por_estacao=5, fv_no_hibrido=False,
+    )
+    sem = comparacao.por_chave("solar")
+    com = comparacao.por_chave("solar+bateria")
+    assert com.geracao_fv_kwh_ano == pytest.approx(sem.geracao_fv_kwh_ano, rel=0.01)
+    # E o banco aproveita mais do que seria injetado: o autoconsumo sobe.
+    assert com.autoconsumo_kwh_ano >= sem.autoconsumo_kwh_ano
+
+
+# ----------------------------------------------------------------------------
 # Estudo completo
 # ----------------------------------------------------------------------------
 def test_estudo_completo_gera_relatorio(tmp_path):

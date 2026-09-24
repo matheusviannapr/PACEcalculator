@@ -72,7 +72,7 @@ def _ate_o_consumo(at: AppTest, simulacoes: int = 50) -> AppTest:
 def _ate_o_equipamento(at: AppTest, kwp: float = 50.0) -> AppTest:
     """Segue do consumo até o dimensionamento fechado."""
     _continuar(at)  # consumo -> telhado
-    at.radio[0].set_value("Já sei a potência").run()
+    at.radio[0].set_value("potencia").run()
     _por_rotulo(at.number_input, "Potência do sistema").set_value(kwp).run()
     _continuar(at)  # telhado -> equipamento
     return at
@@ -248,12 +248,232 @@ def test_caminho_da_conta_de_luz_avisa_o_que_perde():
     assert any("variabilidade" in w.value.lower() for w in at.warning), \
         "o caminho sem levantamento tem que declarar o que se perde"
 
+    # A curva ajustada já existe antes de avançar: a tela mostra o ajuste.
+    ajuste = at.session_state["e_ajuste_conta"]
+    assert ajuste is not None and ajuste.fechou
+    assert ajuste.consumo_mensal_kwh == pytest.approx(at.session_state["e_conta_kwh"])
+
     _continuar(at)
     assert at.session_state["e_passo"] == CONSUMO
     ensemble = at.session_state["e_ensemble_total"]
-    assert ensemble.metadados["origem"] == "curva_tipica_calibrada"
+    assert ensemble.metadados["origem"] == "curva_tipica_ajustada"
     # A dispersão assumida tem que produzir uma cauda, não uma curva única.
     assert ensemble.picos_diarios_w().std() > 0
+    # E a energia do ensemble é a da conta — não a de um cenário de demonstração.
+    assert ensemble.energia_diaria_kwh().mean() * 30 == pytest.approx(
+        at.session_state["e_conta_kwh"], rel=0.05)
+
+
+def test_a_curva_do_segmento_e_o_padrao_e_a_edicao_chega_ao_ajuste():
+    """
+    Sem escolha, vale a curva do modelo do segmento — o ajuste não a troca
+    sozinho. E a edição do operador entra sobre ela, com a energia da conta.
+    """
+    from aurum.demanda.biblioteca import segmento_do_perfil
+
+    at = _abrir()
+    _por_rotulo(at.text_input, "Nome do cliente").set_value("Loja Teste").run()
+    _continuar(at)
+    at.radio[0].set_value("conta").run()
+    at.radio[1].set_value("A").run()
+    _por_rotulo(at.number_input, "Demanda medida fora de ponta").set_value(48.0).run()
+    ajuste = at.session_state["e_ajuste_conta"]
+    assert ajuste.perfil.id == segmento_do_perfil(at.session_state["e_segmento"]).id
+    assert not ajuste.editada
+
+    curva = list(ajuste.curva_operacao_kw)
+    curva[7] = curva[7] * 3
+    at.session_state["e_conta_curva_editada"] = curva
+    at.run()
+    assert not at.exception, at.exception
+    editado = at.session_state["e_ajuste_conta"]
+    assert editado.editada
+    assert editado.consumo_mensal_kwh == pytest.approx(ajuste.consumo_mensal_kwh)
+    assert any("editada" in t.value.lower() for t in at.markdown)
+
+    _continuar(at)
+    assert at.session_state["e_ensemble_total"].metadados["ajuste"]["editada"] is True
+
+
+def test_compensar_a_conta_dimensiona_pela_conta_e_a_tela_confirma():
+    """
+    Escolhido "compensar a conta", é a conta que define a potência.
+
+    Antes, um levantamento de rascunho dimensionava pela própria estimativa:
+    numa casa com conta de 300 kWh/mês o modelo simulava 1.240 kWh/mês e a
+    usina saía quatro vezes maior que a conta que ela deveria abater.
+    """
+    at = _ate_o_consumo(_abrir())
+    _continuar(at)  # consumo -> telhado
+    at.radio[0].set_value("compensar").run()
+    assert not at.exception, at.exception
+
+    simulado = at.session_state["e_ensemble_total"].energia_diaria_kwh().mean() * 365
+    alvo = 7200.0  # 600 kWh/mês — metade do que este levantamento de rascunho simula
+    _por_rotulo(at.number_input, "Consumo anual a abater").set_value(alvo).run()
+    assert alvo < simulado / 2, "o caso só prova algo se a conta for bem menor"
+    assert at.session_state["e_kwp"] == 0.0, "zero deixa o estudo dimensionar"
+    # A tela converte o alvo em potência antes de escolher equipamento.
+    kwp_alvo = at.session_state["e_kwp_alvo"]
+    assert 4.0 < kwp_alvo < 8.0, kwp_alvo
+
+    at = _ate_a_meta_sem_telhado(at)
+    _por_rotulo(at.select_slider, "Autonomia alvo").set_value(3).run()
+    _por_rotulo(at.multiselect, "Durações de falta").set_value([1.0, 3.0]).run()
+    _por_rotulo(at.slider, "Amostras por combinação").set_value(20).run()
+    _por_rotulo(at.slider, "Conjuntos a avaliar").set_value(2).run()
+    _por_rotulo(at.button, "Rodar o estudo").click().run()
+    assert not at.exception, at.exception
+
+    estudo = at.session_state["e_estudo"]
+    assert estudo.configuracao.consumo_anual_kwh == pytest.approx(alvo)
+    compensacao = estudo.compensacao
+    assert compensacao["definida_por"] == "consumo a compensar"
+    assert compensacao["alvo_kwh"] == pytest.approx(alvo)
+    # A usina segue a conta, não o levantamento. O arranjo fecha em módulos
+    # inteiros, então a cobertura não é exata — mas fica perto de 100%, e
+    # muito longe dos 200% que o consumo simulado produziria.
+    assert 0.75 <= compensacao["cobertura"] <= 1.25, compensacao
+    assert estudo.potencia_fv_kwp < simulado / estudo.serie.anual_kwh_por_kwp() * 0.7
+    # E a tela do resultado afirma isso, em vez de deixar implícito.
+    mensagens = (
+        [m.value for m in at.success]
+        + [m.value for m in at.warning]
+        + [m.value for m in at.info]
+    )
+    assert any("cobre" in m for m in mensagens), mensagens
+
+
+def _ate_a_meta_sem_telhado(at):
+    """Do passo do telhado até a Meta, sem marcar cobertura."""
+    _continuar(at)  # telhado -> equipamento
+    _por_rotulo(at.button, "Analisar com bateria").click().run()
+    _por_rotulo(at.slider, "Simulações de Monte Carlo").set_value(50).run()
+    _por_rotulo(at.button, "Simular a demanda").click().run()
+    _continuar(at)
+    assert at.session_state["e_passo"] == META
+    return at
+
+
+def test_o_inversor_padrao_cabe_no_gerador_e_a_escolha_sobrevive_a_navegacao():
+    """
+    O passo Equipamento nascia com o primeiro inversor da lista — o maior do
+    catálogo — e a escolha voltava a ele quando o usuário saía e voltava ao
+    passo. Foi assim que "80 kW string" chegou à proposta de uma casa de
+    10 kWp.
+    """
+    at = _ate_o_equipamento(_ate_o_consumo(_abrir()), kwp=20.0)
+    assert at.session_state["e_passo"] == EQUIPAMENTO
+    from aurum.pv.equipment import carregar_base
+    from aurum.pv.memoria import memoria_do_arranjo
+    from aurum.pv.sizing import DC_AC_MAX, DC_AC_MIN
+
+    base = carregar_base()
+    padrao = at.session_state["e_inversor_sel"]
+    modulo = at.session_state["e_modulo_sel"]
+    memoria = memoria_do_arranjo(modulo, padrao, None)
+    # O par que abre a tela fecha arranjo e fica na faixa de projeto — não é
+    # o primeiro da lista, que é o maior inversor do catálogo.
+    assert memoria.viavel, f"{modulo.modelo} + {padrao.modelo}"
+    assert DC_AC_MIN <= memoria.razao_cc_ca <= DC_AC_MAX, memoria.razao_cc_ca
+    assert padrao.potencia_ca_w < max(i.potencia_ca_w for i in base.inversores)
+    # E entrega perto dos 20 kWp pedidos, em vez do arranjo cheio do inversor.
+    assert 12.0 <= memoria.potencia_do_sistema_kwp <= 28.0, memoria.potencia_do_sistema_kwp
+
+    # Escolhe outro, sai e volta: a escolha tem que estar lá.
+    inversores = [i for i in _por_rotulo(at.selectbox, "Inversor de rede").options]
+    outro = next(i for i in inversores if i != padrao.modelo and i != str(padrao))
+    _por_rotulo(at.selectbox, "Inversor de rede").select(outro).run()
+    escolhido = at.session_state["e_inversor_sel"]
+    _por_rotulo(at.button, "Voltar").click().run()
+    assert at.session_state["e_passo"] == TELHADO
+    _continuar(at)
+    assert at.session_state["e_passo"] == EQUIPAMENTO
+    assert at.session_state["e_inversor_sel"].modelo == escolhido.modelo
+    assert at.session_state["e_memoria"].inversor.modelo == escolhido.modelo
+
+
+def test_os_blocos_declarados_chegam_ao_estudo():
+    """Fixar 2 blocos: o estudo avalia só bancos de 2 blocos e recomenda um deles."""
+    at = _ate_a_meta(_abrir())
+    _por_rotulo(at.number_input, "Blocos no banco").set_value(2).run()
+    _por_rotulo(at.select_slider, "Autonomia alvo").set_value(3).run()
+    _por_rotulo(at.multiselect, "Durações de falta").set_value([1.0, 3.0]).run()
+    _por_rotulo(at.slider, "Amostras por combinação").set_value(20).run()
+    _por_rotulo(at.button, "Rodar o estudo").click().run()
+    assert not at.exception, at.exception
+    estudo = at.session_state["e_estudo"]
+    assert estudo.configuracao.candidatos and all(
+        c.modulos == 2 for c in estudo.configuracao.candidatos)
+    assert estudo.recomendado is not None and estudo.recomendado.conjunto.modulos == 2
+
+
+def test_a_conta_de_luz_chega_ao_estudo_inteiro():
+    """
+    O caminho da conta atravessa as duas fases e o estudo sai **da conta**.
+
+    Antes, `_montar_configuracao` mandava `comodos=None` e o motor caía no
+    cenário de demonstração: o dossiê de quem só tinha a fatura saía com o
+    hotel de quarenta quartos, sem avisar. O teste fixa que o ensemble do
+    estudo tem a energia da conta, que o quadro de backup é a fração escolhida
+    e que o documento conta o método certo.
+    """
+    at = _abrir()
+    _por_rotulo(at.text_input, "Nome do cliente").set_value("Loja Teste").run()
+    _continuar(at)
+    at.radio[0].set_value("conta").run()
+    at.radio[1].set_value("A").run()
+    _por_rotulo(at.number_input, "Consumo na ponta").set_value(900.0).run()
+    _por_rotulo(at.number_input, "Consumo fora de ponta").set_value(12000.0).run()
+    _por_rotulo(at.number_input, "Demanda medida fora de ponta").set_value(62.0).run()
+    _por_rotulo(at.selectbox, "Dias por semana").set_value(6).run()
+    _por_rotulo(at.checkbox, "Funciona 24 h").set_value(False).run()
+    assert not at.exception, at.exception
+    ajuste = at.session_state["e_ajuste_conta"]
+    assert ajuste.conta.grupo == "A" and ajuste.conta.dias_operacao_semana == 6
+    assert ajuste.erros_pct["energia_ponta_kwh"] < 1e-6
+    assert ajuste.erros_pct["energia_fora_ponta_kwh"] < 1e-6
+
+    _continuar(at)  # cargas -> consumo
+    _por_rotulo(at.button, "Analisar o consumo").click().run()
+    assert not at.exception, at.exception
+    analise = at.session_state["e_analise"]
+    assert analise.indicadores.consumo_mensal_kwh == pytest.approx(12900.0, rel=0.06)
+
+    at = _ate_o_equipamento(at, kwp=20.0)
+    _por_rotulo(at.button, "Analisar com bateria").click().run()
+    assert at.session_state["e_passo"] == BACKUP
+    _por_rotulo(at.slider, "fração da carga total").set_value(0.5).run()
+    _continuar(at)
+    assert at.session_state["e_passo"] == META
+    # O consumo da fatura já vem preenchido com o da conta que deu forma à carga.
+    assert _por_rotulo(at.number_input, "Consumo médio na fatura").value == pytest.approx(12900.0)
+
+    _por_rotulo(at.select_slider, "Autonomia alvo").set_value(3).run()
+    _por_rotulo(at.multiselect, "Durações de falta").set_value([1.0, 3.0]).run()
+    _por_rotulo(at.slider, "Amostras por combinação").set_value(20).run()
+    _por_rotulo(at.slider, "Conjuntos a avaliar").set_value(2).run()
+    _por_rotulo(at.button, "Rodar o estudo").click().run()
+    assert not at.exception, at.exception
+    assert at.session_state["e_passo"] == RESULTADO
+
+    estudo = at.session_state["e_estudo"]
+    cfg = estudo.configuracao
+    assert cfg.ajuste_conta is not None and cfg.comodos is None
+    assert cfg.fracao_backup == pytest.approx(0.5)
+    assert cfg.consumo_anual_kwh == pytest.approx(12900.0 * 12)
+    total = estudo.ensemble_total.energia_diaria_kwh().mean() * 30
+    backup = estudo.ensemble_backup.energia_diaria_kwh().mean() * 30
+    assert total == pytest.approx(12900.0, rel=0.06), "o ensemble do estudo não é o da conta"
+    assert backup == pytest.approx(total / 2, rel=0.01)
+    assert estudo.ensemble_total.metadados["origem"] == "curva_tipica_ajustada"
+    assert any("hipótese" in a for a in estudo.avisos)
+
+    from aurum.bateria.documento import montar_documento
+    tex = montar_documento(estudo, {})
+    assert "não parte de um levantamento de equipamentos" in tex
+    assert "Grupo A" in tex and "O que este caminho assume" in tex
+    assert "Área Comum" not in tex, "o hotel de demonstração vazou para o dossiê"
 
 
 def test_erro_de_carga_bloqueia_e_aponta_a_linha():
@@ -412,7 +632,7 @@ def test_tirar_um_nivel_do_backup_e_definitivo():
     """
     at = _ate_o_consumo(_abrir())
     _continuar(at)                       # consumo -> telhado
-    at.radio[0].set_value("Já sei a potência").run()
+    at.radio[0].set_value("potencia").run()
     _por_rotulo(at.number_input, "Potência do sistema").set_value(20.0).run()
     _continuar(at)                       # telhado -> equipamento
     _por_rotulo(at.button, "Analisar com bateria").click().run()
@@ -503,6 +723,107 @@ def test_a_meta_pergunta_o_padrao_da_obra():
     _por_rotulo(at.number_input, "Ou informe o investimento no solar")
 
 
+def test_o_preco_do_estudo_vem_da_tabela_de_kit_e_nao_da_curva():
+    """
+    O investimento sai da planilha interna, e de mais lugar nenhum.
+
+    A curva de R$/kWp continua existindo para o que a tabela não cobre, mas
+    ela não pode decidir o preço de um sistema que a tabela precifica: duas
+    origens para o mesmo número é como o mesmo sistema aparecia com dois
+    investimentos diferentes conforme o caminho da tela.
+    """
+    at = _ate_a_meta(_abrir())
+    seletor = _por_rotulo(at.selectbox, "Padrão da obra")
+    alto = next(o for o in seletor.options if "Alto padrão" in str(o))
+    seletor.set_value(alto).run()
+    assert not at.exception, at.exception
+
+    _por_rotulo(at.select_slider, "Autonomia alvo").set_value(1).run()
+    _por_rotulo(at.multiselect, "Durações de falta").set_value([1.0]).run()
+    _por_rotulo(at.slider, "Amostras por combinação").set_value(20).run()
+    _por_rotulo(at.slider, "Conjuntos a avaliar").set_value(2).run()
+    _por_rotulo(at.button, "Rodar o estudo").click().run()
+    assert not at.exception, at.exception
+
+    from aurum.pv.financials import estimar_capex
+
+    estudo = at.session_state["e_estudo"]
+    assert estudo.configuracao.padrao_capex == "alto"
+    precos = estudo.precos_por_topologia
+    assert precos and set(precos) == {
+        "microinversor", "splitphase", "splitphase_bateria"}
+
+    # O cenário sem bateria fica com a proposta mais barata das que não têm
+    # banco; o com bateria, com o kit split-phase mais os blocos — e o banco
+    # entra uma vez só.
+    sem_banco = min(
+        precos[c]["capex_brl"] for c in ("microinversor", "splitphase"))
+    solar = estudo.cenarios.por_chave("solar")
+    assert solar.capex_brl == pytest.approx(sem_banco, rel=1e-6)
+    com_banco = estudo.cenarios.por_chave("solar+bateria")
+    assert com_banco.capex_brl == pytest.approx(
+        precos["splitphase_bateria"]["capex_brl"], rel=1e-6)
+    # E o kit com banco custa mais que o mesmo kit sem ele.
+    assert (precos["splitphase_bateria"]["capex_brl"]
+            > precos["splitphase"]["capex_brl"])
+    # E nenhum dos dois é a curva do padrão de obra escolhido.
+    assert solar.capex_brl != pytest.approx(
+        estimar_capex(estudo.potencia_fv_kwp, padrao="alto"), rel=1e-3)
+
+
+def _cartoes(at):
+    """Os cartões de métrica da tela, como (rótulo, valor)."""
+    import re
+
+    achados = []
+    for bloco in at.markdown:
+        achados += [
+            (rotulo, valor)
+            for valor, rotulo in re.findall(
+                r'bloco-valor">(.*?)<.*?bloco-rotulo">(.*?)<', bloco.value, re.S)
+        ]
+    return achados
+
+
+def test_a_meta_mostra_quanto_custa_cada_kit():
+    """
+    A pergunta do balcão — "e com bateria, quanto fica?" — se responde antes
+    de rodar o estudo, e não só no PDF.
+    """
+    at = _ate_a_meta(_abrir())
+    rotulos = [r for r, _ in _cartoes(at)]
+    for nome in ("Microinversor", "SplitPhase sem bateria", "SplitPhase com bateria"):
+        assert nome in rotulos, (nome, rotulos)
+    # A diferença que o cliente compra é entre o mesmo kit com e sem o banco.
+    assert any("splitphase com bateria" in c.value.lower() for c in at.caption)
+
+    # Escolhendo só um, somem os outros — a proposta é a que o comercial montou.
+    _por_rotulo(at.multiselect, "Quais kits entram").set_value(["splitphase_bateria"]).run()
+    rotulos = [r for r, _ in _cartoes(at)]
+    assert "SplitPhase com bateria" in rotulos
+    assert "Microinversor" not in rotulos and "SplitPhase sem bateria" not in rotulos
+
+
+def test_o_operador_escolhe_as_topologias_da_proposta():
+    """Split e micro, ou só um dos dois — a escolha chega ao estudo."""
+    at = _ate_a_meta(_abrir())
+    _por_rotulo(at.multiselect, "Quais kits entram").set_value(["splitphase"]).run()
+    assert not at.exception, at.exception
+
+    _por_rotulo(at.select_slider, "Autonomia alvo").set_value(1).run()
+    _por_rotulo(at.multiselect, "Durações de falta").set_value([1.0]).run()
+    _por_rotulo(at.slider, "Amostras por combinação").set_value(20).run()
+    _por_rotulo(at.slider, "Conjuntos a avaliar").set_value(2).run()
+    _por_rotulo(at.button, "Rodar o estudo").click().run()
+    assert not at.exception, at.exception
+
+    estudo = at.session_state["e_estudo"]
+    assert estudo.configuracao.topologias_proposta == ("splitphase",)
+    assert set(estudo.precos_por_topologia) == {"splitphase"}
+    # E a tela do resultado mostra a proposta escolhida, com preço e autonomia.
+    assert any("propostas, lado a lado" in m.value.lower() for m in at.markdown)
+
+
 def test_padrao_da_obra_chega_ao_estudo():
     """De nada adianta o seletor existir se a configuração ignora a escolha."""
     at = _ate_a_meta(_abrir())
@@ -519,14 +840,9 @@ def test_padrao_da_obra_chega_ao_estudo():
     assert not at.exception, at.exception
 
     estudo = at.session_state["e_estudo"]
+    # A escolha chega à configuração. Ela decide o preço apenas onde a tabela
+    # de kit não alcança — dentro dela, quem manda é a tabela.
     assert estudo.configuracao.padrao_capex == "alto"
-    # E o preço estimado tem de refletir a escolha, não a curva média.
-    from aurum.pv.financials import estimar_capex
-
-    solar = estudo.cenarios.por_chave("solar")
-    assert solar.capex_brl == pytest.approx(
-        estimar_capex(estudo.potencia_fv_kwp, padrao="alto"), rel=1e-6
-    )
 
 
 def test_estudo_completo_pela_interface():

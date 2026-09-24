@@ -363,6 +363,10 @@ def ensemble_de_curva_tipica(
     """
     Ensemble a partir de uma curva típica calibrada pela conta de luz.
 
+    Versão mínima: um fator diário sobre uma curva fixa. O estudo usa
+    :meth:`aurum.demanda.ajuste.AjusteCurva.ensemble`, que soma o ruído por
+    hora, os dias fechados e a sazonalidade.
+
     O caminho de quem não tem levantamento de equipamentos. A forma do dia vem
     do perfil do segmento; o tamanho, da fatura. Falta a variabilidade, e é
     ela que produz a cauda que decide o inversor — então ela é **assumida**,

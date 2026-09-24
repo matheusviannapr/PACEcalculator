@@ -236,6 +236,7 @@ def comparar_cenarios_de_uso(
     ajustes_sazonais: dict | None = None,
     considerar_solar: bool = True,
     potencia_fv_kwp: float | None = None,
+    candidatos: Sequence[Any] | None = None,
 ) -> ComparacaoDeUso:
     """
     Mede os três cenários e dimensiona bateria — e solar, quando há solar.
@@ -329,13 +330,15 @@ def comparar_cenarios_de_uso(
                 np.mean(ensemble_backup.perfis())) / 1000.0 * autonomia_alvo_h
             from .catalogo import candidatos_em_blocos
 
-            candidatos = (
+            # A lista declarada, quando há: é o produto, não um recorte. Sem
+            # ela, os blocos do catálogo — como sempre foi.
+            do_cenario = list(candidatos) if candidatos else (
                 candidatos_em_blocos(catalogo)
                 or _candidatos_do_escopo(catalogo, energia_alvo)
             )
-            if candidatos:
+            if do_cenario:
                 conjunto, _, autonomia, _ = _mais_barato_que_cumpre(
-                    candidatos, ensemble_backup, serie, malha,
+                    do_cenario, ensemble_backup, serie, malha,
                     autonomia_alvo_h, confiabilidade, semente, premissas)
                 if conjunto is not None:
                     banco.conjunto = conjunto
