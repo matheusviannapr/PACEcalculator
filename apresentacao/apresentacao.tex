@@ -260,7 +260,9 @@
   \vspace{0.05cm}\centering
   \begin{tabelachave}[4.2cm]{4.2cm}
     \linha{Solução}{Compra Financiada}
-    \linhadestaque{Investimento Inicial}{\investimentocurto}
+    \linha{Valor do Sistema}{\investimentocurto}
+    \linhadestaque{Entrada}{\entradafinanciamento}
+    \linha{Valor Financiado}{\valorfinanciado}
     \linha{Economia Mensal}{\economiamensal}
     \linha{Mensalidade}{\mensalidadefinanciada}
     \linha{Seguro dos Equipamentos}{\segurofinanciado}
@@ -268,26 +270,6 @@
     \linha{Prazo do Contrato}{\prazofinanciamento}
     \linha{Carência}{\carenciafinanciamento}
     \linha{Validade da Proposta}{\validadeproposta}
-  \end{tabelachave}
-  \notaderodape{Para validação da proposta, é necessário que visita técnica comprove que o imóvel tem condições de receber o projeto.}
-\end{frame}
-
-% ============================================================================
-%  8. Leasing
-% ============================================================================
-\begin{frame}{Leasing do Sistema -- \cliente}
-  \framesubtitle{As a Service -- investimento ZERO}
-  \vspace{0.05cm}\centering
-  \begin{tabelachave}[4.2cm]{4.2cm}
-    \linha{Solução}{As a Service}
-    \linhadestaque{Investimento Inicial}{R\$ 0}
-    \linha{Economia Mensal}{\economiamensal}
-    \linha{Mensalidade}{\mensalidadeleasing}
-    \linhavisto{Seguro dos Equipamentos}
-    \linhavisto{Manutenção e Limpeza}
-    \linhavisto{Gerenciamento}
-    \linha{Prazo do Contrato}{\prazoleasing}
-    \linha{Carência}{\carencialeasing}
   \end{tabelachave}
   \notaderodape{Para validação da proposta, é necessário que visita técnica comprove que o imóvel tem condições de receber o projeto.}
 \end{frame}
@@ -310,14 +292,14 @@
 % ============================================================================
 %  10. Fluxo de caixa acumulado
 % ============================================================================
-\newcommand{\linhafluxo}[4]{#1 & #2 & #3 & #4 \\ \hline}
+\newcommand{\linhafluxo}[3]{#1 & #2 & #3 \\ \hline}
 \begin{frame}{Retorno Financeiro Estimado -- \cliente}
   \framesubtitle{Fluxo de caixa acumulado}
   \vspace{0.15cm}
   \begin{minipage}[c]{0.46\textwidth}
-    \begin{tabeladados}{|\colrotulo{0.6cm}|*{3}{\colvalor{1.7cm}|}}
+    \begin{tabeladados}{|\colrotulo{0.9cm}|*{2}{\colvalor{2.2cm}|}}
       \hline
-      \cab{Ano} & \cab{À vista} & \cab{Financiado} & \cab{As a Service} \\ \hline
+      \cab{Ano} & \cab{À vista} & \cab{Financiado} \\ \hline
       \linhasfluxo
     \end{tabeladados}
   \end{minipage}\hfill
@@ -334,7 +316,6 @@
       ]
         \addplot coordinates {\fluxoavista};\addlegendentry{À vista}
         \addplot coordinates {\fluxofinanciado};\addlegendentry{Financiado}
-        \addplot coordinates {\fluxoservico};\addlegendentry{As a Service}
         \addplot[dashed,cortextosuave,mark=none,forget plot] coordinates {\fluxozero};
       \end{axis}
     \end{tikzpicture}

@@ -23,7 +23,7 @@ caixa ano a ano — tudo do cenário de fontes que a proposta apresenta.
 **Do operador**, porque o estudo não tem como saber: quem assina (a
 :class:`~aurum.bateria.documento.DadosCapa`) e as condições comerciais
 (:class:`OpcoesComerciais`) — juros e prazo do financiamento, a mensalidade
-do leasing, o preço do seguro e do gerenciamento, as garantias. Cada uma tem
+a entrada, o preço do seguro e do gerenciamento, as garantias. Cada uma tem
 um padrão declarado, para a apresentação sair mesmo sem ninguém preencher;
 mas são premissas de venda, não resultado de cálculo, e a proposta que for
 para o cliente precisa tê-las conferidas.
@@ -99,12 +99,12 @@ class OpcoesComerciais:
     prazo_financiamento_meses: int = 60
     carencia_financiamento_meses: int = 3
 
-    # -- leasing ("as a service") ---------------------------------------------
-    #: A mensalidade como fração da economia mensal do primeiro ano. Seguro,
-    #: manutenção e gerenciamento estão dentro dela.
-    leasing_fracao_da_economia: float = 0.86
-    prazo_leasing_anos: int = 10
-    carencia_leasing_meses: int = 3
+    #: Entrada do financiamento, em reais. Zero é o caso comum no varejo
+    #: solar: o banco financia o sistema inteiro e a primeira parcela vence
+    #: depois da carência. O que o cliente desembolsa no ato é isto — e não
+    #: o valor do sistema, que aparecia no slide como "investimento inicial"
+    #: de uma compra que, por definição, não tem desembolso inicial.
+    entrada_financiamento_brl: float = 0.0
 
     # -- o que vai na lista de equipamentos ----------------------------------
     estrutura: str = "Telhado"
@@ -272,11 +272,12 @@ def dados_da_apresentacao(
     economia_anual = float(cenario.economia_anual_brl)
     economia_mensal = economia_anual / 12.0
     servicos_mes = opcoes.seguro_brl_mes + opcoes.gerenciamento_brl_mes
+    entrada = min(max(0.0, float(opcoes.entrada_financiamento_brl)), capex)
+    financiado_brl = capex - entrada
     parcela = parcela_price(
-        capex, opcoes.juros_financiamento_am,
+        financiado_brl, opcoes.juros_financiamento_am,
         opcoes.prazo_financiamento_meses, opcoes.carencia_financiamento_meses,
     )
-    mensalidade_leasing = economia_mensal * opcoes.leasing_fracao_da_economia
 
     # O fluxo do estudo já traz a escalada tarifária e o custo de operação. A
     # apresentação só lhe soma o que o estudo não conhece: os serviços
@@ -285,21 +286,15 @@ def dados_da_apresentacao(
     horizonte = int(premissas.anos_analise)
     fluxo_estudo = [float(v) for v in cenario.fluxo["fluxo_brl"].tolist()][:horizonte]
     a_vista = [-capex] + [f - 12 * servicos_mes for f in fluxo_estudo]
-    financiado = [0.0] + [
+    financiado = [-entrada] + [
         f - 12 * servicos_mes
         - parcela * _parcelas_no_ano(ano, opcoes.carencia_financiamento_meses,
                                      opcoes.prazo_financiamento_meses)
         for ano, f in enumerate(fluxo_estudo, start=1)
     ]
-    leasing = [0.0] + [
-        f - mensalidade_leasing * _parcelas_no_ano(
-            ano, opcoes.carencia_leasing_meses, 12 * opcoes.prazo_leasing_anos)
-        for ano, f in enumerate(fluxo_estudo, start=1)
-    ]
     acumulados = {
         "a_vista": _acumulado(a_vista),
         "financiado": _acumulado(financiado),
-        "leasing": _acumulado(leasing),
     }
     anos = [a for a in opcoes.anos_fluxo if 1 <= a <= horizonte]
     if not anos or anos[-1] != horizonte:
@@ -354,7 +349,8 @@ def dados_da_apresentacao(
             "seguro_brl_mes": opcoes.seguro_brl_mes,
             "gerenciamento_brl_mes": opcoes.gerenciamento_brl_mes,
             "parcela_brl_mes": parcela,
-            "mensalidade_leasing_brl_mes": mensalidade_leasing,
+            "entrada_financiamento_brl": entrada,
+            "valor_financiado_brl": financiado_brl,
         },
         "fluxo_acumulado": fluxo_acumulado,
         "opcoes": opcoes.as_dict(),
@@ -487,7 +483,7 @@ def dados_tex(dados: dict[str, Any]) -> str:
                else "não se paga no horizonte")
     tir = f"{br_float(e['tir'] * 100, 1)}\\% a.a." if e["tir"] is not None else "---"
     servicos = e["seguro_brl_mes"] + e["gerenciamento_brl_mes"]
-    parcela, leasing = e["parcela_brl_mes"], e["mensalidade_leasing_brl_mes"]
+    parcela = e["parcela_brl_mes"]
     em = e["economia_mensal_brl"]
 
     def nome_ou_generico(nome: str | None, generico: str) -> str:
@@ -526,18 +522,19 @@ def dados_tex(dados: dict[str, Any]) -> str:
     anos = [f["ano"] for f in dados["fluxo_acumulado"]]
     coords = {
         k: " ".join(f"({f['ano']},{f[k]:.2f})" for f in dados["fluxo_acumulado"])
-        for k in ("a_vista", "financiado", "leasing")
+        for k in ("a_vista", "financiado")
     }
     linhas_fluxo = [
-        rf"  \linhafluxo{{{f['ano']}}}{{{_saldo(f['a_vista'])}}}{{{_saldo(f['financiado'])}}}{{{_saldo(f['leasing'])}}}"
+        rf"  \linhafluxo{{{f['ano']}}}{{{_saldo(f['a_vista'])}}}{{{_saldo(f['financiado'])}}}"
         for f in dados["fluxo_acumulado"]
     ]
     nota_fluxo = (
         f"Fluxo nominal do estudo: escalada tarifária de "
         f"{br_float(e['escalada_tarifaria_ano'] * 100, 1)}\\% a.a. e horizonte de "
         f"{e['horizonte_anos']} anos. Financiamento a "
-        f"{br_float(o['juros_financiamento_am'] * 100, 2)}\\% a.m.; "
-        f"leasing com seguro, manutenção e gerenciamento inclusos."
+        f"{br_float(o['juros_financiamento_am'] * 100, 2)}\\% a.m. em "
+        f"{o['prazo_financiamento_meses']} meses, com "
+        f"{o['carencia_financiamento_meses']} de carência."
     )
 
     partes = [
@@ -583,6 +580,8 @@ def dados_tex(dados: dict[str, Any]) -> str:
         "",
         "% ---- Compra financiada",
         _cmd("investimentocurto", _brl(e["capex_brl"])),
+        _cmd("entradafinanciamento", _brl(e["entrada_financiamento_brl"], 2)),
+        _cmd("valorfinanciado", _brl(e["valor_financiado_brl"], 2)),
         _cmd("economiamensal", _brl(em)),
         _cmd("mensalidadefinanciada",
              f"{_brl(parcela)} ({br_float(o['juros_financiamento_am'] * 100, 2)}\\% a.m.)"),
@@ -592,19 +591,13 @@ def dados_tex(dados: dict[str, Any]) -> str:
         _cmd("carenciafinanciamento", f"{o['carencia_financiamento_meses']} meses"),
         _cmd("validadeproposta", f"{o['validade_dias']} dias"),
         "",
-        "% ---- Leasing",
-        _cmd("mensalidadeleasing", _brl(leasing)),
-        _cmd("prazoleasing", f"{o['prazo_leasing_anos']} anos"),
-        _cmd("carencialeasing", f"{o['carencia_leasing_meses']} meses"),
-        "",
         "% ---- Desembolso mensal no primeiro ano",
         r"\newcommand{\linhasdesembolso}{%",
         rf"  \linhadesembolso{{À vista}}{{{_brl(e['capex_brl'])}}}{{---}}{{{_brl(servicos, 2)}}}"
         rf"{{{_brl(em, 2)}}}{{{_saldo(em - servicos)}}}",
-        rf"  \linhadesembolso{{Financiado}}{{---}}{{{_brl(parcela, 2)}}}{{{_brl(servicos, 2)}}}"
+        rf"  \linhadesembolso{{Financiado}}{{{_brl(e['entrada_financiamento_brl'], 2)}}}"
+        rf"{{{_brl(parcela, 2)}}}{{{_brl(servicos, 2)}}}"
         rf"{{{_brl(em, 2)}}}{{{_saldo(em - servicos - parcela)}}}",
-        rf"  \linhadesembolso{{As a Service}}{{---}}{{{_brl(leasing, 2)}}}{{---}}"
-        rf"{{{_brl(em, 2)}}}{{{_saldo(em - leasing)}}}",
         "}",
         "",
         "% ---- Fluxo de caixa acumulado",
@@ -615,7 +608,6 @@ def dados_tex(dados: dict[str, Any]) -> str:
         _cmd("fluxozero", f"({anos[0]},0) ({anos[-1]},0)"),
         _cmd("fluxoavista", coords["a_vista"]),
         _cmd("fluxofinanciado", coords["financiado"]),
-        _cmd("fluxoservico", coords["leasing"]),
         _cmd("notafluxo", nota_fluxo),
         "",
         "% ---- Lista de equipamentos",

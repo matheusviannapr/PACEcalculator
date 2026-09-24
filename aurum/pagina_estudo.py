@@ -4369,11 +4369,11 @@ def _passo_resultado() -> None:
                 prazo_fin = st.number_input(
                     "Prazo do financiamento (meses)", 6, 180, 60, 6, key="com_prazo")
                 carencia = st.number_input("Carência (meses)", 0, 12, 3, 1, key="com_carencia")
-                fracao_leasing = st.number_input(
-                    "Mensalidade do leasing (% da economia mensal)", 10.0, 100.0, 86.0, 1.0,
-                    key="com_leasing")
-                prazo_leasing = st.number_input(
-                    "Prazo do leasing (anos)", 1, 25, 10, 1, key="com_prazo_leasing")
+                entrada = st.number_input(
+                    "Entrada do financiamento (R$)", 0.0, 10_000_000.0, 0.0, 500.0,
+                    key="com_entrada",
+                    help="O que o cliente desembolsa no ato. Zero é o caso comum: o "
+                         "banco financia o sistema inteiro.")
                 seguro = st.number_input("Seguro (R$/mês)", 0.0, 5000.0, 40.0, 5.0, key="com_seguro")
                 gerenciamento = st.number_input(
                     "Gerenciamento (R$/mês)", 0.0, 5000.0, 40.0, 5.0, key="com_gerenciamento")
@@ -4400,8 +4400,7 @@ def _passo_resultado() -> None:
                             juros_financiamento_am=juros_am / 100.0,
                             prazo_financiamento_meses=int(prazo_fin),
                             carencia_financiamento_meses=int(carencia),
-                            leasing_fracao_da_economia=fracao_leasing / 100.0,
-                            prazo_leasing_anos=int(prazo_leasing),
+                            entrada_financiamento_brl=float(entrada),
                             seguro_brl_mes=seguro, gerenciamento_brl_mes=gerenciamento,
                         ),
                     )

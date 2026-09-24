@@ -86,12 +86,51 @@ def test_fluxo_acumulado_e_o_do_estudo_menos_o_que_a_proposta_acrescenta(estudo_
     # Financiado: sem entrada, nove prestações no primeiro ano (três de carência).
     parcela = dados["economia"]["parcela_brl_mes"]
     assert ano1["financiado"] == pytest.approx(fluxo[0] - 960.0 - 9 * parcela)
-    # Leasing: a mensalidade é a fração da economia, sem serviços à parte.
-    mensalidade = dados["economia"]["mensalidade_leasing_brl_mes"]
-    assert mensalidade == pytest.approx(cenario.economia_anual_brl / 12 * 0.86)
-    assert ano1["leasing"] == pytest.approx(fluxo[0] - 9 * mensalidade)
+    # Sem entrada, o financiado não tem desembolso no ato — e a parcela é
+    # calculada sobre o valor financiado, não sobre o valor do sistema.
+    assert dados["economia"]["entrada_financiamento_brl"] == 0.0
+    assert dados["economia"]["valor_financiado_brl"] == pytest.approx(cenario.capex_brl)
+    assert "leasing" not in ano1
     # O último ano mostrado é o horizonte do estudo, nunca além dele.
     assert dados["fluxo_acumulado"][-1]["ano"] == estudo.cenarios.premissas.anos_analise
+
+
+def test_a_entrada_e_o_que_se_desembolsa_no_ato(estudo_com_telhado):
+    """
+    Num financiamento, o investimento inicial é a entrada — não o valor do
+    sistema. O slide mostrava o total como desembolso no ato de uma compra
+    que, por definição, não tem desembolso no ato.
+    """
+    estudo = estudo_com_telhado
+    entrada = 5_000.0
+    dados = dados_da_apresentacao(
+        estudo, opcoes=OpcoesComerciais(entrada_financiamento_brl=entrada))
+    economia = dados["economia"]
+    assert economia["entrada_financiamento_brl"] == pytest.approx(entrada)
+    assert economia["valor_financiado_brl"] == pytest.approx(
+        economia["capex_brl"] - entrada)
+    # A parcela cai proporcionalmente ao que se financia.
+    sem_entrada = dados_da_apresentacao(estudo)["economia"]["parcela_brl_mes"]
+    assert economia["parcela_brl_mes"] < sem_entrada
+    assert economia["parcela_brl_mes"] == pytest.approx(
+        sem_entrada * economia["valor_financiado_brl"] / economia["capex_brl"], rel=1e-6)
+    # E o ano zero do fluxo financiado é exatamente a entrada.
+    assert dados["fluxo_acumulado"][0]["financiado"] < 0
+
+
+def test_o_leasing_saiu_da_proposta(estudo_com_telhado):
+    """
+    O "as a service" não existe no portfólio, e proposta não anuncia produto
+    que a empresa não vende.
+    """
+    dados = dados_da_apresentacao(estudo_com_telhado)
+    assert "mensalidade_leasing_brl_mes" not in dados["economia"]
+    assert "leasing" not in dados["fluxo_acumulado"][0]
+    tex = dados_tex(dados)
+    assert "leasing" not in tex.lower() and "as a service" not in tex.lower()
+    esqueleto = (RAIZ_APRES / "apresentacao.tex").read_text(encoding="utf-8")
+    assert "leasing" not in esqueleto.lower()
+    assert "As a Service" not in esqueleto
 
 
 def test_cliente_da_capa_vem_das_opcoes_e_cai_no_nome_do_estudo(estudo_com_telhado):
@@ -123,9 +162,10 @@ def test_dados_tex_define_todos_os_comandos_do_esqueleto(estudo_com_telhado):
     for comando in (
         "cliente", "dataproposta", "responsavel", "potenciaprojeto", "qtdmodulos",
         "potenciainversor", "areaocupada", "producaoanual", "bess", "investimento",
-        "economiaanual", "payback", "tir", "mensalidadefinanciada", "mensalidadeleasing",
+        "economiaanual", "payback", "tir", "mensalidadefinanciada",
+        "entradafinanciamento", "valorfinanciado",
         "linhasdesembolso", "linhasfluxo", "fluxoanos", "fluxoavista", "fluxofinanciado",
-        "fluxoservico", "fluxozero", "notafluxo", "linhasequipamentos", "fotosequipamentos",
+        "fluxozero", "notafluxo", "linhasequipamentos", "fotosequipamentos",
         "invsembateria", "invcombateria", "economiaanualsembateria",
         "economiaanualcombateria", "paybacksembateria", "paybackcombateria",
         "autonomiacombateria", "custodabateria", "notasembateria", "notacombateria",
