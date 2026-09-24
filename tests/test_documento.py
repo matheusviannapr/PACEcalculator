@@ -357,3 +357,26 @@ def test_sem_analise_o_documento_ainda_sai():
     tex = montar_documento(estudo)
     assert tex.rstrip().endswith("\\end{document}")
     assert "Distribuição dos picos" not in tex
+
+
+def test_o_dossie_traz_o_preco_de_cada_kit(estudo_com_telhado):
+    """
+    O estudo tem que mostrar a diferença de preço entre as duas topologias.
+
+    Um investimento só, sem dizer de qual kit se fala, é o que fazia a mesma
+    proposta ter dois preços conforme quem a lia.
+    """
+    from aurum.bateria.documento import montar_documento
+
+    estudo = estudo_com_telhado
+    tex = montar_documento(estudo, {})
+    assert "As propostas: o que cada kit custa" in tex
+    precos = estudo.precos_por_topologia
+    assert precos and len(precos) == 2
+    for dados in precos.values():
+        assert str(dados["nome"]) in tex
+    # Os dois preços da tabela aparecem, e são diferentes entre si.
+    valores = {round(float(d["capex_brl"])) for d in precos.values()}
+    assert len(valores) == 2, valores
+    # E o texto diz de onde veio o número.
+    assert "tabela de kit vigente" in tex

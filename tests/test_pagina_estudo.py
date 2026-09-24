@@ -763,10 +763,40 @@ def test_o_preco_do_estudo_vem_da_tabela_de_kit_e_nao_da_curva():
         estimar_capex(estudo.potencia_fv_kwp, padrao="alto"), rel=1e-3)
 
 
+def _cartoes(at):
+    """Os cartões de métrica da tela, como (rótulo, valor)."""
+    import re
+
+    achados = []
+    for bloco in at.markdown:
+        achados += [
+            (rotulo, valor)
+            for valor, rotulo in re.findall(
+                r'bloco-valor">(.*?)<.*?bloco-rotulo">(.*?)<', bloco.value, re.S)
+        ]
+    return achados
+
+
+def test_a_meta_mostra_quanto_custa_cada_kit():
+    """
+    A pergunta do balcão — "e com bateria, quanto fica?" — se responde antes
+    de rodar o estudo, e não só no PDF.
+    """
+    at = _ate_a_meta(_abrir())
+    rotulos = [r for r, _ in _cartoes(at)]
+    assert "Microinversor" in rotulos and "SplitPhase (híbrido)" in rotulos, rotulos
+    assert any("diferença entre os dois kits" in c.value.lower() for c in at.caption)
+
+    # Escolhendo só um, some o outro — a proposta é a que o comercial montou.
+    _por_rotulo(at.multiselect, "Quais kits entram").set_value(["splitphase"]).run()
+    rotulos = [r for r, _ in _cartoes(at)]
+    assert "SplitPhase (híbrido)" in rotulos and "Microinversor" not in rotulos
+
+
 def test_o_operador_escolhe_as_topologias_da_proposta():
     """Split e micro, ou só um dos dois — a escolha chega ao estudo."""
     at = _ate_a_meta(_abrir())
-    _por_rotulo(at.multiselect, "Topologias na proposta").set_value(["splitphase"]).run()
+    _por_rotulo(at.multiselect, "Quais kits entram").set_value(["splitphase"]).run()
     assert not at.exception, at.exception
 
     _por_rotulo(at.select_slider, "Autonomia alvo").set_value(1).run()
@@ -779,6 +809,8 @@ def test_o_operador_escolhe_as_topologias_da_proposta():
     estudo = at.session_state["e_estudo"]
     assert estudo.configuracao.topologias_proposta == ("splitphase",)
     assert set(estudo.precos_por_topologia) == {"splitphase"}
+    # E a tela do resultado mostra a proposta escolhida, com preço e autonomia.
+    assert any("propostas, lado a lado" in m.value.lower() for m in at.markdown)
 
 
 def test_padrao_da_obra_chega_ao_estudo():

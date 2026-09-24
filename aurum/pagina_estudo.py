@@ -3580,6 +3580,7 @@ def _passo_meta() -> None:
              "frente de qualquer curva.",
     )
     topologia_kit, mao_de_obra, material_ca = _controles_do_kit()
+    _escolher_as_propostas(mao_de_obra, material_ca)
 
     referencia = _referencia_capex(
         padrao_capex, st.session_state.get("e_kwp") or 0.0,
@@ -3746,6 +3747,104 @@ def _aba_cenarios(estudo) -> None:
         st.warning(aviso)
 
 
+def _energia_do_banco() -> float:
+    """
+    Quanta bateria o preço do kit split-phase precisa incluir.
+
+    Em ordem: o banco que o estudo recomendou, quando já rodou; os blocos que
+    o operador fixou, quando fixou; zero, quando ainda não há nem um nem
+    outro — e aí a tela diz que o banco ainda não entrou na conta, em vez de
+    mostrar um split-phase suspeito de barato.
+    """
+    estudo = st.session_state.get("e_estudo")
+    recomendado = getattr(estudo, "recomendado", None) if estudo is not None else None
+    if recomendado is not None:
+        return float(recomendado.conjunto.energia_util_kwh)
+    blocos = int(st.session_state.get("e_blocos_bateria") or 0)
+    if blocos > 0:
+        nominal = blocos * float(st.session_state.get("e_bateria_bloco_kwh") or 5.0)
+        # 95% de profundidade de descarga e 95% de rendimento, como o bloco
+        # padrão do catálogo declara: é o que vira energia útil.
+        return nominal * 0.95 * 0.95
+    return 0.0
+
+
+def _escolher_as_propostas(mao_de_obra: float, material_ca: float) -> None:
+    """
+    Quais propostas o cliente vai receber — e quanto custa cada uma.
+
+    Microinversor e split-phase não são dois preços do mesmo sistema: o micro
+    desliga junto com a rede e não recebe bateria; o split-phase é híbrido e
+    atravessa a falta. São dois produtos, e a diferença de preço entre eles é
+    o que o cliente está comprando quando escolhe o segundo.
+
+    Os valores saem da tabela interna de kit, coluna por coluna — o mesmo
+    número que vai para o dossiê e para os slides. Mostrá-los aqui, antes de
+    rodar, é o que transforma a escolha em decisão comercial em vez de
+    surpresa no fim.
+    """
+    from .pv.kits import TOPOLOGIAS_DE_PROPOSTA, capex_por_topologia
+
+    estado = st.session_state
+    st.markdown("##### As propostas que o cliente vai receber")
+    escolhidas = st.multiselect(
+        "Quais kits entram na proposta",
+        list(TOPOLOGIAS_DE_PROPOSTA),
+        format_func=lambda t: TOPOLOGIAS_DE_PROPOSTA[t]["nome"],
+        key="e_topologias_proposta",
+        help="Cada uma vira um slide de valor na apresentação e uma linha no dossiê, "
+             "com o preço da sua coluna da tabela interna.",
+    )
+    if not escolhidas:
+        st.caption(
+            "Sem nenhuma marcada, o dossiê sai técnico e a apresentação não traz "
+            "slides de valor."
+        )
+        return
+
+    kwp = float(estado.get("e_kwp") or estado.get("e_kwp_alvo") or 0.0)
+    if kwp <= 0:
+        st.caption(
+            "O preço de cada kit aparece aqui assim que a potência do sistema estiver "
+            "definida — ela sai do passo do telhado ou do equipamento."
+        )
+        return
+
+    banco_kwh = _energia_do_banco()
+    precos = capex_por_topologia(
+        kwp, escolhidas,
+        mao_de_obra_brl_kwp=mao_de_obra, material_ca_brl_kwp=material_ca,
+        bateria_kwh=banco_kwh,
+        bloco_kwh=float(estado.get("e_bateria_bloco_kwh") or 5.0),
+        bloco_brl=float(estado.get("e_bateria_bloco_brl") or 0.0),
+    )
+    colunas = st.columns(len(precos))
+    for coluna, (topologia, dados) in zip(colunas, precos.items()):
+        capex = dados["capex_brl"]
+        _cartao(
+            coluna, str(dados["nome"]),
+            _reais(capex) if capex is not None else "sem preço de tabela",
+        )
+        coluna.caption(str(dados["resumo"]))
+        if dados["aviso"]:
+            coluna.caption(f"⚠ {dados['aviso']}")
+
+    micro, split = precos.get("microinversor"), precos.get("splitphase")
+    if micro and split and micro["capex_brl"] and split["capex_brl"]:
+        diferenca = split["capex_brl"] - micro["capex_brl"]
+        st.caption(
+            f"A diferença entre os dois kits é de **{_reais(diferenca)}** — é o que o "
+            f"cliente paga para atravessar a falta de energia"
+            + (f", com o banco de {banco_kwh:.1f} kWh úteis que o estudo dimensionou."
+               if banco_kwh > 0 else ". O banco entra no preço quando o estudo o dimensionar.")
+        )
+    st.caption(
+        "Preços da tabela interna de kit, sem mão de obra e material CA além do que "
+        "estiver informado acima. A economia e o payback de cada um saem do estudo, "
+        "com esse investimento."
+    )
+
+
 def _controles_do_kit() -> tuple[str | None, float, float]:
     """
     A topologia do kit e as duas parcelas que a obra acrescenta.
@@ -3841,20 +3940,6 @@ def _controles_do_kit() -> tuple[str | None, float, float]:
             key="e_bateria_bloco_brl_w",
             value=float(st.session_state.get("e_bateria_bloco_brl") or BATERIA_BLOCO_BRL),
         )
-        st.markdown("###### O que a proposta compara")
-        st.multiselect(
-            "Topologias na proposta",
-            list(TOPOLOGIAS_DE_PROPOSTA),
-            format_func=lambda t: TOPOLOGIAS_DE_PROPOSTA[t]["nome"],
-            key="e_topologias_proposta",
-            help="Cada uma vira um slide de valor na apresentação, com o preço da "
-                 "coluna correspondente da tabela interna. Microinversor não atravessa "
-                 "a falta de energia; split-phase é o híbrido com banco.",
-        )
-        for topologia in st.session_state["e_topologias_proposta"]:
-            st.caption(f"**{TOPOLOGIA_DE_PROPOSTA_NOME(topologia)}** — "
-                       f"{TOPOLOGIAS_DE_PROPOSTA[topologia]['resumo']}")
-
         st.session_state.setdefault("e_blocos_bateria", 0)
         bloco[2].number_input(
             "Blocos no banco (0 = o estudo escolhe)", 0, 12, step=1,
@@ -3891,7 +3976,7 @@ def _mostrar_composicao_do_kit(
         return
     partes = composicao_de_kit(
         kwp, topologia, mao_de_obra, material_ca,
-        bateria_kwh=float(st.session_state.get("e_energia_util_kwh") or 0.0),
+        bateria_kwh=_energia_do_banco(),
         bloco_kwh=float(st.session_state.get("e_bateria_bloco_kwh") or 5.0),
         bloco_brl=float(st.session_state.get("e_bateria_bloco_brl") or 10_000.0),
     )
@@ -4357,11 +4442,62 @@ def _resposta_em_uma_frase(estudo) -> None:
         _diagnostico_da_falha(estudo)
 
     _confirmar_compensacao(estudo)
+    _mostrar_as_propostas(estudo)
 
     for aviso in avisos[:6]:
         st.markdown(f'<div class="aviso-suave">⚠️ {aviso}</div>', unsafe_allow_html=True)
     if avisos:
         st.write("")
+
+
+def _mostrar_as_propostas(estudo) -> None:
+    """
+    As duas propostas, lado a lado, com o que muda entre elas.
+
+    É a tela que responde à pergunta do balcão — "e com bateria, quanto
+    fica?" — sem esperar o PDF. Os números são os mesmos que vão para o
+    dossiê e para os slides: preço da coluna da tabela, economia e payback do
+    cenário correspondente.
+    """
+    precos = getattr(estudo, "precos_por_topologia", None)
+    if not precos or estudo.cenarios is None:
+        return
+    linhas = []
+    for topologia, dados in precos.items():
+        capex = dados["capex_brl"]
+        cenario = estudo.cenarios.por_chave(str(dados["cenario"]))
+        if capex is None or cenario is None:
+            continue
+        economia = float(cenario.economia_anual_brl)
+        linhas.append({
+            "proposta": dados["nome"],
+            "investimento": _reais(capex),
+            "economia no 1º ano": _reais(economia),
+            "payback": f"{capex / economia:.1f} anos" if economia > 0 else "—",
+            "autonomia": (
+                f"{cenario.autonomia_garantida_h:.1f} h"
+                if cenario.autonomia_garantida_h > 0 else "nenhuma"
+            ),
+        })
+    if not linhas:
+        return
+
+    st.markdown("##### As propostas, lado a lado")
+    st.dataframe(pd.DataFrame(linhas), width="stretch", hide_index=True)
+    micro, split = precos.get("microinversor"), precos.get("splitphase")
+    if micro and split and micro["capex_brl"] and split["capex_brl"]:
+        diferenca = float(split["capex_brl"]) - float(micro["capex_brl"])
+        autonomia = estudo.cenarios.por_chave(str(split["cenario"]))
+        horas = float(autonomia.autonomia_garantida_h) if autonomia else 0.0
+        st.caption(
+            f"A diferença entre os dois kits é de **{_reais(diferenca)}**"
+            + (f", e é o que compra as {horas:.1f} h de autonomia." if horas > 0
+               else ".")
+        )
+    st.caption(
+        "Preços da tabela interna de kit. Cada proposta vira um slide da apresentação; "
+        "quais entram se escolhe no passo da Meta."
+    )
 
 
 def _confirmar_compensacao(estudo) -> None:

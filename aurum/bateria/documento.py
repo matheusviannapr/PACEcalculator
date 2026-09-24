@@ -2639,6 +2639,68 @@ def _subsecao_gerador(comparacao, figuras: dict[str, Path]) -> list[str]:
     return partes
 
 
+def _secao_propostas(estudo: ResultadoEstudo) -> str:
+    """
+    O que cada kit custa, e o que cada um entrega.
+
+    Microinversor e split-phase resolvem problemas diferentes — um abate a
+    conta, o outro abate a conta e atravessa a falta — e custam diferente.
+    Apresentar um investimento só, sem dizer de qual dos dois se fala,
+    é o que fazia a mesma proposta ter dois preços conforme quem a lia.
+
+    Os valores vêm da tabela interna de kit, coluna por coluna. Nenhum deles
+    sai de curva de R$/kWp.
+    """
+    precos = getattr(estudo, "precos_por_topologia", None)
+    if not precos or estudo.cenarios is None:
+        return ""
+    linhas = []
+    avisos: list[str] = []
+    for dados in precos.values():
+        capex = dados["capex_brl"]
+        cenario = estudo.cenarios.por_chave(str(dados["cenario"]))
+        if capex is None or cenario is None:
+            continue
+        economia = float(cenario.economia_anual_brl)
+        linhas.append((
+            esc(str(dados["nome"])),
+            _brl(capex),
+            _brl(economia),
+            f"{_n(capex / economia, 1)} anos" if economia > 0 else "--",
+            (_n(cenario.autonomia_garantida_h, 1, "h")
+             if cenario.autonomia_garantida_h > 0 else "nenhuma"),
+        ))
+        if dados["aviso"]:
+            avisos.append(f"{dados['nome']}: {dados['aviso']}")
+    if not linhas:
+        return ""
+
+    partes = [
+        secao("As propostas: o que cada kit custa"),
+        "O mesmo gerador fotovoltaico pode ser montado com topologias diferentes, e "
+        "elas não entregam a mesma coisa. O microinversor abate a conta e desliga "
+        "junto com a rede -- é exigência da norma de conexão, não limitação do "
+        "equipamento. O split-phase é híbrido: com o banco dimensionado neste "
+        "estudo, segue alimentando o quadro de backup durante a falta.",
+        tabela(
+            ["Proposta", "Investimento", "Economia no 1º ano", "Payback simples",
+             "Autonomia"],
+            linhas, alinhamento="lrrrr", largura_primeira_coluna="4.4cm",
+            legenda="Investimento e retorno de cada topologia de kit",
+        ),
+        nota(
+            "Os investimentos vêm da tabela de kit vigente, coluna por coluna, e não "
+            "de curva de R$/kWp: é o preço do material que o distribuidor pratica, "
+            "acrescido da mão de obra e do material CA informados no estudo. A "
+            "economia e o payback saem do balanço horário de cada arranjo, com esse "
+            "investimento."
+        ),
+    ]
+    if avisos:
+        partes.append(lista(avisos))
+    return "\n\n".join(partes)
+
+
 def _secao_economia(estudo: ResultadoEstudo) -> str:
     if estudo.recomendado is None:
         return ""
@@ -3095,6 +3157,7 @@ def montar_documento(
         _secao_vies_de_horario(estudo),
         _secao_vida_util(estudo, figuras),
         _secao_cenarios(estudo, figuras),
+        _secao_propostas(estudo),
         _secao_economia(estudo),
         _secao_procedencia(estudo),
         _referencias_de_equipamento(estudo),

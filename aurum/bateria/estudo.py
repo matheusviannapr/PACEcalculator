@@ -1200,7 +1200,7 @@ def executar_estudo(cfg: ConfiguracaoEstudo, progresso=None) -> ResultadoEstudo:
     precos_por_topologia = None
     capex_por_cenario: dict[str, float] = {}
     if cfg.considerar_solar and kwp > 0 and cfg.topologias_proposta:
-        from ..pv.kits import capex_por_topologia
+        from ..pv.kits import TOPOLOGIA_COM_BATERIA, capex_por_topologia
 
         precos_por_topologia = capex_por_topologia(
             kwp, cfg.topologias_proposta,
@@ -1210,16 +1210,35 @@ def executar_estudo(cfg: ConfiguracaoEstudo, progresso=None) -> ResultadoEstudo:
             bloco_kwh=cfg.premissas.bloco_bateria_kwh or 5.0,
             bloco_brl=cfg.premissas.bloco_bateria_brl or 0.0,
         )
+        # Duas contas que precisam fechar entre si: o preço que a proposta
+        # mostra e o capex que o cenário usa. O kit split-phase **já traz o
+        # inversor híbrido**; o trifásico, que o substitui acima de 40 kWp,
+        # não traz — e o motor, sem saber disso, cobrava o híbrido duas vezes
+        # num caso e nenhuma no outro.
+        #
+        # A regra aqui é uma só: o banco é contado em blocos (é assim que se
+        # compra, e é o que a tabela mostra), o híbrido entra no preço da
+        # topologia quando o kit não o inclui, e o que vai para o motor como
+        # capex fotovoltaico é o total da topologia menos os blocos.
+        preco_hibrido = _preco_do_hibrido(cfg, conjunto_dos_cenarios)
+        preco_blocos = _preco_do_banco(cfg, energia_banco)
+        cfg = replace(
+            cfg,
+            topologia_kit=cfg.topologia_kit or TOPOLOGIA_COM_BATERIA,
+            premissas=replace(cfg.premissas, inversor_no_kit_fv=True),
+        )
         for topologia, dados in precos_por_topologia.items():
             if dados["aviso"]:
                 avisos.append(f"{dados['nome']}: {dados['aviso']}")
             if dados["capex_brl"] is None:
                 continue
-            chave = str(dados["cenario"])
-            # O banco entra no preço do kit split-phase; deixá-lo aqui e
-            # somá-lo de novo no cenário cobraria a bateria duas vezes.
-            capex_por_cenario[chave] = float(dados["capex_brl"]) - (
-                _preco_do_banco(cfg, energia_banco) if dados["com_bateria"] else 0.0
+            capex = float(dados["capex_brl"])
+            if dados["com_bateria"] and dados["coluna"] != TOPOLOGIA_COM_BATERIA:
+                capex += preco_hibrido
+                dados["capex_brl"] = capex
+                dados["inversor_a_parte_brl"] = preco_hibrido
+            capex_por_cenario[str(dados["cenario"])] = capex - (
+                preco_blocos if dados["com_bateria"] else 0.0
             )
 
     cenarios = _comparar_fontes(
@@ -1459,6 +1478,24 @@ def _dimensionar_gerador(
         "para decidir é o custo de rodar."
     )
     return grupo, aviso
+
+
+def _preco_do_hibrido(
+    cfg: ConfiguracaoEstudo, conjunto: ConjuntoArmazenamento | None
+) -> float:
+    """
+    Quanto custa o inversor híbrido sozinho, sem os blocos.
+
+    É a parcela que o kit split-phase já inclui e o kit trifásico não. Sai da
+    mesma conta que o motor de cenários usa, para os dois números fecharem.
+    """
+    if conjunto is None:
+        return 0.0
+    from .fontes import _capex_do_conjunto
+
+    total, blocos = _capex_do_conjunto(
+        conjunto, replace(cfg.premissas, inversor_no_kit_fv=False), None)
+    return max(0.0, float(total) - float(blocos))
 
 
 def _preco_do_banco(cfg: ConfiguracaoEstudo, energia_kwh: float) -> float:
