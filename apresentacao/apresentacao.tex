@@ -194,6 +194,25 @@
 \end{frame}
 \fi
 
+\ifsplitseco
+\begin{frame}{\nomesecobateria\ -- \cliente}
+  \framesubtitle{\notasecobateria}
+  \vspace{0.05cm}\centering
+  \begin{tabelachave}[4.6cm]{4.2cm}
+    \linha{Solução}{\nomesecobateria}
+    \linha{Potência do Sistema}{\potenciaprojeto}
+    \linha{Geração Anual}{\geracaoanual}
+    \linhadestaque{Investimento}{\invsecobateria}
+    \linha{Economia Anual}{\economiaanualsecobateria}
+    \linha{Economia Mensal}{\economiamensalsecobateria}
+    \linha{Mensalidade (\prazofinanciamentocurto)}{\mensalidadesecobateria}
+    \linha{Payback simples}{\paybacksecobateria}
+    \linha{Autonomia na falta de energia}{Nenhuma, até instalar o banco}
+  \end{tabelachave}
+  \notaderodape{O inversor híbrido já fica instalado: acrescentar as baterias depois é somar o banco, sem trocar o equipamento. \origemdopreco}
+\end{frame}
+\fi
+
 \ifsplit
 \begin{frame}{\nomecombateria\ -- \cliente}
   \framesubtitle{\notacombateria}

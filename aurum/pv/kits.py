@@ -105,13 +105,23 @@ DESCRICAO_TOPOLOGIA: dict[str, str] = {
 TOPOLOGIAS_DE_PROPOSTA: dict[str, dict[str, object]] = {
     "microinversor": {
         "nome": "Microinversor",
+        "coluna": "microinversor",
         "bateria": False,
         "cenario": "solar",
         "resumo": "Cada módulo trabalha por conta própria; sombra num deles não "
                   "arrasta os outros. Não atravessa a falta de energia.",
     },
     "splitphase": {
-        "nome": "SplitPhase (híbrido)",
+        "nome": "SplitPhase sem bateria",
+        "coluna": "splitphase",
+        "bateria": False,
+        "cenario": "solar",
+        "resumo": "Inversor híbrido já instalado, sem banco: abate a conta hoje e "
+                  "recebe as baterias depois, sem trocar o inversor.",
+    },
+    "splitphase_bateria": {
+        "nome": "SplitPhase com bateria",
+        "coluna": "splitphase",
         "bateria": True,
         "cenario": "solar+bateria",
         "resumo": "Inversor híbrido com banco de baterias: segue alimentando o "
@@ -519,17 +529,23 @@ def capex_por_topologia(
         perfil = TOPOLOGIAS_DE_PROPOSTA.get(topologia, {})
         com_banco = bool(perfil.get("bateria", False))
         energia = float(bateria_kwh) if com_banco else 0.0
-        coluna, substituicao, aviso = topologia, None, None
-        capex = capex_de_kit(kwp, topologia, mao_de_obra_brl_kwp, material_ca_brl_kwp,
+        # A coluna da tabela não é a chave da proposta: "SplitPhase sem
+        # bateria" e "SplitPhase com bateria" leem a mesma coluna e diferem
+        # no banco, que é como o distribuidor vende.
+        coluna = str(perfil.get("coluna", topologia))
+        substituicao, aviso = None, None
+        capex = capex_de_kit(kwp, coluna, mao_de_obra_brl_kwp, material_ca_brl_kwp,
                              energia, bloco_kwh, bloco_brl)
-        if capex is None and topologia != "trifasico":
+        if capex is None and coluna != "trifasico":
             capex = capex_de_kit(kwp, "trifasico", mao_de_obra_brl_kwp,
                                  material_ca_brl_kwp, energia, bloco_kwh, bloco_brl)
             if capex is not None:
-                coluna, substituicao = "trifasico", topologia
+                substituicao, coluna_pedida = coluna, coluna
+                coluna = "trifasico"
                 aviso = (
-                    f"A coluna {TOPOLOGIAS.get(topologia, topologia)} da tabela vai até "
-                    f"{potencia_maxima(topologia):.0f} kWp e o sistema tem {kwp:.1f} kWp: "
+                    f"A coluna {TOPOLOGIAS.get(coluna_pedida, coluna_pedida)} da tabela "
+                    f"vai até {potencia_maxima(coluna_pedida):.0f} kWp e o sistema tem "
+                    f"{kwp:.1f} kWp: "
                     "o preço veio da coluna Trifásico, que é o que o distribuidor "
                     "oferece nessa faixa."
                 )

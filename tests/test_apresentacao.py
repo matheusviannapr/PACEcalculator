@@ -151,21 +151,26 @@ def test_os_dois_sistemas_saem_em_slides_distintos(estudo_com_telhado):
     dados = dados_da_apresentacao(estudo)
     c = dados["comparativo"]
     assert c is not None, "o estudo precificou as duas topologias"
-    micro, split = c["sem_bateria"], c["com_bateria"]
+    micro, seco, split = c["sem_bateria"], c["split_sem_bateria"], c["com_bateria"]
     precos = estudo.precos_por_topologia
     # Cada slide traz o preço da sua coluna da tabela de kit.
-    assert micro["capex_brl"] == pytest.approx(precos["microinversor"]["capex_brl"])
-    assert split["capex_brl"] == pytest.approx(precos["splitphase"]["capex_brl"])
-    # O banco custa dinheiro e compra autonomia — é essa a leitura dos slides.
+    for bloco, chave in ((micro, "microinversor"), (seco, "splitphase"),
+                         (split, "splitphase_bateria")):
+        assert bloco["capex_brl"] == pytest.approx(precos[chave]["capex_brl"])
+    # O banco custa dinheiro e compra autonomia — e a diferença é medida
+    # contra o mesmo kit sem banco, não contra o microinversor.
     assert c["capex_da_bateria_brl"] == pytest.approx(
-        split["capex_brl"] - micro["capex_brl"])
-    assert split["autonomia_h"] > micro["autonomia_h"]
-    assert micro["com_banco"] is False and split["com_banco"] is True
+        split["capex_brl"] - seco["capex_brl"])
+    assert split["autonomia_h"] > seco["autonomia_h"]
+    assert micro["com_banco"] is False and seco["com_banco"] is False
+    assert split["com_banco"] is True
 
     tex = dados_tex(dados)
-    assert "\\microtrue" in tex and "\\splittrue" in tex
+    for marca in ("microtrue", "splitsecotrue", "splittrue"):
+        assert f"\\{marca}" in tex, marca
     esqueleto = (RAIZ_APRES / "apresentacao.tex").read_text(encoding="utf-8")
-    assert "\\ifmicro" in esqueleto and "\\ifsplit" in esqueleto
+    for marca in ("ifmicro", "ifsplitseco", "ifsplit"):
+        assert f"\\{marca}" in esqueleto, marca
 
 
 def test_o_comercial_escolhe_quais_topologias_a_proposta_leva(estudo_com_telhado):
@@ -178,10 +183,11 @@ def test_o_comercial_escolhe_quais_topologias_a_proposta_leva(estudo_com_telhado
     assert "\\microtrue" in tex and "\\splitfalse" in tex
 
     so_split = dados_da_apresentacao(
-        estudo, opcoes=OpcoesComerciais(topologias=["splitphase"]))
-    assert set(so_split["comparativo"]["topologias"]) == {"splitphase"}
+        estudo, opcoes=OpcoesComerciais(topologias=["splitphase_bateria"]))
+    assert set(so_split["comparativo"]["topologias"]) == {"splitphase_bateria"}
     tex = dados_tex(so_split)
     assert "\\splittrue" in tex and "\\microfalse" in tex
+    assert "\\splitsecofalse" in tex
 
 
 def test_sem_topologia_precificada_os_slides_de_valor_nao_entram(estudo_com_telhado):

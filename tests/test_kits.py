@@ -372,13 +372,18 @@ def test_o_preco_de_cada_topologia_sai_da_sua_coluna():
     from aurum.pv.kits import capex_por_topologia, preco_da_bateria, preco_kit
 
     precos = capex_por_topologia(10.0, bateria_kwh=9.3)
-    micro, split = precos["microinversor"], precos["splitphase"]
+    micro = precos["microinversor"]
+    seco = precos["splitphase"]
+    com_banco = precos["splitphase_bateria"]
     assert micro["capex_brl"] == pytest.approx(preco_kit(10.0, "microinversor"))
-    # O banco entra só onde ele existe: microinversor não recebe bateria.
+    # O banco entra só onde ele existe: nem o micro nem o split seco o recebem.
     assert micro["com_bateria"] is False and micro["bateria_kwh"] == 0.0
-    assert split["capex_brl"] == pytest.approx(
-        preco_kit(10.0, "splitphase") + preco_da_bateria(9.3))
-    assert split["capex_brl"] > micro["capex_brl"]
+    assert seco["com_bateria"] is False
+    assert seco["capex_brl"] == pytest.approx(preco_kit(10.0, "splitphase"))
+    # As duas variantes do split leem a mesma coluna e diferem pelo banco.
+    assert com_banco["coluna"] == seco["coluna"] == "splitphase"
+    assert com_banco["capex_brl"] == pytest.approx(
+        seco["capex_brl"] + preco_da_bateria(9.3))
 
 
 def test_acima_da_coluna_o_preco_ainda_sai_da_tabela():

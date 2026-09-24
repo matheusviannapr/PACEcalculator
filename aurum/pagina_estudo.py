@@ -150,7 +150,7 @@ _PADROES: dict[str, Any] = {
     "e_refazer_arranjo": False,
     #: As topologias que a proposta compara. Microinversor não faz backup;
     #: split-phase faz. O comercial decide se leva as duas ou uma só.
-    "e_topologias_proposta": ["microinversor", "splitphase"],
+    "e_topologias_proposta": ["microinversor", "splitphase", "splitphase_bateria"],
     "e_ensemble_total": None,
     "e_ensemble_backup": None,
     "e_essenciais": [],
@@ -3829,14 +3829,20 @@ def _escolher_as_propostas(mao_de_obra: float, material_ca: float) -> None:
         if dados["aviso"]:
             coluna.caption(f"⚠ {dados['aviso']}")
 
-    micro, split = precos.get("microinversor"), precos.get("splitphase")
-    if micro and split and micro["capex_brl"] and split["capex_brl"]:
-        diferenca = split["capex_brl"] - micro["capex_brl"]
+    # A conta que o cliente faz é entre o mesmo kit com e sem o banco: a
+    # diferença contra o microinversor misturaria duas mudanças — a topologia
+    # e o armazenamento — num número só.
+    seco = precos.get("splitphase") or precos.get("microinversor")
+    com_banco = precos.get("splitphase_bateria")
+    if seco and com_banco and seco["capex_brl"] and com_banco["capex_brl"]:
+        diferenca = com_banco["capex_brl"] - seco["capex_brl"]
         st.caption(
-            f"A diferença entre os dois kits é de **{_reais(diferenca)}** — é o que o "
-            f"cliente paga para atravessar a falta de energia"
-            + (f", com o banco de {banco_kwh:.1f} kWh úteis que o estudo dimensionou."
-               if banco_kwh > 0 else ". O banco entra no preço quando o estudo o dimensionar.")
+            f"Do **{seco['nome']}** para o **{com_banco['nome']}** são "
+            f"**{_reais(diferenca)}**"
+            + (f" — é o que custa o banco de {banco_kwh:.1f} kWh úteis que atravessa a "
+               "falta de energia." if banco_kwh > 0
+               else ". O banco entra no preço quando o estudo o dimensionar, ou quando "
+                    "você fixar os blocos acima.")
         )
     st.caption(
         "Preços da tabela interna de kit, sem mão de obra e material CA além do que "
@@ -4484,15 +4490,16 @@ def _mostrar_as_propostas(estudo) -> None:
 
     st.markdown("##### As propostas, lado a lado")
     st.dataframe(pd.DataFrame(linhas), width="stretch", hide_index=True)
-    micro, split = precos.get("microinversor"), precos.get("splitphase")
-    if micro and split and micro["capex_brl"] and split["capex_brl"]:
-        diferenca = float(split["capex_brl"]) - float(micro["capex_brl"])
-        autonomia = estudo.cenarios.por_chave(str(split["cenario"]))
-        horas = float(autonomia.autonomia_garantida_h) if autonomia else 0.0
+    seco = precos.get("splitphase") or precos.get("microinversor")
+    com_banco = precos.get("splitphase_bateria")
+    if seco and com_banco and seco["capex_brl"] and com_banco["capex_brl"]:
+        diferenca = float(com_banco["capex_brl"]) - float(seco["capex_brl"])
+        cenario = estudo.cenarios.por_chave(str(com_banco["cenario"]))
+        horas = float(cenario.autonomia_garantida_h) if cenario else 0.0
         st.caption(
-            f"A diferença entre os dois kits é de **{_reais(diferenca)}**"
-            + (f", e é o que compra as {horas:.1f} h de autonomia." if horas > 0
-               else ".")
+            f"Do **{seco['nome']}** para o **{com_banco['nome']}** são "
+            f"**{_reais(diferenca)}**"
+            + (f", e é o que compra as {horas:.1f} h de autonomia." if horas > 0 else ".")
         )
     st.caption(
         "Preços da tabela interna de kit. Cada proposta vira um slide da apresentação; "

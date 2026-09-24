@@ -276,11 +276,13 @@
 % microinversor e o de split-phase são produtos diferentes, e o comercial pode
 % levar os dois ou um só. O dados.tex liga cada um; o esqueleto não decide.
 \newif\ifmicro
+\newif\ifsplitseco
 \newif\ifsplit
 \microfalse
+\splitsecofalse
 \splitfalse
-% Atalho para o dados.tex dizer "nenhum dos dois".
-\newcommand{\semslidesdevalor}{\microfalse\splitfalse}
+% Atalho para o dados.tex dizer "nenhum deles".
+\newcommand{\semslidesdevalor}{\microfalse\splitsecofalse\splitfalse}
 
 % A linha que importa — o investimento — em âmbar.
 \newcommand{\linhadestaque}[2]{%

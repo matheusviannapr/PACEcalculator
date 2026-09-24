@@ -750,14 +750,22 @@ def test_o_preco_do_estudo_vem_da_tabela_de_kit_e_nao_da_curva():
     estudo = at.session_state["e_estudo"]
     assert estudo.configuracao.padrao_capex == "alto"
     precos = estudo.precos_por_topologia
-    assert precos and set(precos) == {"microinversor", "splitphase"}
+    assert precos and set(precos) == {
+        "microinversor", "splitphase", "splitphase_bateria"}
 
-    # O cenário sem bateria é o kit de microinversor; o com bateria, o
-    # split-phase — e o banco entra uma vez só, no preço do kit.
+    # O cenário sem bateria fica com a proposta mais barata das que não têm
+    # banco; o com bateria, com o kit split-phase mais os blocos — e o banco
+    # entra uma vez só.
+    sem_banco = min(
+        precos[c]["capex_brl"] for c in ("microinversor", "splitphase"))
     solar = estudo.cenarios.por_chave("solar")
-    assert solar.capex_brl == pytest.approx(precos["microinversor"]["capex_brl"], rel=1e-6)
+    assert solar.capex_brl == pytest.approx(sem_banco, rel=1e-6)
     com_banco = estudo.cenarios.por_chave("solar+bateria")
-    assert com_banco.capex_brl == pytest.approx(precos["splitphase"]["capex_brl"], rel=1e-6)
+    assert com_banco.capex_brl == pytest.approx(
+        precos["splitphase_bateria"]["capex_brl"], rel=1e-6)
+    # E o kit com banco custa mais que o mesmo kit sem ele.
+    assert (precos["splitphase_bateria"]["capex_brl"]
+            > precos["splitphase"]["capex_brl"])
     # E nenhum dos dois é a curva do padrão de obra escolhido.
     assert solar.capex_brl != pytest.approx(
         estimar_capex(estudo.potencia_fv_kwp, padrao="alto"), rel=1e-3)
@@ -784,13 +792,16 @@ def test_a_meta_mostra_quanto_custa_cada_kit():
     """
     at = _ate_a_meta(_abrir())
     rotulos = [r for r, _ in _cartoes(at)]
-    assert "Microinversor" in rotulos and "SplitPhase (híbrido)" in rotulos, rotulos
-    assert any("diferença entre os dois kits" in c.value.lower() for c in at.caption)
+    for nome in ("Microinversor", "SplitPhase sem bateria", "SplitPhase com bateria"):
+        assert nome in rotulos, (nome, rotulos)
+    # A diferença que o cliente compra é entre o mesmo kit com e sem o banco.
+    assert any("splitphase com bateria" in c.value.lower() for c in at.caption)
 
-    # Escolhendo só um, some o outro — a proposta é a que o comercial montou.
-    _por_rotulo(at.multiselect, "Quais kits entram").set_value(["splitphase"]).run()
+    # Escolhendo só um, somem os outros — a proposta é a que o comercial montou.
+    _por_rotulo(at.multiselect, "Quais kits entram").set_value(["splitphase_bateria"]).run()
     rotulos = [r for r, _ in _cartoes(at)]
-    assert "SplitPhase (híbrido)" in rotulos and "Microinversor" not in rotulos
+    assert "SplitPhase com bateria" in rotulos
+    assert "Microinversor" not in rotulos and "SplitPhase sem bateria" not in rotulos
 
 
 def test_o_operador_escolhe_as_topologias_da_proposta():

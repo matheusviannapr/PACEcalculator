@@ -242,7 +242,8 @@ class ConfiguracaoEstudo:
     #: tabela interna (:mod:`aurum.pv.kits`), nunca de curva de R$/kWp: é a
     #: planilha do distribuidor que a PACE mantém, e é dela que o comercial
     #: responde quando o cliente pergunta de onde veio o número.
-    topologias_proposta: tuple[str, ...] = ("microinversor", "splitphase")
+    topologias_proposta: tuple[str, ...] = (
+        "microinversor", "splitphase", "splitphase_bateria")
 
     # -- geração -----------------------------------------------------------
     potencia_fv_kwp: float | None = None
@@ -1234,12 +1235,21 @@ def executar_estudo(cfg: ConfiguracaoEstudo, progresso=None) -> ResultadoEstudo:
                 continue
             capex = float(dados["capex_brl"])
             if dados["com_bateria"] and dados["coluna"] != TOPOLOGIA_COM_BATERIA:
+                # Kit sem híbrido (a coluna trifásica que substituiu a split):
+                # o inversor é compra à parte e entra no preço da proposta.
                 capex += preco_hibrido
                 dados["capex_brl"] = capex
                 dados["inversor_a_parte_brl"] = preco_hibrido
-            capex_por_cenario[str(dados["cenario"])] = capex - (
-                preco_blocos if dados["com_bateria"] else 0.0
-            )
+            # Duas propostas podem apontar para o mesmo cenário — micro e
+            # split-phase sem bateria são ambos "solar". O cenário fica com a
+            # mais barata, que é a referência econômica do dossiê; a outra
+            # aparece nas tabelas com a mesma economia e o payback do seu
+            # próprio investimento, porque o que muda entre elas é o preço do
+            # equipamento, não a energia que ele produz.
+            chave = str(dados["cenario"])
+            liquido = capex - (preco_blocos if dados["com_bateria"] else 0.0)
+            if chave not in capex_por_cenario or liquido < capex_por_cenario[chave]:
+                capex_por_cenario[chave] = liquido
 
     cenarios = _comparar_fontes(
         cfg, ensemble_total, ensemble_backup_passo, serie, kwp, conjunto_dos_cenarios,

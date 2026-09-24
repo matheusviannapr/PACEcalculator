@@ -424,18 +424,24 @@ def _comparativo_de_bateria(
         return None
 
     sem = blocos.get("microinversor")
-    com = blocos.get("splitphase")
+    split_seco = blocos.get("splitphase")
+    com = blocos.get("splitphase_bateria")
     comparativo: dict[str, Any] = {
         "topologias": blocos,
         "sem_bateria": sem,
+        "split_sem_bateria": split_seco,
         "com_bateria": com,
     }
-    if sem and com:
-        comparativo["capex_da_bateria_brl"] = com["capex_brl"] - sem["capex_brl"]
+    # A diferença que o cliente compra é entre o mesmo kit com e sem o banco.
+    # Comparar o split com bateria contra o microinversor misturaria duas
+    # mudanças — a topologia e o armazenamento — num número só.
+    referencia = split_seco or sem
+    if referencia and com:
+        comparativo["capex_da_bateria_brl"] = com["capex_brl"] - referencia["capex_brl"]
         comparativo["economia_da_bateria_brl_ano"] = (
-            com["economia_anual_brl"] - sem["economia_anual_brl"]
+            com["economia_anual_brl"] - referencia["economia_anual_brl"]
         )
-        comparativo["autonomia_ganha_h"] = com["autonomia_h"] - sem["autonomia_h"]
+        comparativo["autonomia_ganha_h"] = com["autonomia_h"] - referencia["autonomia_h"]
     return comparativo
 
 
@@ -652,11 +658,15 @@ def _tex_do_comparativo(dados: dict[str, Any]) -> list[str]:
     def tir(bloco: dict[str, Any]) -> str:
         return f"{br_float(bloco['tir'] * 100, 1)}\\% a.a." if bloco["tir"] else "---"
 
+    split_seco = c.get("split_sem_bateria")
     linhas = [
         r"\micro" + ("true" if sem else "false"),
+        r"\splitseco" + ("true" if split_seco else "false"),
         r"\split" + ("true" if com else "false"),
     ]
-    for chave, bloco in (("sem", sem or com), ("com", com or sem)):
+    padrao = sem or split_seco or com
+    for chave, bloco in (("sem", sem or padrao), ("com", com or padrao),
+                         ("seco", split_seco or padrao)):
         linhas += [
             _cmd(f"inv{chave}bateria", _brl(bloco["capex_brl"], 2)),
             _cmd(f"economiaanual{chave}bateria", f"{_brl(bloco['economia_anual_brl'], 2)} no 1º ano"),
@@ -664,7 +674,13 @@ def _tex_do_comparativo(dados: dict[str, Any]) -> list[str]:
             _cmd(f"payback{chave}bateria", payback(bloco)),
             _cmd(f"tir{chave}bateria", tir(bloco)),
             _cmd(f"mensalidade{chave}bateria", _brl(bloco["parcela_brl_mes"], 2)),
+            _cmd(f"nome{chave}bateria", esc(str(bloco["nome"]))),
         ]
+        # A nota do slide com bateria é a comparação de preço, definida logo
+        # abaixo; as outras duas são o resumo da própria topologia. Definir as
+        # três aqui faria o LaTeX reclamar de comando repetido.
+        if chave != "com":
+            linhas.append(_cmd(f"nota{chave}bateria", esc(str(bloco["resumo"]))))
     autonomia = float(com["autonomia_h"]) if com else 0.0
     diferenca = c.get("capex_da_bateria_brl")
     ganho = c.get("economia_da_bateria_brl_ano") or 0.0
@@ -673,18 +689,14 @@ def _tex_do_comparativo(dados: dict[str, Any]) -> list[str]:
              f"{br_float(autonomia, 1)} h sem rede" if autonomia > 0 else "não avaliada"),
         _cmd("custodabateria", _brl(diferenca, 2) if diferenca is not None else "---"),
         _cmd("ganhodabateria", f"{_brl(ganho, 2)}/ano"),
-        _cmd("nomesembateria", esc(sem["nome"]) if sem else "---"),
-        _cmd("nomecombateria", esc(com["nome"]) if com else "---"),
         _cmd("bancocombateria",
              f"{br_float(com['bateria_kwh'], 1)} kWh úteis" if com and com["bateria_kwh"]
              else "---"),
-        _cmd("notasembateria",
-             esc(sem["resumo"]) if sem else "Gerador solar conectado à rede."),
         _cmd("notacombateria",
-             (f"{_brl(diferenca)} a mais de investimento compram "
-              f"{br_float(autonomia, 1)} h de autonomia"
+             (f"{_brl(diferenca)} a mais que o mesmo kit sem banco, e é o que "
+              f"compra {br_float(autonomia, 1)} h de autonomia"
               + (f" e {_brl(ganho)}/ano de economia adicional." if ganho > 0 else "."))
-             if (com and diferenca is not None) else (esc(com["resumo"]) if com else "---")),
+             if (com and diferenca is not None) else (esc(str(com["resumo"])) if com else "---")),
         _cmd("prazofinanciamentocurto", f"{o['prazo_financiamento_meses']}x"),
         _cmd("origemdopreco",
              "Preços da tabela de kit vigente"

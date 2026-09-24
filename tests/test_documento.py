@@ -372,11 +372,12 @@ def test_o_dossie_traz_o_preco_de_cada_kit(estudo_com_telhado):
     tex = montar_documento(estudo, {})
     assert "As propostas: o que cada kit custa" in tex
     precos = estudo.precos_por_topologia
-    assert precos and len(precos) == 2
+    assert precos and len(precos) == 3
     for dados in precos.values():
         assert str(dados["nome"]) in tex
-    # Os dois preços da tabela aparecem, e são diferentes entre si.
-    valores = {round(float(d["capex_brl"])) for d in precos.values()}
-    assert len(valores) == 2, valores
+    # O kit com banco custa mais que o mesmo kit sem ele — é o que o cliente
+    # está comprando quando escolhe a autonomia.
+    assert (precos["splitphase_bateria"]["capex_brl"]
+            > precos["splitphase"]["capex_brl"])
     # E o texto diz de onde veio o número.
     assert "tabela de kit vigente" in tex
