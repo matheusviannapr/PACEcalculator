@@ -242,8 +242,22 @@ POTENCIA_MAXIMA_KWP = max(TABELA_KIT)
 
 #: Menor potência da tabela. Abaixo dela o preço não cai proporcionalmente --
 #: um kit de 2 kWp não custa 40% de um de 5 kWp, porque inversor, estrutura e
-#: projeto têm piso. O preço de 5 kWp é adotado como piso.
+#: projeto têm piso. Ver :data:`FRACAO_FIXA_ABAIXO_DA_TABELA`.
 POTENCIA_MINIMA_KWP = min(TABELA_KIT)
+
+#: Abaixo do menor kit, que parte do preço dele não encolhe com a potência.
+#:
+#: Metade do kit de 5 kWp é custo que não depende do tamanho (inversor,
+#: estrutura mínima, projeto, homologação) e a outra metade é proporcional aos
+#: módulos: um sistema de 2,5 kWp sai por 75% do kit de 5 kWp. Decisão
+#: comercial da PACE (out/2026), no lugar do piso cheio, que cobrava o kit de
+#: 5 kWp inteiro de quem só precisa de duas placas.
+#:
+#: Vale só abaixo do menor kit **da tabela**. Coluna que começa mais acima (o
+#: trifásico, em 20 kWp) continua com o piso do primeiro degrau dela: abaixo
+#: de 20 kWp a entrada trifásica não é o produto, e encolher o preço dela
+#: inventaria um kit.
+FRACAO_FIXA_ABAIXO_DA_TABELA = 0.5
 
 #: Mão de obra de instalação, em R$/kWp.
 #:
@@ -323,7 +337,12 @@ def _interpolar(kwp: float, coluna: str) -> float | None:
     if kwp > maior:
         return None
     if kwp <= menor:
-        # Piso: inversor, estrutura e projeto não encolhem com a potência.
+        # Abaixo do menor kit da tabela: metade fixa (inversor, estrutura,
+        # projeto), metade proporcional aos módulos. Coluna que começa mais
+        # acima (trifásico) fica no piso do primeiro degrau dela.
+        if menor <= POTENCIA_MINIMA_KWP and kwp < menor:
+            f = FRACAO_FIXA_ABAIXO_DA_TABELA
+            return pontos[0][1] * (f + (1.0 - f) * kwp / menor)
         return pontos[0][1]
 
     anterior = pontos[0]

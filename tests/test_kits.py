@@ -71,9 +71,13 @@ def test_acima_da_tabela_nao_extrapola():
     assert preco_kit(125.1, "trifasico") is None
 
 
-def test_abaixo_da_tabela_o_preco_tem_piso():
-    """Um kit de 2 kWp não custa 40% de um de 5 — inversor e projeto têm piso."""
-    assert preco_kit(2.0, "mono_bifasico") == preco_kit(5.0, "mono_bifasico")
+def test_abaixo_da_tabela_metade_e_fixa():
+    """Um kit de 2,5 kWp não custa 50% de um de 5: metade é fixa, metade segue os módulos."""
+    cinco = preco_kit(5.0, "mono_bifasico")
+    assert preco_kit(2.5, "mono_bifasico") == pytest.approx(cinco * 0.75)
+    assert preco_kit(1.25, "microinversor") == pytest.approx(preco_kit(5.0, "microinversor") * 0.625)
+    assert preco_kit(0.1, "splitphase") > preco_kit(5.0, "splitphase") * 0.5     # nunca abaixo da metade fixa
+    assert preco_kit(4.999, "mono_bifasico") == pytest.approx(cinco, rel=1e-3)   # emenda com a tabela em 5 kWp
 
 
 def test_o_traco_da_fonte_nao_vira_preco():
