@@ -47,22 +47,12 @@ st.set_page_config(
     page_title=f"{marca.NOME} — {marca.TAGLINE}",
     page_icon=str(marca.logo("clara") or "⚡"),
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="auto",
 )
 
-st.markdown(
-    f"""
-<style>
-.bloco-metrica {{ background:{marca.GRAFITE}; border:1px solid #3A3A36; border-radius:10px;
-                 padding:0.8rem 1rem; text-align:center; }}
-.bloco-valor  {{ font-size:1.5rem; font-weight:700; color:{marca.AMARELO}; }}
-.bloco-rotulo {{ font-size:0.75rem; color:{marca.CINZA}; margin-top:2px; }}
-.aviso-suave  {{ background:#2E2718; border-left:3px solid {marca.AMARELO};
-                padding:0.6rem 0.9rem; border-radius:4px; font-size:0.86rem; }}
-</style>
-""",
-    unsafe_allow_html=True,
-)
+from aurum.interface import aplicar_estilo
+
+aplicar_estilo()
 
 CONFIG = get_settings()
 PASSOS = ["1. Região", "2. Telhados", "3. Premissas", "4. Propostas"]
@@ -114,12 +104,12 @@ if _logo:
     st.sidebar.image(str(_logo), width="stretch")
 else:
     st.sidebar.title(marca.NOME)
-st.sidebar.caption(f"Prospecção solar e armazenamento · v{__version__}")
+st.sidebar.caption("CALCULADORA DE ENERGIA")
 
 MODO = st.sidebar.radio(
     "Ferramenta",
     ["Estudo de energia", "Prospecção de telhados"],
-    label_visibility="collapsed",
+    label_visibility="visible",
     help=(
         "Estudo de energia: um cliente conhecido, do levantamento de cargas ao "
         "dimensionamento de solar e bateria. Prospecção: varre uma região no mapa "

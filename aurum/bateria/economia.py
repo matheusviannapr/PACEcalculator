@@ -139,6 +139,11 @@ class PremissasBateria:
     taxa_desconto_ano: float = 0.10
     escalada_tarifaria_ano: float = 0.05
     anos_analise: int = 15
+    #: Perda anual de rendimento do módulo fotovoltaico. 0,5% a.a. é a
+    #: garantia linear típica de módulo monocristalino (80-87% em 25-30 anos).
+    #: Entra na economia de cada ano do fluxo; sem ela, um horizonte de 15
+    #: anos creditava ao sistema do ano 15 a geração do ano 1.
+    degradacao_fv_ano: float = 0.005
 
     def __post_init__(self) -> None:
         if self.modo not in MODOS:
@@ -371,6 +376,10 @@ class ResultadoEconomicoBateria:
     vida_util_anos: float
     trocas: list[int] = field(default_factory=list)
     premissas: PremissasBateria | None = None
+    #: Valor presente somando a resiliência ao caixa. VPL, TIR e payback acima
+    #: são só de caixa — o que aparece na conta de luz —, como no resto do
+    #: estudo; a resiliência entra aqui, à parte.
+    vpl_com_resiliencia_brl: float = 0.0
 
     @property
     def custo_nivelado_brl_kwh(self) -> float | None:
@@ -576,7 +585,12 @@ def avaliar_economia(
                 "beneficio_resiliencia_brl": beneficio_resiliencia,
                 "opex_brl": opex,
                 "troca_brl": troca,
-                "fluxo_brl": beneficio_tarifario + beneficio_resiliencia - opex - troca,
+                # O caixa é o que passa pela conta de luz. A resiliência vem
+                # na coluna ao lado e num valor presente à parte: somada, ela
+                # dava ao banco um payback que nenhuma fatura confirma.
+                "fluxo_brl": beneficio_tarifario - opex - troca,
+                "fluxo_com_resiliencia_brl":
+                    beneficio_tarifario + beneficio_resiliencia - opex - troca,
                 "energia_bateria_kwh": operacao.descarga_bateria_kwh * retencao,
             }
         )
@@ -585,6 +599,8 @@ def avaliar_economia(
     caixa = [-capex_total, *fluxo["fluxo_brl"].tolist()]
     taxa = premissas.taxa_desconto_ano
     vpl = float(sum(v / (1.0 + taxa) ** i for i, v in enumerate(caixa)))
+    com_resiliencia = [-capex_total, *fluxo["fluxo_com_resiliencia_brl"].tolist()]
+    vpl_resiliencia = float(sum(v / (1.0 + taxa) ** i for i, v in enumerate(com_resiliencia)))
 
     acumulado = np.cumsum(caixa)
     payback: float | None = None
@@ -606,4 +622,5 @@ def avaliar_economia(
         vida_util_anos=vida,
         trocas=trocas,
         premissas=premissas,
+        vpl_com_resiliencia_brl=vpl_resiliencia,
     )

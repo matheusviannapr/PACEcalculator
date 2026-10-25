@@ -38,6 +38,112 @@ from aurum.pv.solar import (
 # ----------------------------------------------------------------------
 # Recurso solar — o bug do azimute
 # ----------------------------------------------------------------------
+def test_a_melhor_combinacao_fica_na_faixa_de_projeto_e_perto_do_alvo():
+    """
+    O par que o programa elege não é o primeiro que fecha: é o melhor.
+
+    O que se fixa: razão CC/CA dentro da faixa que o projeto assina, potência
+    perto do alvo pedido, e nenhum par viável do catálogo com nota melhor.
+    """
+    from aurum.pv.equipment import carregar_base
+    from aurum.pv.memoria import melhor_arranjo, memoria_do_arranjo
+    from aurum.pv.sizing import DC_AC_MAX, DC_AC_MIN
+
+    base = carregar_base()
+    modulos, inversores = list(base.modulos), list(base.inversores)
+    for alvo in (5.0, 12.0, 24.0, 50.0):
+        arranjo = melhor_arranjo(modulos, inversores, alvo_kwp=alvo)
+        assert arranjo is not None, alvo
+        memoria = arranjo.memoria
+        assert DC_AC_MIN <= memoria.razao_cc_ca <= DC_AC_MAX, (alvo, memoria.razao_cc_ca)
+        # Perto do alvo: nada de entregar o dobro do que se pediu.
+        assert 0.75 * alvo <= memoria.potencia_do_sistema_kwp <= 1.25 * alvo, alvo
+        # E nenhum outro par viável chega mais perto com razão igualmente boa.
+        melhores = [
+            m for m in (
+                memoria_do_arranjo(mod, inv, None)
+                for mod in modulos for inv in inversores
+            )
+            if m.viavel
+            and DC_AC_MIN <= m.razao_cc_ca <= DC_AC_MAX
+            and abs(m.potencia_do_sistema_kwp - alvo) < abs(
+                memoria.potencia_do_sistema_kwp - alvo) - 0.5
+            and abs(m.razao_cc_ca - 1.15) <= abs(memoria.razao_cc_ca - 1.15)
+        ]
+        assert not melhores, (
+            alvo, [(m.inversor.modelo, m.potencia_do_sistema_kwp) for m in melhores[:3]])
+
+
+def test_a_melhor_combinacao_aproveita_o_telhado():
+    """Sem alvo de energia, o critério é instalar o máximo que o telhado dá."""
+    from aurum.pv.equipment import carregar_base
+    from aurum.pv.memoria import melhor_arranjo
+
+    base = carregar_base()
+    arranjo = melhor_arranjo(list(base.modulos), list(base.inversores),
+                             modulos_disponiveis=40)
+    assert arranjo is not None
+    # O módulo de maior potência entre os que cabem: 40 módulos pequenos
+    # entregam menos kWp que 40 grandes, e o telhado é o mesmo.
+    assert arranjo.modulo.potencia_wp >= 600
+    assert arranjo.memoria.potencia_do_sistema_kwp >= 20.0
+
+
+def test_ha_inversor_para_cada_modulo_do_catalogo():
+    """
+    Todo módulo do catálogo precisa ter inversor utilizável, e não só no topo
+    da faixa: quem vende 5 kWp não compra um inversor de 50 kW.
+
+    O catálogo tinha um vão de 6 a 50 kW, e os GoodWe SDT G2 que o preenchiam
+    entregam 12,5 A por MPPT — abaixo da corrente dos módulos de 620 Wp que a
+    PACE especifica. A série SDT G3, com 22 A, fechou o vão.
+    """
+    from aurum.pv.equipment import carregar_base
+    from aurum.pv.memoria import memoria_do_arranjo
+
+    base = carregar_base()
+    faixas = ((3, 8), (8, 15), (15, 25), (25, 40))
+    for modulo in base.modulos:
+        viaveis = [
+            i for i in base.inversores
+            if memoria_do_arranjo(modulo, i, None).viavel
+        ]
+        assert viaveis, f"nenhum inversor fecha arranjo com {modulo.modelo}"
+        for menor, maior in faixas:
+            na_faixa = [
+                i for i in viaveis
+                if menor * 1000 <= i.potencia_ca_w < maior * 1000
+            ]
+            assert na_faixa, (
+                f"{modulo.modelo} não tem inversor viável entre {menor} e {maior} kW"
+            )
+
+
+def test_string_encurta_quando_nao_cabe_no_inversor():
+    """
+    Num inversor pequeno, a string do comprimento máximo estoura a potência CC.
+
+    Antes, o arranjo adotava sempre o máximo da faixa de tensão e devolvia zero
+    string — "este par não fecha" para um par que qualquer projetista monta
+    encurtando a string.
+    """
+    from aurum.pv.equipment import carregar_base
+    from aurum.pv.memoria import memoria_do_arranjo
+    from aurum.pv.sizing import DC_AC_MAX, modulos_por_string
+
+    base = carregar_base()
+    modulo = max(base.modulos, key=lambda m: m.potencia_wp)
+    pequeno = min(
+        (i for i in base.inversores if i.potencia_ca_w >= 5000),
+        key=lambda i: i.potencia_ca_w,
+    )
+    _, maximo = modulos_por_string(modulo, pequeno, -5.0, 70.0)
+    memoria = memoria_do_arranjo(modulo, pequeno, None)
+    assert memoria.viavel
+    assert memoria.modulos_por_string <= maximo
+    assert memoria.razao_cc_ca <= DC_AC_MAX + 1e-9
+
+
 def test_hemisferio_sul_aponta_para_o_norte():
     """
     Correção central: no Brasil o azimute ótimo é 0 (Norte), não 180 (Sul).

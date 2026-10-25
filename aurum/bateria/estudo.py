@@ -44,7 +44,15 @@ from .catalogo import BaseBaterias, ConjuntoArmazenamento, carregar_catalogo
 from .degradacao import ModeloDegradacao, trajetoria_de_vida
 from .economia import PremissasBateria, ResultadoEconomicoBateria, avaliar_economia
 from .excedencia import avaliar_inversores, potencia_para_excedencia, tabela_por_faixa_horaria
-from .fontes import ComparacaoFontes, Composicao, Fatura, Gerador, comparar_fontes
+from .fontes import (
+    ComparacaoFontes,
+    Composicao,
+    Fatura,
+    FinanceiroProposta,
+    Gerador,
+    comparar_fontes,
+    financeiro_da_proposta,
+)
 from .geracao import (
     SerieGeracao,
     combinar_series,
@@ -84,6 +92,23 @@ class ConfiguracaoEstudo:
     instancias_por_comodo: dict[str, int] | None = None
     planilha_cargas: str | Path | None = None
     cenario_demo: str = "hotel"
+    #: A curva típica ajustada à conta de luz (:class:`aurum.demanda.ajuste.AjusteCurva`),
+    #: para o estudo de quem não tem levantamento de equipamentos. Quando
+    #: presente, é ela — e não a lista de cômodos — que produz o ensemble de
+    #: carga, e o quadro de backup é a fração ``fracao_backup`` da instalação.
+    #:
+    #: Sem este campo o estudo sem cômodos caía no cenário de demonstração,
+    #: e o dossiê saía com o hotel de quarenta quartos no lugar da conta do
+    #: cliente — sem avisar.
+    ajuste_conta: Any = None
+    #: Fração da carga total que fica no quadro de backup, no caminho da conta.
+    #: Recorte grosseiro por necessidade: sem lista de circuitos não há o que
+    #: escolher, só quanto.
+    fracao_backup: float = 1.0
+    #: Variabilidade assumida ao gerar o ensemble a partir do ajuste — dia a
+    #: dia e hora a hora, como desvio do fator log-normal.
+    dispersao_diaria: float = 0.15
+    dispersao_horaria: float = 0.05
     ajustes_sazonais: dict[str, dict] | None = None
     simulacoes: int = 300
     #: Cômodos ligados ao quadro de backup. ``None`` significa a instalação
@@ -160,6 +185,15 @@ class ConfiguracaoEstudo:
     cenario_rotina: Any = None
     rotina: Any = None
 
+    #: Um ensemble de carga total pronto, que entra no lugar da simulação.
+    #:
+    #: Para quando o dia que dimensiona não é uma simulação de cenário, mas
+    #: uma curva construída — a borda superior da faixa de horários, por
+    #: exemplo, que é o 90º percentil de 170 arranjos e não corresponde a
+    #: arranjo nenhum. Quem constrói o ensemble fora responde pela sua
+    #: coerência; o estudo só o consome.
+    ensemble_total: Any = None
+
     #: O envelope da varredura de horários, quando ela foi rodada.
     #:
     #: É a tabela que `aurum.demanda.rotina.envelope_de_rotina` devolve. Vem
@@ -201,6 +235,23 @@ class ConfiguracaoEstudo:
     #: dos dias. Dimensionar o solar pelo pior dia o deixa 40% maior que o
     #: consumo real, e um sistema que gera o que ninguém consome não se paga.
     consumo_anual_kwh: float | None = None
+    #: Que fração desse consumo o sistema fotovoltaico deve compensar quando a
+    #: potência não vem de telhado marcado nem informada à mão. 1,0 abate a
+    #: conta inteira; 0,7, setenta por cento dela.
+    compensar_frac: float = 1.0
+    #: O que decidiu a potência fotovoltaica, como o operador pediu:
+    #: ``"telhado"``, ``"compensar"`` ou ``"potencia"``. O estudo usa isto só
+    #: para prestar contas do resultado — um sistema dimensionado para abater
+    #: a conta continua sendo isso mesmo quando chega aqui como potência
+    #: fechada, já arredondada em módulos inteiros pelo arranjo.
+    objetivo_fv: str = ""
+    #: As topologias de kit que a proposta compara — microinversor (sem
+    #: armazenamento) e split-phase (com o banco). O preço de cada uma sai da
+    #: tabela interna (:mod:`aurum.pv.kits`), nunca de curva de R$/kWp: é a
+    #: planilha do distribuidor que a PACE mantém, e é dela que o comercial
+    #: responde quando o cliente pergunta de onde veio o número.
+    topologias_proposta: tuple[str, ...] = (
+        "microinversor", "splitphase", "splitphase_bateria")
 
     # -- geração -----------------------------------------------------------
     potencia_fv_kwp: float | None = None
@@ -328,6 +379,19 @@ class ResultadoEstudo:
     envelope_rotina: Any = None
     #: A comparação entre metas de autonomia, quando pedida.
     autonomia: Any = None
+    #: O investimento de cada topologia pedida, direto da tabela de kit:
+    #: ``{topologia: {capex_brl, coluna, com_bateria, aviso, ...}}``. É o que a
+    #: apresentação usa nos slides de valor.
+    precos_por_topologia: dict[str, Any] | None = None
+    #: O financeiro de cada topologia, refeito com o investimento dela
+    #: (:class:`aurum.bateria.fontes.FinanceiroProposta`). Única fonte de
+    #: payback, TIR e valor presente para tela, dossiê e slides.
+    financeiro: dict[str, Any] | None = None
+    #: A conferência do dimensionamento contra o consumo que ele existe para
+    #: abater: ``{"alvo_kwh", "origem", "fracao_pedida", "geracao_kwh",
+    #: "cobertura", "definida_por"}``. É o que permite à tela e ao documento
+    #: afirmarem — em vez de prometerem — que a usina abate a conta.
+    compensacao: dict[str, Any] | None = None
     #: A comparação entre geometrias de instalação, quando pedida.
     orientacao: Any = None
     escopos: Any = None
@@ -349,6 +413,48 @@ class ResultadoEstudo:
         geração.
         """
         return bool(self.configuracao.considerar_solar and self.potencia_fv_kwp > 0)
+
+    def chave_principal(self) -> str | None:
+        """
+        O cenário que o estudo conclui e que a proposta principal apresenta.
+
+        Solar com o banco recomendado quando os dois existem; senão só solar;
+        num estudo sem sol, rede com bateria. Uma regra só, usada pela tela,
+        pelo resumo do dossiê e pelo slide principal — eram três, e cada uma
+        escolhia a seu modo.
+        """
+        if self.cenarios is None:
+            return None
+        preferidas = []
+        if self.com_solar and self.recomendado is not None:
+            preferidas.append("solar+bateria")
+        if self.com_solar:
+            preferidas.append("solar")
+        preferidas.append("bateria")
+        for chave in preferidas:
+            cenario = self.cenarios.por_chave(chave)
+            if cenario is not None and cenario.capex_brl > 0:
+                return chave
+        return None
+
+    def financeiro_do_cenario(self, chave: str | None = None) -> FinanceiroProposta | None:
+        """
+        O financeiro da proposta que apresenta o cenário pedido.
+
+        Entre as topologias que apontam para ele, a de menor investimento — é
+        o mesmo critério que dá ao cenário o seu capex, e por isso o número
+        bate com o quadro de arranjos. Sem tabela de kit, o próprio cenário.
+        """
+        chave = chave or self.chave_principal()
+        if chave is None or self.cenarios is None:
+            return None
+        doscenario = [f for f in (self.financeiro or {}).values() if f.cenario == chave]
+        if doscenario:
+            return min(doscenario, key=lambda f: f.capex_brl)
+        cenario = self.cenarios.por_chave(chave)
+        if cenario is None or cenario.capex_brl <= 0:
+            return None
+        return financeiro_da_proposta(self.cenarios, cenario)
 
     def resumo(self) -> dict[str, Any]:
         cfg = self.configuracao
@@ -568,25 +674,63 @@ def _dimensionar_fv(cfg: ConfiguracaoEstudo, ensemble: EnsembleCarga, serie: Ser
         return kwp, [aviso]
     if cfg.potencia_fv_kwp is not None:
         return float(cfg.potencia_fv_kwp), []
-    # O consumo informado vence o do ensemble: o ensemble é do perfil que
-    # dimensiona o equipamento, e não do ano médio.
-    do_ensemble = float(np.mean(ensemble.energia_diaria_kwh())) * 365.0
-    consumo_anual = float(cfg.consumo_anual_kwh or do_ensemble)
+    consumo_anual, origem = consumo_a_compensar(cfg, ensemble)
+    fracao = float(np.clip(cfg.compensar_frac, 0.0, 5.0)) or 1.0
+    # O que a compensação consegue abater é o consumo acima do custo de
+    # disponibilidade: o piso é cobrado de qualquer jeito, e o crédito que
+    # passasse dele ficaria sem uso.
+    piso = piso_da_conta_kwh(cfg)
+    alvo = max(0.0, consumo_anual - piso) * fracao
     rendimento = serie.anual_kwh_por_kwp()
-    kwp = consumo_anual / rendimento if rendimento > 0 else 0.0
+    kwp = alvo / rendimento if rendimento > 0 else 0.0
     consumo_texto = f"{consumo_anual:,.0f}".replace(",", ".")
-    origem = (
-        "consumo anual ponderado entre os perfis de ocupação"
-        if cfg.consumo_anual_kwh
-        else "consumo anual estimado"
-    )
+    piso_texto = f"{piso:,.0f}".replace(",", ".")
+    parte = "" if fracao >= 0.999 else f" {fracao:.0%} do"
     aviso = (
-        f"Potência FV não informada: dimensionada em {kwp:.1f} kWp para compensar o "
-        f"{origem} de {consumo_texto} kWh a {rendimento:.0f} kWh/kWp. "
+        f"Potência FV não informada: dimensionada em {kwp:.1f} kWp para compensar"
+        f"{parte} o {origem} de {consumo_texto} kWh, descontados {piso_texto} kWh do "
+        f"custo de disponibilidade, a {rendimento:.0f} kWh/kWp. "
         "O estudo não verifica se esse sistema cabe na cobertura — para isso, marque "
         "o telhado no mapa."
     )
     return kwp, [aviso]
+
+
+def piso_da_conta_kwh(cfg: ConfiguracaoEstudo) -> float:
+    """Os doze mínimos do ano: o consumo que nenhum sistema tira da conta."""
+    if cfg.fatura is None:
+        return 0.0
+    return max(0.0, float(cfg.fatura.custo_disponibilidade_kwh)) * 12.0
+
+
+def consumo_a_compensar(
+    cfg: ConfiguracaoEstudo, ensemble: EnsembleCarga
+) -> tuple[float, str]:
+    """
+    O consumo anual que o sistema fotovoltaico existe para abater, e de onde veio.
+
+    A ordem não é de gosto. **A fatura vence**: ela é medida, e é a conta que o
+    cliente quer ver cair; o levantamento de cargas é estimativa, e num
+    levantamento de rascunho ele erra por múltiplos — numa casa com conta de
+    300 kWh/mês o cenário de modelo simulava 1.240 kWh/mês e o sistema saía
+    quatro vezes maior que a conta que ele deveria abater. Depois dela vem o
+    consumo declarado no estudo (a ponderação entre perfis de ocupação, ou a
+    curva ajustada à conta), e por último o do ensemble — que é do perfil que
+    dimensiona o equipamento, e não do ano médio.
+    """
+    da_fatura = cfg.fatura.consumo_anual_kwh if cfg.fatura is not None else None
+    if da_fatura:
+        return float(da_fatura), "consumo anual da conta de luz informada"
+    if cfg.consumo_anual_kwh:
+        origem = (
+            "consumo anual da curva ajustada à conta de luz" if cfg.ajuste_conta is not None
+            else "consumo anual ponderado entre os perfis de ocupação"
+        )
+        return float(cfg.consumo_anual_kwh), origem
+    return (
+        float(np.mean(ensemble.energia_diaria_kwh())) * 365.0,
+        "consumo anual estimado pelo levantamento de cargas",
+    )
 
 
 def _podar_perto_do_alvo(
@@ -647,7 +791,11 @@ def _selecionar_candidatos(
     if cfg.banco_em_blocos:
         from .catalogo import candidatos_em_blocos
 
-        blocos = candidatos_em_blocos(base, cfg.tensao_rede_v)
+        blocos = candidatos_em_blocos(
+            base, cfg.tensao_rede_v,
+            **({"capacidade_kwh": float(cfg.premissas.bloco_bateria_kwh)}
+               if cfg.premissas.bloco_bateria_kwh > 0 else {}),
+        )
         if blocos:
             aprovados_blocos = set(
                 diagnostico.loc[diagnostico["aprovado"], "modelo"].str.lower())
@@ -786,9 +934,19 @@ def executar_estudo(cfg: ConfiguracaoEstudo, progresso=None) -> ResultadoEstudo:
         if se_nao_mexeram:
             cfg = replace(cfg, premissas=replace(
                 cfg.premissas,
-                tarifa_fora_ponta_brl_kwh=cfg.fatura.tarifa_brl_kwh,
-                tarifa_ponta_brl_kwh=cfg.fatura.tarifa_brl_kwh,
+                tarifa_fora_ponta_brl_kwh=cfg.fatura.tarifa_efetiva_brl_kwh,
+                tarifa_ponta_brl_kwh=cfg.fatura.tarifa_efetiva_brl_kwh,
             ))
+        # O valor do kWh injetado e a escalada também são um só. A economia do
+        # banco valorava a injeção a R$ 0,55 fixos enquanto a conta de luz dos
+        # cenários a valorava pela tarifa menos o Fio B do ano — o mesmo kWh
+        # com dois preços, e a bateria parecendo render mais ou menos conforme
+        # a seção que se lia.
+        cfg = replace(cfg, premissas=replace(
+            cfg.premissas,
+            valor_injecao_brl_kwh=cfg.fatura.valor_injecao_brl_kwh,
+            escalada_tarifaria_ano=cfg.fatura.escalada_tarifaria_ano,
+        ))
 
     # A climatização varia com a estação, e sem isso as quatro saem iguais —
     # o verão subestimado, que é quando o pico acontece, e o inverno
@@ -867,13 +1025,44 @@ def executar_estudo(cfg: ConfiguracaoEstudo, progresso=None) -> ResultadoEstudo:
         ))
 
     # 1. carga -------------------------------------------------------------
-    avisar("Simulando a demanda (Monte Carlo por estação)", 0.05)
-    comodos, instancias = _carregar_cargas(cfg)
-    ensemble_total = _simular(
-        cfg, comodos, instancias, apenas_essenciais=False,
-    )
-    ensemble_backup, avisos_backup = _ensemble_de_backup(cfg, comodos, instancias)
-    avisos.extend(avisos_backup)
+    if cfg.ajuste_conta is not None:
+        # O caminho da conta de luz: a forma vem do perfil do segmento e o
+        # tamanho, da fatura. O ensemble sai do ajuste, não do Monte Carlo
+        # por equipamento — e o estudo diz isso em cada lugar onde a
+        # variabilidade assumida pesa.
+        avisar("Gerando a demanda a partir da curva típica ajustada à conta", 0.05)
+        from ..demanda.ajuste import recortar_fracao
+
+        ensemble_total = cfg.ajuste_conta.ensemble(
+            num_simulacoes=cfg.simulacoes,
+            dispersao_diaria=cfg.dispersao_diaria,
+            dispersao_horaria=cfg.dispersao_horaria,
+            semente=cfg.semente,
+        )
+        ensemble_backup = recortar_fracao(ensemble_total, cfg.fracao_backup)
+        avisos.append(ensemble_total.metadados["aviso"])
+        avisos.extend(cfg.ajuste_conta.avisos)
+        if cfg.fracao_backup < 1.0:
+            avisos.append(
+                f"Quadro de backup estimado como {cfg.fracao_backup:.0%} da carga total, "
+                "sem lista de circuitos. É um recorte de ordem de grandeza; o "
+                "levantamento é que diz o que fica ligado."
+            )
+        if cfg.consumo_anual_kwh is None:
+            # O solar é dimensionado pela conta, não pelo dia que dimensiona.
+            cfg = replace(cfg, consumo_anual_kwh=float(cfg.ajuste_conta.consumo_anual_kwh))
+    else:
+        avisar("Simulando a demanda (Monte Carlo por estação)", 0.05)
+        comodos, instancias = _carregar_cargas(cfg)
+        # Um ensemble entregue pronto vence a simulação: é como a borda da
+        # faixa de horários — uma curva construída, e não um cenário — entra
+        # no estudo sem que o motor precise saber construí-la.
+        ensemble_total = (
+            cfg.ensemble_total if cfg.ensemble_total is not None
+            else _simular(cfg, comodos, instancias, apenas_essenciais=False)
+        )
+        ensemble_backup, avisos_backup = _ensemble_de_backup(cfg, comodos, instancias)
+        avisos.extend(avisos_backup)
 
     # 2. geração -----------------------------------------------------------
     if not cfg.considerar_solar:
@@ -1015,6 +1204,16 @@ def executar_estudo(cfg: ConfiguracaoEstudo, progresso=None) -> ResultadoEstudo:
             f"({melhor['conjunto']}). Caminhos: reduzir a carga do quadro de backup, "
             f"aceitar confiabilidade menor, ou ampliar banco e inversor além do catálogo."
         )
+        if cfg.candidatos:
+            # A lista foi declarada: é o produto que o cliente pediu, e a
+            # proposta sai com ele. Sem isto o banco sumia da apresentação
+            # justamente quando o operador tinha fixado quantos blocos levar.
+            recomendado = next(
+                r for r in resiliencias if r.conjunto.descricao() == melhor["conjunto"])
+            avisos.append(
+                "O banco declarado não cumpre a meta, e o estudo segue com ele porque "
+                "foi ele que se pediu — a autonomia que ele garante é a que está acima."
+            )
 
     # 6b. metas de autonomia ------------------------------------------------
     # A meta é a premissa mais escondida do estudo: alguém escreve 6 h no começo
@@ -1068,11 +1267,103 @@ def executar_estudo(cfg: ConfiguracaoEstudo, progresso=None) -> ResultadoEstudo:
         if aviso_banco:
             avisos.append(aviso_banco)
 
+    # -- o preço, e só da tabela -------------------------------------------
+    # Microinversor e split-phase são produtos diferentes, e cada cenário
+    # recebe o preço do seu. Antes, o estudo levava um capex fotovoltaico só
+    # para todos os arranjos: a mesma usina custava o mesmo com e sem banco, e
+    # a diferença entre as duas propostas era só o preço dos blocos.
+    energia_banco = (
+        conjunto_dos_cenarios.energia_util_kwh if conjunto_dos_cenarios is not None else 0.0
+    )
+    # Os blocos são contados pela capacidade **nominal**, que é como o bloco é
+    # vendido e como o motor de cenários o conta. Contar pela útil (93% da
+    # nominal) dava o mesmo número até seis blocos e um a menos daí em diante:
+    # a proposta cobrava sete blocos e o cenário, oito, no mesmo documento.
+    nominal_banco = (
+        conjunto_dos_cenarios.capacidade_nominal_kwh
+        if conjunto_dos_cenarios is not None else 0.0
+    )
+    precos_por_topologia = None
+    capex_por_cenario: dict[str, float] = {}
+    if cfg.considerar_solar and kwp > 0 and cfg.topologias_proposta:
+        from ..pv.kits import TOPOLOGIA_COM_BATERIA, capex_por_topologia
+
+        precos_por_topologia = capex_por_topologia(
+            kwp, cfg.topologias_proposta,
+            mao_de_obra_brl_kwp=cfg.mao_de_obra_brl_kwp or 0.0,
+            material_ca_brl_kwp=cfg.material_ca_brl_kwp or 0.0,
+            bateria_kwh=nominal_banco,
+            bloco_kwh=cfg.premissas.bloco_bateria_kwh or 5.0,
+            bloco_brl=cfg.premissas.bloco_bateria_brl or 0.0,
+        )
+        for dados in precos_por_topologia.values():
+            if dados["com_bateria"]:
+                # O que se mostra ao cliente é a energia útil; o preço saiu da
+                # nominal. As duas ficam registradas.
+                dados["bateria_kwh_nominal"] = nominal_banco
+                dados["bateria_kwh"] = energia_banco
+                dados["blocos"] = (
+                    conjunto_dos_cenarios.modulos if conjunto_dos_cenarios is not None else 0)
+        # Duas contas que precisam fechar entre si: o preço que a proposta
+        # mostra e o capex que o cenário usa. O kit split-phase **já traz o
+        # inversor híbrido**; o trifásico, que o substitui acima de 40 kWp,
+        # não traz — e o motor, sem saber disso, cobrava o híbrido duas vezes
+        # num caso e nenhuma no outro.
+        #
+        # A regra aqui é uma só: o banco é contado em blocos (é assim que se
+        # compra, e é o que a tabela mostra), o híbrido entra no preço da
+        # topologia quando o kit não o inclui, e o que vai para o motor como
+        # capex fotovoltaico é o total da topologia menos os blocos.
+        preco_hibrido = _preco_do_hibrido(cfg, conjunto_dos_cenarios)
+        preco_blocos = _preco_do_banco(cfg, nominal_banco)
+        cfg = replace(
+            cfg,
+            topologia_kit=cfg.topologia_kit or TOPOLOGIA_COM_BATERIA,
+            premissas=replace(cfg.premissas, inversor_no_kit_fv=True),
+        )
+        for topologia, dados in precos_por_topologia.items():
+            if dados["aviso"]:
+                avisos.append(f"{dados['nome']}: {dados['aviso']}")
+            if dados["capex_brl"] is None:
+                continue
+            capex = float(dados["capex_brl"])
+            if dados["com_bateria"] and dados["coluna"] != TOPOLOGIA_COM_BATERIA:
+                # Kit sem híbrido (a coluna trifásica que substituiu a split):
+                # o inversor é compra à parte e entra no preço da proposta.
+                capex += preco_hibrido
+                dados["capex_brl"] = capex
+                dados["inversor_a_parte_brl"] = preco_hibrido
+            # Duas propostas podem apontar para o mesmo cenário — micro e
+            # split-phase sem bateria são ambos "solar". O cenário fica com a
+            # mais barata, que é a referência econômica do dossiê; a outra
+            # aparece nas tabelas com a mesma economia e o payback do seu
+            # próprio investimento, porque o que muda entre elas é o preço do
+            # equipamento, não a energia que ele produz.
+            chave = str(dados["cenario"])
+            liquido = capex - (preco_blocos if dados["com_bateria"] else 0.0)
+            if chave not in capex_por_cenario or liquido < capex_por_cenario[chave]:
+                capex_por_cenario[chave] = liquido
+
     cenarios = _comparar_fontes(
         cfg, ensemble_total, ensemble_backup_passo, serie, kwp, conjunto_dos_cenarios,
+        capex_fv_por_cenario=capex_por_cenario or None,
     )
     if cenarios is not None:
         avisos.extend(cenarios.avisos)
+
+    # O financeiro de cada proposta, com o investimento da sua topologia. É
+    # daqui — e só daqui — que tela, dossiê e slides leem payback, TIR e
+    # valor presente.
+    financeiro: dict[str, FinanceiroProposta] = {}
+    if cenarios is not None and precos_por_topologia:
+        for topologia, dados in precos_por_topologia.items():
+            cenario = cenarios.por_chave(str(dados["cenario"]))
+            if dados["capex_brl"] is None or cenario is None:
+                continue
+            financeiro[topologia] = financeiro_da_proposta(
+                cenarios, cenario, float(dados["capex_brl"]),
+                nome=str(dados["nome"]), topologia=topologia,
+            )
 
     # O quadro em dois níveis. Roda por último e nunca derruba o estudo: é uma
     # leitura a mais sobre o mesmo dado, e não uma etapa de que o resto depende.
@@ -1096,6 +1387,9 @@ def executar_estudo(cfg: ConfiguracaoEstudo, progresso=None) -> ResultadoEstudo:
                 semente=cfg.semente,
                 ajustes_sazonais=cfg.ajustes_sazonais,
                 catalogo=base,
+                # Declarados, os candidatos são o produto e valem em toda
+                # seção; senão cada escopo monta a sua lista, como sempre.
+                candidatos_declarados=bool(cfg.candidatos),
             )
             avisos.extend(escopos.avisos)
         except Exception as exc:  # noqa: BLE001 — leitura extra não derruba estudo
@@ -1155,11 +1449,63 @@ def executar_estudo(cfg: ConfiguracaoEstudo, progresso=None) -> ResultadoEstudo:
                 # senão cada cenário dimensiona o seu e o documento sai com
                 # três sistemas onde o cliente comprou um.
                 potencia_fv_kwp=kwp if cfg.potencia_fv_kwp else None,
+                # O bloco das premissas, pela mesma razão de sempre: sem
+                # passá-lo, os cenários de uso precificavam o banco pelo
+                # padrão de 5 kWh e o documento saía com dois preços.
+                **({"bloco_kwh": cfg.premissas.bloco_bateria_kwh,
+                    "bloco_brl": cfg.premissas.bloco_bateria_brl}
+                   if cfg.premissas.bloco_bateria_brl > 0 else {}),
+                candidatos=list(cfg.candidatos) if cfg.candidatos else None,
             )
             avisos.extend(uso.avisos)
         except Exception as exc:  # noqa: BLE001 — leitura extra não derruba estudo
             LOGGER.warning("comparação de cenários de uso falhou: %s", exc)
             avisos.append(f"A comparação entre cenários de uso falhou: {exc}")
+
+    # A conferência do que o sistema abate. Sai do mesmo número que o estudo
+    # usou para dimensionar, e é medida contra a geração que a série de fato
+    # produz — é isto que separa "dimensionado para compensar" de "compensa".
+    alvo_kwh, origem_consumo = consumo_a_compensar(cfg, ensemble_total)
+    geracao_kwh = float(kwp) * serie.anual_kwh_por_kwp()
+    if cfg.objetivo_fv == "compensar":
+        definida_por = "consumo a compensar"
+    elif cfg.aguas or cfg.layout is not None:
+        definida_por = "telhado marcado"
+    elif cfg.potencia_fv_kwp is not None:
+        definida_por = "potência informada"
+    else:
+        definida_por = "consumo a compensar"
+    # A cobertura é medida contra o consumo **compensável** — o que fica acima
+    # do custo de disponibilidade —, que é o mesmo alvo que dimensionou. Medida
+    # contra o consumo inteiro, "compensar 100%" nunca fecharia.
+    piso = piso_da_conta_kwh(cfg)
+    compensavel = max(0.0, alvo_kwh - piso)
+    compensacao = {
+        "alvo_kwh": alvo_kwh,
+        "piso_kwh": piso,
+        "compensavel_kwh": compensavel,
+        "origem": origem_consumo,
+        "fracao_pedida": float(cfg.compensar_frac),
+        "geracao_kwh": geracao_kwh,
+        "cobertura": geracao_kwh / compensavel if compensavel > 0 else 0.0,
+        "definida_por": definida_por,
+        "potencia_kwp": float(kwp),
+    }
+    if cfg.considerar_solar and definida_por == "consumo a compensar":
+        # Com arranjo fechado, a diferença é o arredondamento em módulos
+        # inteiros; sem ele, é o estudo que errou o alvo. A tolerância maior
+        # no primeiro caso evita transformar "16 módulos em vez de 15,7" em
+        # ressalva de documento.
+        folga = 0.10 if cfg.potencia_fv_kwp is not None else 0.02
+        erro = abs(compensacao["cobertura"] - cfg.compensar_frac)
+        if erro > folga:
+            avisos.append(
+                f"O sistema dimensionado gera {geracao_kwh:,.0f} kWh/ano contra os "
+                f"{compensavel * cfg.compensar_frac:,.0f} kWh/ano que se pediu compensar "
+                f"({compensacao['cobertura']:.0%} do {origem_consumo}, descontado o "
+                "custo de disponibilidade)."
+                .replace(",", ".")
+            )
 
     avisar("Estudo concluído", 1.0)
     return ResultadoEstudo(
@@ -1180,6 +1526,9 @@ def executar_estudo(cfg: ConfiguracaoEstudo, progresso=None) -> ResultadoEstudo:
         cenarios=cenarios,
         envelope_rotina=cfg.envelope_rotina,
         autonomia=autonomia,
+        compensacao=compensacao,
+        precos_por_topologia=precos_por_topologia,
+        financeiro=financeiro or None,
         orientacao=orientacao,
         escopos=escopos,
         uso=uso,
@@ -1257,6 +1606,36 @@ def _dimensionar_gerador(
     return grupo, aviso
 
 
+def _preco_do_hibrido(
+    cfg: ConfiguracaoEstudo, conjunto: ConjuntoArmazenamento | None
+) -> float:
+    """
+    Quanto custa o inversor híbrido sozinho, sem os blocos.
+
+    É a parcela que o kit split-phase já inclui e o kit trifásico não. Sai da
+    mesma conta que o motor de cenários usa, para os dois números fecharem.
+    """
+    if conjunto is None:
+        return 0.0
+    from .fontes import _capex_do_conjunto
+
+    total, blocos = _capex_do_conjunto(
+        conjunto, replace(cfg.premissas, inversor_no_kit_fv=False), None)
+    return max(0.0, float(total) - float(blocos))
+
+
+def _preco_do_banco(cfg: ConfiguracaoEstudo, energia_kwh: float) -> float:
+    """O que os blocos de bateria custam, pelas premissas do estudo."""
+    from ..pv.kits import preco_da_bateria
+
+    if energia_kwh <= 0 or cfg.premissas.bloco_bateria_brl <= 0:
+        return 0.0
+    return preco_da_bateria(
+        energia_kwh, cfg.premissas.bloco_bateria_kwh or 5.0,
+        cfg.premissas.bloco_bateria_brl,
+    )
+
+
 def _comparar_fontes(
     cfg: ConfiguracaoEstudo,
     ensemble_total: EnsembleCarga,
@@ -1264,6 +1643,7 @@ def _comparar_fontes(
     serie: SerieGeracao,
     potencia_fv_kwp: float,
     conjunto: ConjuntoArmazenamento | None,
+    capex_fv_por_cenario: dict[str, float] | None = None,
 ) -> ComparacaoFontes | None:
     """
     Monta o quadro de cenários, ou explica por que ele não existe.
@@ -1285,12 +1665,27 @@ def _comparar_fontes(
         amostras=max(30, cfg.malha.amostras // 4),
     )
     fontes = combinacoes_pedidas(cfg, potencia_fv_kwp, conjunto)
-    return comparar_fontes(
+    fatura = cfg.fatura or Fatura()
+    avisos_fatura: list[str] = []
+    if cfg.fatura is None:
+        avisos_fatura.append(
+            f"Nenhuma conta de luz foi informada: a economia usa a tarifa de "
+            f"referência de R$ {fatura.tarifa_brl_kwh:.2f}/kWh".replace(".", ",")
+            + ". Informe a tarifa da fatura do cliente antes de apresentar valores."
+        )
+    # Sem consumo da fatura, a conta de hoje sai do **mesmo** consumo anual que
+    # dimensionou o solar. O ensemble descreve o dia que dimensiona o
+    # equipamento — numa residência, a casa cheia —, e medir a conta por ele
+    # punha o sistema dimensionado para o ano médio contra a conta do pior
+    # dia: menos injeção, mais autoconsumo, economia de outra casa.
+    if fatura.consumo_mensal_kwh is None and cfg.consumo_anual_kwh:
+        fatura = replace(fatura, consumo_mensal_kwh=float(cfg.consumo_anual_kwh) / 12.0)
+    comparacao = comparar_fontes(
         ensemble_total=ensemble_total,
         ensemble_backup=ensemble_backup,
         serie=serie,
         potencia_fv_kwp=potencia_fv_kwp,
-        fatura=cfg.fatura or Fatura(),
+        fatura=fatura,
         conjunto=conjunto,
         gerador=cfg.gerador,
         premissas=cfg.premissas,
@@ -1302,7 +1697,37 @@ def _comparar_fontes(
         material_ca_brl_kwp=cfg.material_ca_brl_kwp,
         composicoes=fontes,
         semente=cfg.semente,
+        fv_no_hibrido=fv_no_hibrido(cfg, potencia_fv_kwp, conjunto),
+        capex_fv_por_cenario=capex_fv_por_cenario,
     )
+    comparacao.avisos[:0] = avisos_fatura
+    return comparacao
+
+
+def fv_no_hibrido(
+    cfg: ConfiguracaoEstudo,
+    potencia_fv_kwp: float,
+    conjunto: ConjuntoArmazenamento | None,
+) -> bool:
+    """
+    O sol entra pelo inversor híbrido, ou por um inversor de rede próprio?
+
+    Decide a arquitetura, e ela muda a conta: acoplado em **corrente contínua**
+    (residencial típico), todo o gerador passa pela entrada FV do híbrido e o
+    que excede a capacidade dele se perde; acoplado em **corrente alternada**,
+    o gerador tem o seu inversor de rede, entrega no quadro, e o híbrido só
+    cuida do banco e do backup.
+
+    A regra: passa pelo híbrido quando cabe nele. Um gerador de 106 kWp não
+    cabe num híbrido que aceita 5 kW de painel — e supor que passa fazia o
+    cenário com bateria relatar 26.700 kWh/ano onde o mesmo sistema sem
+    bateria relata 127.599, como se comprar o banco apagasse quatro quintos da
+    usina. Com folga de 35% na razão CC/CA, que é a mesma que o dimensionador
+    de arranjo aceita.
+    """
+    if conjunto is None or potencia_fv_kwp <= 0:
+        return False
+    return float(potencia_fv_kwp) <= conjunto.inversor.potencia_fv_max_kw * 1.35
 
 
 def combinacoes_pedidas(

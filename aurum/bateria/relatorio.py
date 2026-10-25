@@ -100,7 +100,13 @@ def gerar_graficos(estudo: ResultadoEstudo, destino: Path) -> dict[str, Path]:
             figuras["por_ambiente"] = _grafico_por_ambiente(analise, destino)
     if estudo.resiliencia:
         alvo = estudo.recomendado or estudo.resiliencia[-1]
-        figuras["mapa_atendimento"] = _grafico_mapa(alvo, destino)
+        # O corte de criticidade diz qual carga o mapa tem embaixo: sem isso,
+        # dois mapas de escopos diferentes saem com o mesmo cabeçalho.
+        corte = tuple(str(c).upper() for c in
+                      ((estudo.configuracao.criticidade or {}).get("corte") or ()))
+        figuras["mapa_atendimento"] = _grafico_mapa(
+            alvo, destino,
+            escopo=f"carga preservada: quadro de backup ({' + '.join(corte)})" if corte else None)
         figuras["soc"] = _grafico_soc(estudo, alvo, destino)
         figuras["fronteira"] = _grafico_fronteira(estudo, destino)
         chave = alvo.conjunto.descricao()
@@ -468,7 +474,15 @@ def _grafico_dia_medio(estudo: ResultadoEstudo, destino: Path) -> Path:
     return _salvar(fig, destino, "dia_medio")
 
 
-def _grafico_mapa(resultado, destino: Path) -> Path:
+def _grafico_mapa(resultado, destino: Path, escopo: str | None = None) -> Path:
+    """
+    O mapa de atendimento de um conjunto, por hora de início e duração.
+
+    ``escopo`` diz qual carga estava ligada durante o apagão. Quando o mesmo
+    documento traz mais de um mapa — só o quadro crítico, o crítico mais o
+    preferível —, os cabeçalhos são idênticos sem ele, e o leitor não tem como
+    saber qual figura responde a qual pergunta.
+    """
     estacoes = list(dict.fromkeys(resultado.tabela["estacao"]))
     fig, eixos = plt.subplots(1, len(estacoes), figsize=(3.2 * len(estacoes), 4.6), dpi=140, sharey=True)
     eixos = np.atleast_1d(eixos)
@@ -479,7 +493,14 @@ def _grafico_mapa(resultado, destino: Path) -> Path:
             cmap="RdYlGn", vmin=0, vmax=100,
         )
         eixo.set_xticks(range(len(matriz.columns)))
-        eixo.set_xticklabels([f"{c:g}h" for c in matriz.columns], fontsize=7)
+        # Com a malha passando de oito durações, os rótulos se encostam e
+        # viram um borrão: inclinar é o que os mantém legíveis sem tirar
+        # nenhuma coluna do eixo.
+        muitas = len(matriz.columns) > 8
+        eixo.set_xticklabels(
+            [f"{c:g}h" for c in matriz.columns], fontsize=6.5 if muitas else 7,
+            rotation=45 if muitas else 0, ha="right" if muitas else "center",
+        )
         eixo.set_yticks(range(0, len(matriz.index), 3))
         eixo.set_yticklabels(matriz.index[::3], fontsize=7)
         eixo.set_title(estacao, fontsize=9)
@@ -487,7 +508,11 @@ def _grafico_mapa(resultado, destino: Path) -> Path:
     eixos[0].set_ylabel("hora de início do apagão", fontsize=8)
     fig.colorbar(imagem, ax=eixos, label="probabilidade de atravessar (%)", fraction=0.03)
     # Característica nominal, não marca: a referência comercial fica no anexo.
-    fig.suptitle(resultado.conjunto.especificacao_curta(), fontsize=9)
+    titulo = resultado.conjunto.especificacao_curta()
+    if escopo:
+        fig.suptitle(f"{titulo}\n{escopo}", fontsize=9)
+    else:
+        fig.suptitle(titulo, fontsize=9)
     return _salvar(fig, destino, "mapa_atendimento")
 
 
@@ -909,6 +934,10 @@ def _grafico_escopos(escopos, destino: Path) -> Path:
     eixos[1].set_xticks(posicoes)
     eixos[1].set_xticklabels(rotulos, fontsize=8)
     eixos[1].set_ylabel("kWh")
+    # Folga para a anotação de duas linhas acima da barra mais alta: sem ela,
+    # num banco de 25 kWh o "pico ... kW / 12 h" entrava no título.
+    teto = max(max(m.energia_diaria_kwh, m.energia_util_kwh) for m in medidas)
+    eixos[1].set_ylim(0, teto * 1.22)
     eixos[1].set_title("O que cada quadro consome e exige")
     eixos[1].legend(fontsize=8, frameon=False)
 

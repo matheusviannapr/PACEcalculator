@@ -82,6 +82,16 @@ ESCOPOS: dict[str, Escopo] = {
         "O que seria bom não faltar, junto com o que não pode. A diferença "
         "entre os dois escopos é o preço de levar o desejável.",
     ),
+    # A casa inteira, sem desligar nada. Nao e uma opcao de compra: e o que o
+    # banco enfrenta se ninguem gerir a carga no apagao, e e o numero que
+    # justifica a gestao. Num caso real, com tres ares de 31.000 BTU somando
+    # 7,9 kW, nenhum hibrido de 5 kW atravessa uma hora sequer -- e nao por
+    # energia, por potencia. Ver a estrategia de operacao no documento.
+    "inteiro": Escopo(
+        "inteiro", "A casa inteira, sem gestão", ("MC", "C", "P", "NC"),
+        "Tudo ligado, ninguém desligando nada. Não é uma opção de compra: é o "
+        "que o banco enfrenta sem gestão de carga, e é o que a justifica.",
+    ),
 }
 
 #: O escopo que dimensiona e que a proposta promete.
@@ -347,6 +357,7 @@ def comparar_escopos(
     semente: int = 20260902,
     ajustes_sazonais: dict | None = None,
     catalogo: Any = None,
+    candidatos_declarados: bool = False,
 ) -> ComparacaoEscopos:
     """
     Mede os dois escopos e dimensiona o banco de cada um.
@@ -393,11 +404,19 @@ def comparar_escopos(
         # Cada escopo monta a sua própria lista, ancorada na energia que ele
         # exige. Compartilhar a lista do estudo — feita para o quadro
         # essencial — deixava o quadro ampliado sem candidato no meio da faixa.
+        #
+        # Exceto quando a lista foi **declarada**: aí ela é o produto que o
+        # cliente quer, e não um recorte que se pode refazer. Reconstruí-la do
+        # catálogo punha 4,6 kWh no quadro essencial de um estudo cujo banco
+        # tinha sido fixado em 12,8.
         energia_alvo = float(np.mean(ensemble.perfis())) / 1000.0 * autonomia_alvo_h
-        do_escopo = (
-            _candidatos_do_escopo(catalogo, energia_alvo)
-            if catalogo is not None else list(candidatos)
-        ) or list(candidatos)
+        if candidatos_declarados:
+            do_escopo = list(candidatos)
+        else:
+            do_escopo = (
+                _candidatos_do_escopo(catalogo, energia_alvo)
+                if catalogo is not None else list(candidatos)
+            ) or list(candidatos)
 
         conjunto, resiliencia, autonomia, capex = _mais_barato_que_cumpre(
             do_escopo, ensemble, serie, malha, autonomia_alvo_h,

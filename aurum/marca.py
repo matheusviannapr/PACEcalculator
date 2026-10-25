@@ -123,6 +123,29 @@ def logo(variante: str = "transparente") -> Path | None:
 
 
 # ----------------------------------------------------------------------------
+# Fonte
+# ----------------------------------------------------------------------------
+#: A IBM Plex Sans do site, em pesos fixos (300 a 700) tirados da fonte variável
+#: de vistoria/fonts. Licença OFL: pode ir junto do código.
+FONTE = "IBM Plex Sans"
+_FONTES = _PASTA / "fonts"
+
+
+def registrar_fonte() -> str:
+    """
+    Põe a Plex no matplotlib e devolve o nome da família para usar. Sem os
+    arquivos, devolve a DejaVu, que vem com o matplotlib: a imagem sai igual,
+    só menos elegante.
+    """
+    from matplotlib import font_manager
+
+    if FONTE not in {f.name for f in font_manager.fontManager.ttflist}:
+        for arquivo in sorted(_FONTES.glob("IBMPlexSans-*.ttf")):
+            font_manager.fontManager.addfont(str(arquivo))
+    return FONTE if FONTE in {f.name for f in font_manager.fontManager.ttflist} else "DejaVu Sans"
+
+
+# ----------------------------------------------------------------------------
 # Ponte com o LaTeX
 # ----------------------------------------------------------------------------
 def _rgb(hexa: str) -> tuple[int, int, int]:

@@ -108,6 +108,13 @@ class DadosVistoria:
     tem_gerador: bool = False
     tem_nobreak: bool = False
     observacoes: str = ""
+    #: A conta de luz que o vistoriador anotou: tarifa média (R$/kWh) e
+    #: consumo médio (kWh/mês). O contrato da vistoria os marca como
+    #: importantes — ancoram a simulação na medição —, e até aqui o
+    #: importador os descartava: o estudo seguia com a tarifa padrão mesmo
+    #: quando o arquivo trazia a do cliente.
+    tarifa_brl_kwh: float | None = None
+    consumo_mensal_kwh: float | None = None
     #: Itens levantados que **não** entram na simulação, e por quê.
     descartados: list[str] = field(default_factory=list)
     avisos: list[str] = field(default_factory=list)
@@ -311,6 +318,10 @@ def ler_backup(caminho: str | Path | dict[str, Any]) -> DadosVistoria:
     sistema = _texto(vistoria.get("sistema"))
     tensao_linha = _tensao_de_linha(tensao, sistema)
 
+    fatura = dados.get("fatura") or {}
+    tarifa = _num(fatura.get("tarifaBrlKwh"))
+    consumo = _num(fatura.get("consumoMensalKwh"))
+
     return DadosVistoria(
         cenario=cenario,
         cliente=_texto(vistoria.get("cliente")) or "instalação",
@@ -324,6 +335,8 @@ def ler_backup(caminho: str | Path | dict[str, Any]) -> DadosVistoria:
         tem_gerador=bool(vistoria.get("gerDiesel") or vistoria.get("gerGNV")),
         tem_nobreak=bool(vistoria.get("ups")),
         observacoes=_texto(vistoria.get("obs")),
+        tarifa_brl_kwh=tarifa if tarifa and tarifa > 0 else None,
+        consumo_mensal_kwh=consumo if consumo and consumo > 0 else None,
         descartados=descartados,
         avisos=avisos,
     )

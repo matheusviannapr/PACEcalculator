@@ -914,6 +914,11 @@ def calibrar_por_conta(
     """
     Escala a curva típica para bater com a conta de luz.
 
+    É a versão mínima do ajuste — um fator só. O estudo usa
+    :mod:`aurum.demanda.ajuste`, que fecha ponta e fora de ponta, a demanda
+    medida, os dias de operação e a sazonalidade; esta fica como referência
+    rápida e como o caso degenerado que aquele módulo tem de reproduzir.
+
     É o caminho para quem não tem levantamento de equipamentos: a forma vem do
     padrão do segmento, o tamanho vem da fatura. O resultado é uma curva
     horária utilizável — pior que o levantamento, porque não tem variabilidade

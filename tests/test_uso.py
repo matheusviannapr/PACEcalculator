@@ -273,3 +273,18 @@ def test_sem_solar_o_investimento_e_o_do_banco(sem_solar):
 def test_com_solar_o_caminho_antigo_continua(comparacao):
     """A rota com fotovoltaico não muda: é a de todos os estudos até aqui."""
     assert all(c.potencia_fv_kwp > 0 for c in comparacao.cenarios)
+
+
+def test_o_conjunto_do_cenario_leva_a_fv_do_cenario(comparacao):
+    """
+    O banco de cada cenário enfrenta o apagão com o sol do próprio cenário.
+
+    Sem isso a autonomia desta tabela sai de uma simulação sem recarga, e o
+    mesmo sistema aparece com dois números no documento: o estudo principal
+    prende a FV aos seus candidatos antes de simular, e aqui ela ficava em
+    zero. A diferença não é pequena — num caso real, 36 h contra 48 h.
+    """
+    avaliados = [c for c in comparacao.cenarios if c.conjunto is not None]
+    assert avaliados, "nenhum cenário dimensionou banco"
+    for c in avaliados:
+        assert c.conjunto.potencia_fv_kwp == pytest.approx(c.potencia_fv_kwp)
