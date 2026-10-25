@@ -82,6 +82,16 @@ ESCOPOS: dict[str, Escopo] = {
         "O que seria bom não faltar, junto com o que não pode. A diferença "
         "entre os dois escopos é o preço de levar o desejável.",
     ),
+    # A casa inteira, sem desligar nada. Nao e uma opcao de compra: e o que o
+    # banco enfrenta se ninguem gerir a carga no apagao, e e o numero que
+    # justifica a gestao. Num caso real, com tres ares de 31.000 BTU somando
+    # 7,9 kW, nenhum hibrido de 5 kW atravessa uma hora sequer -- e nao por
+    # energia, por potencia. Ver a estrategia de operacao no documento.
+    "inteiro": Escopo(
+        "inteiro", "A casa inteira, sem gestão", ("MC", "C", "P", "NC"),
+        "Tudo ligado, ninguém desligando nada. Não é uma opção de compra: é o "
+        "que o banco enfrenta sem gestão de carga, e é o que a justifica.",
+    ),
 }
 
 #: O escopo que dimensiona e que a proposta promete.

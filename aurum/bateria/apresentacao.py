@@ -175,9 +175,9 @@ def _cenario_da_proposta(estudo: ResultadoEstudo, chave: str | None):
     if comparacao is None:
         raise ValueError("O estudo não tem comparação de cenários; a apresentação precisa dela.")
     if chave is None:
-        chave = "solar+bateria" if (estudo.com_solar and estudo.recomendado is not None) else "solar"
-        if comparacao.por_chave(chave) is None and estudo.com_solar:
-            chave = "solar"
+        # A mesma regra da tela e do resumo do dossiê — ver
+        # `ResultadoEstudo.chave_principal`.
+        chave = estudo.chave_principal() or "solar"
     cenario = comparacao.por_chave(chave)
     if cenario is None:
         disponiveis = ", ".join(c.composicao.chave for c in comparacao.cenarios)
@@ -268,8 +268,13 @@ def dados_da_apresentacao(
             hibrido_kw = hibrido_nome = None
 
     # -- o dinheiro -----------------------------------------------------------
-    capex = float(cenario.capex_brl)
-    economia_anual = float(cenario.economia_anual_brl)
+    # Tudo do financeiro da proposta — o mesmo objeto que a tela e o dossiê
+    # leem. O payback do slide é o simples (investimento ÷ economia do 1º
+    # ano), que é o que o rótulo promete e a conta que o cliente refaz de
+    # cabeça; a TIR e o fluxo acumulado saem do caixa com o mesmo investimento.
+    financeiro = estudo.financeiro_do_cenario(cenario.composicao.chave)
+    capex = float(financeiro.capex_brl)
+    economia_anual = float(financeiro.economia_ano1_brl)
     economia_mensal = economia_anual / 12.0
     servicos_mes = opcoes.seguro_brl_mes + opcoes.gerenciamento_brl_mes
     entrada = min(max(0.0, float(opcoes.entrada_financiamento_brl)), capex)
@@ -284,7 +289,7 @@ def dados_da_apresentacao(
     # mensais e, em cada forma de pagamento, o que se paga ao banco ou ao
     # locador. Os três cenários saem da mesma curva, e por isso comparáveis.
     horizonte = int(premissas.anos_analise)
-    fluxo_estudo = [float(v) for v in cenario.fluxo["fluxo_brl"].tolist()][:horizonte]
+    fluxo_estudo = [float(v) for v in financeiro.fluxo["fluxo_brl"].tolist()][:horizonte]
     a_vista = [-capex] + [f - 12 * servicos_mes for f in fluxo_estudo]
     financiado = [-entrada] + [
         f - 12 * servicos_mes
@@ -338,11 +343,14 @@ def dados_da_apresentacao(
             "estrutura": opcoes.estrutura,
         },
         "economia": {
+            "proposta": financeiro.nome,
+            "topologia": financeiro.topologia,
             "capex_brl": capex,
             "economia_anual_brl": economia_anual,
             "economia_mensal_brl": economia_mensal,
-            "payback_anos": cenario.payback_anos,
-            "tir": cenario.tir,
+            "payback_anos": financeiro.payback_simples_anos,
+            "payback_com_reajuste_anos": financeiro.payback_anos,
+            "tir": financeiro.tir,
             "horizonte_anos": horizonte,
             "escalada_tarifaria_ano": float(fatura.escalada_tarifaria_ano),
             "taxa_desconto_ano": float(premissas.taxa_desconto_ano),
@@ -388,15 +396,14 @@ def _comparativo_de_bateria(
     pedidas = list(opcoes.topologias) if opcoes.topologias is not None else list(precos)
 
     blocos: dict[str, dict[str, Any]] = {}
+    financeiros = getattr(estudo, "financeiro", None) or {}
     for topologia in pedidas:
         dados = precos.get(topologia)
-        if not dados or dados.get("capex_brl") is None:
+        financeiro = financeiros.get(topologia)
+        if not dados or dados.get("capex_brl") is None or financeiro is None:
             continue
-        cenario = estudo.cenarios.por_chave(str(dados["cenario"]))
-        if cenario is None:
-            continue
-        capex = float(dados["capex_brl"])
-        economia_anual = float(cenario.economia_anual_brl)
+        capex = float(financeiro.capex_brl)
+        economia_anual = float(financeiro.economia_ano1_brl)
         blocos[topologia] = {
             "nome": dados["nome"],
             "resumo": dados["resumo"],
@@ -407,9 +414,14 @@ def _comparativo_de_bateria(
             "capex_brl": capex,
             "economia_anual_brl": economia_anual,
             "economia_mensal_brl": economia_anual / 12.0,
-            "payback_anos": capex / economia_anual if economia_anual > 0 else None,
-            "tir": cenario.tir,
-            "autonomia_h": float(cenario.autonomia_garantida_h),
+            # Os dois do mesmo financeiro, com o investimento desta topologia.
+            # A TIR vinha do cenário — calculada com o capex da topologia mais
+            # barata que aponta para ele —, e o slide do split-phase mostrava o
+            # preço do split ao lado da TIR do microinversor.
+            "payback_anos": financeiro.payback_simples_anos,
+            "payback_com_reajuste_anos": financeiro.payback_anos,
+            "tir": financeiro.tir,
+            "autonomia_h": float(financeiro.autonomia_h),
             "parcela_brl_mes": parcela_price(
                 capex, opcoes.juros_financiamento_am,
                 opcoes.prazo_financiamento_meses, opcoes.carencia_financiamento_meses,

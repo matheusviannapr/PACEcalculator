@@ -29,7 +29,7 @@ criticidade, equipamento a equipamento, e não por ambiente.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Sequence
 
 import numpy as np
@@ -336,6 +336,12 @@ def comparar_cenarios_de_uso(
                 candidatos_em_blocos(catalogo)
                 or _candidatos_do_escopo(catalogo, energia_alvo)
             )
+            # A FV do cenário entra no conjunto antes de simular, como o estudo
+            # principal faz com os seus candidatos. Sem isso o apagão corria sem
+            # recarga do sol e a autonomia desta tabela saía menor que a do
+            # resto do documento — o mesmo sistema com dois números.
+            if kwp > 0:
+                do_cenario = [replace(c, potencia_fv_kwp=kwp) for c in do_cenario]
             if do_cenario:
                 conjunto, _, autonomia, _ = _mais_barato_que_cumpre(
                     do_cenario, ensemble_backup, serie, malha,

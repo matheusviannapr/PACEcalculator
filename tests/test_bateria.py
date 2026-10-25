@@ -477,7 +477,11 @@ def test_valor_da_resiliencia_entra_no_fluxo(catalogo, ensemble, serie):
     )
     assert sem_valor.valor_resiliencia_ano1_brl == 0.0
     assert com_valor.valor_resiliencia_ano1_brl > 0.0
-    assert com_valor.vpl_brl > sem_valor.vpl_brl
+    # A resiliência entra no valor presente **com resiliência**, e não no
+    # caixa: ela não aparece na conta de luz, e somá-la ao payback fazia
+    # "investimento ÷ economia" não bater com o payback impresso ao lado.
+    assert com_valor.vpl_com_resiliencia_brl > sem_valor.vpl_com_resiliencia_brl
+    assert com_valor.vpl_brl == pytest.approx(sem_valor.vpl_brl)
     assert com_valor.capex_brl == sem_valor.capex_brl > 0
 
 

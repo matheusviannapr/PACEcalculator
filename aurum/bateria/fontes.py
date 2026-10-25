@@ -35,13 +35,14 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field, replace
+from datetime import date
 from typing import Any, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
 
 from ..demanda.ensemble import EnsembleCarga
-from ..pv.financials import _tir, estimar_capex
+from ..pv.financials import FRACAO_FIO_B_NA_TARIFA, _tir, estimar_capex, fator_fio_b
 from .apagao import MalhaApagao, ResultadoResiliencia, avaliar_limites
 from .catalogo import ConjuntoArmazenamento
 from .degradacao import ModeloDegradacao
@@ -70,6 +71,10 @@ __all__ = [
 # ----------------------------------------------------------------------------
 # Entradas
 # ----------------------------------------------------------------------------
+def _ano_corrente() -> int:
+    return date.today().year
+
+
 @dataclass(frozen=True)
 class Fatura:
     """
@@ -79,6 +84,24 @@ class Fatura:
     a simulação de Monte Carlo é reescalada para bater com ele, porque o
     levantamento de cargas erra e a fatura não. Quando ausente, vale o consumo
     que a própria simulação produziu -- e o estudo diz que foi assim.
+
+    **Como a energia injetada vira desconto** (Lei 14.300/2022, art. 27, para
+    quem se conecta a partir de 2023):
+
+    * o que o sol entrega na hora do consumo não passa pelo medidor e evita a
+      tarifa cheia;
+    * o que sobra é injetado e vira crédito em kWh, que abate o consumo
+      comprado da rede — inclusive a bandeira, que incide sobre o faturado
+      depois da compensação;
+    * cada kWh **compensado** paga uma fração crescente do Fio B: 60% em 2026,
+      75% em 2027, 90% em 2028 e, por hipótese conservadora, 100% daí em
+      diante (:func:`aurum.pv.financials.fator_fio_b`);
+    * a conta nunca cai abaixo do custo de disponibilidade, e o crédito que
+      sobraria abaixo dele não tem onde ser usado.
+
+    A compensação é anual: o crédito do verão abate o inverno, como o sistema
+    de compensação permite (os créditos valem por 60 meses). Isto descreve o
+    ano típico em regime, não o primeiro mês de operação.
     """
 
     tarifa_brl_kwh: float = 0.98
@@ -86,41 +109,104 @@ class Fatura:
     #: Custo de disponibilidade em kWh: 30 monofásico, 50 bifásico, 100
     #: trifásico. É o piso da conta -- nenhum sistema leva a fatura a zero.
     custo_disponibilidade_kwh: float = 100.0
-    #: Fração da tarifa retida como Fio B na energia injetada (Lei 14.300). O
-    #: valor cresce até 2029; 45% do Fio B em 2026 dá algo perto de 0,15 da
-    #: tarifa cheia para o consumidor típico do Grupo B.
-    fio_b_frac_da_tarifa: float = 0.15
+    #: Adicional de bandeira tarifária, em R$/kWh, somado à tarifa em todo kWh
+    #: faturado. Zero quando a tarifa informada já é a média da fatura, com a
+    #: bandeira dentro — o caso comum, e o que a tela recomenda.
+    bandeira_brl_kwh: float = 0.0
+    #: Participação do Fio B (TUSD de distribuição) na tarifa, sem bandeira.
+    #: Varia por distribuidora; 28% é a ordem de grandeza da baixa tensão.
+    participacao_fio_b: float = FRACAO_FIO_B_NA_TARIFA
+    #: Ano em que o sistema é ligado. Decide em que degrau do cronograma do
+    #: Fio B o primeiro ano do fluxo de caixa começa.
+    ano_conexao: int = field(default_factory=_ano_corrente)
     escalada_tarifaria_ano: float = 0.05
 
     @property
+    def tarifa_efetiva_brl_kwh(self) -> float:
+        """O que 1 kWh comprado da rede custa: tarifa mais bandeira."""
+        return float(self.tarifa_brl_kwh) + max(0.0, float(self.bandeira_brl_kwh))
+
+    def fio_b_brl_kwh(self, ano_calendario: int | None = None) -> float:
+        """O que cada kWh compensado paga de Fio B no ano pedido (preços do ano 1)."""
+        ano = self.ano_conexao if ano_calendario is None else int(ano_calendario)
+        participacao = float(np.clip(self.participacao_fio_b, 0.0, 1.0))
+        return float(self.tarifa_brl_kwh) * participacao * fator_fio_b(ano)
+
+    def valor_injecao_no_ano(self, ano_calendario: int | None = None) -> float:
+        """Quanto vale 1 kWh injetado e compensado, já descontado o Fio B."""
+        return self.tarifa_efetiva_brl_kwh - self.fio_b_brl_kwh(ano_calendario)
+
+    @property
     def valor_injecao_brl_kwh(self) -> float:
-        """Quanto vale 1 kWh injetado, já descontado o Fio B."""
-        return self.tarifa_brl_kwh * (1.0 - float(np.clip(self.fio_b_frac_da_tarifa, 0.0, 1.0)))
+        """O valor do kWh compensado no ano de conexão."""
+        return self.valor_injecao_no_ano(None)
 
     @property
     def consumo_anual_kwh(self) -> float | None:
         return None if self.consumo_mensal_kwh is None else self.consumo_mensal_kwh * 12.0
 
-    def conta_anual_brl(self, compra_kwh_ano: float, injecao_kwh_ano: float = 0.0) -> float:
+    def detalhar_conta(
+        self,
+        compra_kwh_ano: float,
+        injecao_kwh_ano: float = 0.0,
+        ano_calendario: int | None = None,
+    ) -> dict[str, float]:
+        """
+        A conta do ano, parcela a parcela — é o que a memória de cálculo imprime.
+
+        ``compra`` é o que o medidor registra entrando; ``injecao``, saindo. O
+        compensado é o menor entre o crédito e o que há acima do piso; o que
+        passa disso é crédito sem uso.
+        """
+        piso = max(0.0, float(self.custo_disponibilidade_kwh)) * 12.0
+        compra = max(0.0, float(compra_kwh_ano))
+        credito = max(0.0, float(injecao_kwh_ano))
+        compensado = min(credito, max(0.0, compra - piso))
+        faturado = max(piso, compra - compensado)
+        tarifa = self.tarifa_efetiva_brl_kwh
+        fio_b = self.fio_b_brl_kwh(ano_calendario)
+        energia = faturado * tarifa
+        custo_fio_b = compensado * fio_b
+        return {
+            "compra_kwh": compra,
+            "injecao_kwh": credito,
+            "piso_kwh": piso,
+            "compensado_kwh": compensado,
+            "credito_sem_uso_kwh": credito - compensado,
+            "faturado_kwh": faturado,
+            "tarifa_brl_kwh": tarifa,
+            "fio_b_brl_kwh": fio_b,
+            "energia_brl": energia,
+            "fio_b_brl": custo_fio_b,
+            "conta_brl": energia + custo_fio_b,
+        }
+
+    def conta_anual_brl(
+        self,
+        compra_kwh_ano: float,
+        injecao_kwh_ano: float = 0.0,
+        ano_calendario: int | None = None,
+    ) -> float:
         """
         A conta do ano, com o piso do custo de disponibilidade.
 
-        O piso é aplicado mês a mês, não sobre o total do ano: um sistema que
-        zera o consumo de dez meses e deixa dois acima do piso paga doze
-        mínimos, e não a média deles.
+        O piso vale sobre o ano (doze mínimos): com a compensação anual, o
+        crédito de um mês sobrando abate o mês faltando, e o que a conta não
+        pode é ficar abaixo de doze mínimos. ``ano_calendario`` escolhe o
+        degrau do Fio B; vazio, é o ano de conexão.
         """
-        faturado_mes = max(compra_kwh_ano / 12.0, float(self.custo_disponibilidade_kwh))
-        bruto = faturado_mes * 12.0 * self.tarifa_brl_kwh
-        return max(
-            float(self.custo_disponibilidade_kwh) * 12.0 * self.tarifa_brl_kwh,
-            bruto - injecao_kwh_ano * self.valor_injecao_brl_kwh,
-        )
+        return self.detalhar_conta(compra_kwh_ano, injecao_kwh_ano, ano_calendario)["conta_brl"]
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "tarifa_brl_kwh": self.tarifa_brl_kwh,
+            "bandeira_brl_kwh": self.bandeira_brl_kwh,
+            "tarifa_efetiva_brl_kwh": self.tarifa_efetiva_brl_kwh,
             "consumo_mensal_kwh": self.consumo_mensal_kwh,
             "custo_disponibilidade_kwh": self.custo_disponibilidade_kwh,
+            "participacao_fio_b": self.participacao_fio_b,
+            "ano_conexao": self.ano_conexao,
+            "fio_b_brl_kwh": self.fio_b_brl_kwh(),
             "valor_injecao_brl_kwh": self.valor_injecao_brl_kwh,
             "escalada_tarifaria_ano": self.escalada_tarifaria_ano,
         }
@@ -210,10 +296,37 @@ class ResultadoCenario:
     payback_anos: float | None
     resiliencia: ResultadoResiliencia | None = None
     avisos: list[str] = field(default_factory=list)
+    #: Valor presente somando o valor da resiliência ao caixa. Serve para a
+    #: decisão de arranjo; a proposta e o payback usam o caixa (`vpl_brl`).
+    vpl_com_resiliencia_brl: float = 0.0
+    #: O balanço energético bruto do ano típico — é dele que a memória de
+    #: cálculo refaz a conta de luz.
+    balanco: dict[str, float] = field(default_factory=dict)
+    #: A economia de cada ano a preços do ano 1, com o Fio B e a degradação
+    #: do ano (ver :func:`economias_por_ano`).
+    economias_por_ano: list[dict[str, float]] = field(default_factory=list)
+    #: O que o fluxo precisa para ser refeito com outro investimento — o de
+    #: cada topologia de kit que aponta para este cenário.
+    ciclos_ano: float = 0.0
+    capex_baterias_brl: float = 0.0
+    custo_grupo_paralelo_brl_ano: float = 0.0
+    opex_fixo_brl_ano: float = 0.0
 
     @property
     def nome(self) -> str:
         return self.composicao.nome
+
+    @property
+    def payback_simples_anos(self) -> float | None:
+        """Investimento dividido pela economia do primeiro ano — sem mais nada."""
+        if self.capex_brl <= 0 or self.economia_anual_brl <= 0:
+            return None
+        return self.capex_brl / self.economia_anual_brl
+
+    @property
+    def autoconsumo_frac(self) -> float:
+        """Fração da geração consumida no próprio imóvel (direto ou via banco)."""
+        return self.autoconsumo_kwh_ano / self.geracao_fv_kwh_ano if self.geracao_fv_kwh_ano > 0 else 0.0
 
     @property
     def beneficio_anual_brl(self) -> float:
@@ -244,7 +357,9 @@ class ResultadoCenario:
             "autonomia_garantida_h": self.autonomia_garantida_h,
             "ens_por_evento_kwh": self.ens_por_evento_kwh,
             "vpl_brl": self.vpl_brl,
+            "vpl_com_resiliencia_brl": self.vpl_com_resiliencia_brl,
             "tir": self.tir,
+            "payback_simples_anos": self.payback_simples_anos,
             "payback_anos": self.payback_anos,
         }
 
@@ -261,6 +376,11 @@ class ComparacaoFontes:
     conjunto: ConjuntoArmazenamento | None
     potencia_fv_kwp: float
     avisos: list[str] = field(default_factory=list)
+    #: O consumo anual que a curva simulada produziu, antes de ser escalada, e
+    #: o fator que a levou ao consumo de referência da conta. Guardados para a
+    #: memória de cálculo citar o mesmo número que o aviso cita.
+    consumo_simulado_kwh: float = 0.0
+    fator_consumo: float = 1.0
 
     def tabela(self) -> pd.DataFrame:
         return pd.DataFrame([c.as_dict() for c in self.cenarios])
@@ -319,13 +439,25 @@ def _balanco_anual(
     gerador: Gerador | None,
     fatura: Fatura,
     reserva_backup_frac: float,
-    dias_por_estacao: int,
+    dias_por_estacao: int | None,
     semente: int,
     fator_carga: float = 1.0,
     fv_no_hibrido: bool = True,
 ) -> dict[str, float]:
     """
     Um ano típico com a rede disponível, dia a dia, para um arranjo de fontes.
+
+    **A geração percorre a série inteira**, e não uma amostra dela: cada dia
+    real da série solar entra uma vez, pareado com um dia de carga do
+    ensemble da mesma estação. Sorteando 45 dias por estação, a geração anual
+    do balanço saía alguns por cento diferente de ``kWp × produtividade`` — e
+    o slide imprimia um número, a seção de compensação outro, do mesmo
+    sistema. ``dias_por_estacao`` inteiro volta ao sorteio antigo (é mais
+    rápido, e os testes de forma o usam); ``None`` é o balanço exato.
+
+    O que o balanço devolve fecha duas contas, e a memória de cálculo confere
+    as duas: ``consumo = autoconsumo + compra + gerador`` e
+    ``geracao = autoconsumo_direto + recarga + injecao``.
 
     ``fv_no_hibrido`` diz por onde o sol entra. Num sistema residencial o
     híbrido é o único inversor, e o que passa dele é perdido. Num sistema com
@@ -366,20 +498,38 @@ def _balanco_anual(
     )
 
     totais = dict.fromkeys(
-        ["consumo", "geracao", "autoconsumo", "injecao", "compra", "gerador", "descarga"],
+        ["consumo", "geracao", "geracao_bruta", "autoconsumo", "autoconsumo_direto",
+         "recarga", "injecao", "compra", "gerador", "descarga"],
         0.0,
     )
+    exato = dias_por_estacao is None
+    dias_somados = 0
+    # Índice da hora de cada passo do dia: degrau, como o PVGIS afirma.
+    hora_do_passo = (np.arange(passos_dia) * ensemble.passo_min) // 60
 
     for estacao in ensemble.estacoes:
-        carga, _ = ensemble.amostrar_dias(estacao, dias_por_estacao, rng)
-        carga = carga / 1000.0 * float(fator_carga)
-        geracao = (
-            serie.amostrar_janelas(
-                estacao, 0, passos_dia, ensemble.passo_min, dias_por_estacao, rng
+        if exato:
+            dias_serie = serie.dias_da_estacao(estacao)
+            if dias_serie.size == 0:
+                continue
+            quantidade = int(dias_serie.size)
+            geracao = serie.potencia_w_por_kwp[dias_serie][:, hora_do_passo]
+            # Cada simulação de carga entra o mesmo número de vezes (±1): o
+            # consumo do balanço fica igual à média do ensemble, sem ruído
+            # de sorteio.
+            total_sim = ensemble.perfis_w[estacao].shape[0]
+            indices = np.resize(rng.permutation(total_sim), quantidade)
+            carga = ensemble.perfis_w[estacao][indices]
+        else:
+            quantidade = int(dias_por_estacao)
+            carga, _ = ensemble.amostrar_dias(estacao, quantidade, rng)
+            geracao = serie.amostrar_janelas(
+                estacao, 0, passos_dia, ensemble.passo_min, quantidade, rng
             )
-            * float(potencia_fv_kwp)
-            / 1000.0
-        )
+        dias_somados += quantidade
+        carga = carga / 1000.0 * float(fator_carga)
+        geracao = geracao * float(potencia_fv_kwp) / 1000.0
+        geracao_bruta = geracao
         if limites is not None and limites.potencia_fv_kw > 0 and fv_no_hibrido:
             geracao = np.minimum(geracao, limites.potencia_fv_kw)
 
@@ -414,7 +564,10 @@ def _balanco_anual(
                 if acumular:
                     totais["consumo"] += demanda.sum() * dt_h
                     totais["geracao"] += pv.sum() * dt_h
+                    totais["geracao_bruta"] += geracao_bruta[:, t].sum() * dt_h
                     totais["autoconsumo"] += (direto + descarga).sum() * dt_h
+                    totais["autoconsumo_direto"] += direto.sum() * dt_h
+                    totais["recarga"] += recarga.sum() * dt_h
                     totais["injecao"] += sobra.sum() * dt_h
                     totais["compra"] += falta.sum() * dt_h
                     totais["gerador"] += do_grupo.sum() * dt_h
@@ -427,10 +580,13 @@ def _balanco_anual(
         # "bateria sem solar" apareceria economizando o que não economiza.
         # A segunda passada começa onde a primeira terminou, que é o regime
         # permanente de um banco em uso diário.
-        soc_inicial = np.full(dias_por_estacao, piso)
+        soc_inicial = np.full(quantidade, piso)
         rodar(rodar(soc_inicial, acumular=False), acumular=True)
 
-    escala = 365.0 / (dias_por_estacao * len(ensemble.estacoes))
+    # Dias somados viram ano: 365,25 dias por ano, a mesma convenção de
+    # `SerieGeracao.anual_kwh_por_kwp` — é o que faz a geração do balanço
+    # bater com kWp × produtividade até a última casa.
+    escala = 365.25 / dias_somados if dias_somados else 0.0
     return {chave: valor * escala for chave, valor in totais.items()}
 
 
@@ -454,10 +610,12 @@ def _fator_de_fatura(consumo_simulado_kwh_ano: float, fatura: Fatura) -> tuple[f
     simulado = f"{consumo_simulado_kwh_ano:,.0f}".replace(",", ".")
     medido = f"{alvo:,.0f}".replace(",", ".")
     return fator, (
-        f"O levantamento de cargas dá {simulado} kWh/ano e a fatura informada, "
-        f"{medido} kWh/ano — diferença de {abs(fator - 1) * 100:.0f}%. Os valores de "
-        "conta e economia foram escalados para a fatura; a análise de potência e de "
-        "resiliência continua na curva simulada, que é quem descreve o pico."
+        f"A curva simulada dá {simulado} kWh/ano e o consumo de referência da conta "
+        f"(a fatura, ou o consumo anual que dimensionou o solar), {medido} kWh/ano — "
+        f"diferença de {abs(fator - 1) * 100:.0f}%. Os valores de conta e economia "
+        "foram escalados para o consumo de referência, mantendo a forma da curva; a "
+        "análise de potência e de resiliência continua na curva simulada, que é quem "
+        "descreve o pico."
     )
 
 
@@ -523,9 +681,66 @@ def _interpolar_por_duracao(
 # ----------------------------------------------------------------------------
 # Fluxo de caixa do cenário
 # ----------------------------------------------------------------------------
+def economias_por_ano(
+    balanco: Mapping[str, float],
+    base_balanco: Mapping[str, float],
+    fatura: Fatura,
+    anos: int,
+    degradacao_fv_ano: float = 0.0,
+    tem_solar: bool = True,
+) -> list[dict[str, float]]:
+    """
+    A economia de conta de cada ano, **a preços do ano 1**.
+
+    Duas coisas mudam de um ano para o outro sem que a tarifa mude, e as duas
+    ficavam de fora quando a economia do primeiro ano era só inflacionada:
+
+    * **o Fio B sobe** — 60% em 2026, 90% em 2028, 100% daí em diante. Num
+      sistema residencial, que injeta metade do que gera, é o que mais pesa;
+    * **o módulo perde rendimento**, ~0,5% ao ano. Menos geração é menos
+      autoconsumo (volta a ser compra) e menos crédito.
+
+    A escalada tarifária entra depois, em :func:`_fluxo_do_cenario`, sobre
+    tudo. Cada linha traz as parcelas para a memória de cálculo.
+    """
+    conta_base = fatura.conta_anual_brl(base_balanco["compra"], 0.0)
+    linhas = []
+    for ano in range(1, int(anos) + 1):
+        calendario = int(fatura.ano_conexao) + ano - 1
+        fator = (1.0 - float(degradacao_fv_ano)) ** (ano - 1) if tem_solar else 1.0
+        # O autoconsumo que o módulo degradado deixa de fazer volta a ser
+        # comprado; a injeção encolhe na mesma proporção. É uma aproximação
+        # de primeira ordem, exata para perdas pequenas, e evita refazer o
+        # balanço horário quinze vezes.
+        compra = balanco["compra"] + balanco["autoconsumo"] * (1.0 - fator)
+        injecao = balanco["injecao"] * fator
+        detalhe = fatura.detalhar_conta(compra, injecao, calendario)
+        linhas.append({
+            "ano": ano,
+            "ano_calendario": calendario,
+            "fator_geracao": fator,
+            "fio_b_brl_kwh": detalhe["fio_b_brl_kwh"],
+            "compensado_kwh": detalhe["compensado_kwh"],
+            "conta_base_brl": conta_base,
+            "conta_brl": detalhe["conta_brl"],
+            "economia_brl": conta_base - detalhe["conta_brl"],
+        })
+    return linhas
+
+
+def _payback(caixa: Sequence[float]) -> float | None:
+    """O ano (fracionário) em que o acumulado do caixa cruza o zero."""
+    acumulado = np.cumsum(caixa)
+    for i in range(1, len(acumulado)):
+        if acumulado[i] >= 0 and acumulado[i - 1] < 0:
+            fatia = caixa[i]
+            return float(i - 1 + (-acumulado[i - 1] / fatia)) if fatia else float(i)
+    return None
+
+
 def _fluxo_do_cenario(
     capex_brl: float,
-    economia_anual_brl: float,
+    economias_reais_brl: Sequence[float],
     valor_resiliencia_brl_ano: float,
     custo_operacional_brl_ano: float,
     combustivel_brl_ano: float,
@@ -534,13 +749,24 @@ def _fluxo_do_cenario(
     degradacao: ModeloDegradacao | None,
     ciclos_ano: float,
     capex_baterias_brl: float,
-) -> tuple[pd.DataFrame, float, float | None, float | None]:
+) -> tuple[pd.DataFrame, float, float | None, float | None, float]:
     """
     Fluxo de caixa incremental do arranjo contra o cenário "só a rede".
 
-    Tudo que acompanha a tarifa -- economia de conta e valor da resiliência --
-    sobe com a escalada tarifária. O que é custo de operação sobe junto: um
-    fluxo que inflaciona só o benefício fabrica retorno.
+    ``economias_reais_brl`` é a economia de conta de cada ano a preços do ano
+    1 (ver :func:`economias_por_ano`). Tudo que acompanha a tarifa --
+    economia de conta e valor da resiliência -- sobe com a escalada
+    tarifária. O que é custo de operação sobe junto: um fluxo que inflaciona
+    só o benefício fabrica retorno.
+
+    **O caixa é só o que passa pelo bolso.** Valor presente, TIR e payback
+    saem de ``fluxo_brl`` — economia de conta menos operação e troca do
+    banco. O valor da resiliência (energia que deixa de faltar × custo da
+    interrupção) não é dinheiro que o cliente vê na fatura: fica na coluna
+    própria e num valor presente à parte, ``vpl_com_resiliencia``. Somá-lo ao
+    caixa fazia a proposta mostrar "economia de R$ X por ano" ao lado de um
+    payback que não era ``investimento ÷ X`` — o defeito do cartão do
+    Ed. Mourisco, que misturava duas economias num número só.
 
     A troca do banco entra como desembolso no ano em que a retenção cruza o
     fim de vida útil, com o preço do kWh de bateria corrigido pela queda
@@ -550,6 +776,7 @@ def _fluxo_do_cenario(
     linhas: list[dict[str, Any]] = []
     idade = 0.0
     ciclos = 0.0
+    economias = list(economias_reais_brl)
     for ano in range(1, premissas.anos_analise + 1):
         inflacao = (1.0 + fatura.escalada_tarifaria_ano) ** (ano - 1)
         retencao = 1.0
@@ -566,9 +793,11 @@ def _fluxo_do_cenario(
         # do banco, sim. Aplicar a retenção ao total seria pessimista demais,
         # e ignorá-la, otimista. O meio-termo honesto é aplicá-la ao valor da
         # resiliência, que é inteiramente da bateria.
-        beneficio = economia_anual_brl * inflacao
+        real = economias[ano - 1] if ano - 1 < len(economias) else (economias[-1] if economias else 0.0)
+        beneficio = real * inflacao
         resiliencia = valor_resiliencia_brl_ano * retencao * inflacao
         custos = (custo_operacional_brl_ano + combustivel_brl_ano) * inflacao
+        caixa_do_ano = beneficio - custos - troca
         linhas.append({
             "ano": ano,
             "retencao": retencao,
@@ -576,23 +805,134 @@ def _fluxo_do_cenario(
             "valor_resiliencia_brl": resiliencia,
             "custo_operacional_brl": custos,
             "troca_brl": troca,
-            "fluxo_brl": beneficio + resiliencia - custos - troca,
+            "fluxo_brl": caixa_do_ano,
+            "fluxo_com_resiliencia_brl": caixa_do_ano + resiliencia,
         })
 
     fluxo = pd.DataFrame(linhas)
-    caixa = [-capex_brl, *fluxo["fluxo_brl"].tolist()]
     taxa = premissas.taxa_desconto_ano
+    caixa = [-capex_brl, *fluxo["fluxo_brl"].tolist()]
     vpl = float(sum(v / (1.0 + taxa) ** i for i, v in enumerate(caixa)))
+    com_resiliencia = [-capex_brl, *fluxo["fluxo_com_resiliencia_brl"].tolist()]
+    vpl_resiliencia = float(sum(v / (1.0 + taxa) ** i for i, v in enumerate(com_resiliencia)))
 
-    payback: float | None = None
-    acumulado = np.cumsum(caixa)
-    for i in range(1, len(acumulado)):
-        if acumulado[i] >= 0 and acumulado[i - 1] < 0:
-            fatia = caixa[i]
-            payback = float(i - 1 + (-acumulado[i - 1] / fatia)) if fatia else float(i)
-            break
+    return (
+        fluxo, vpl, (_tir(caixa) if capex_brl > 0 else None), _payback(caixa),
+        vpl_resiliencia,
+    )
 
-    return fluxo, vpl, (_tir(caixa) if capex_brl > 0 else None), payback
+
+# ----------------------------------------------------------------------------
+# O financeiro de uma proposta: um investimento, um fluxo, um conjunto de números
+# ----------------------------------------------------------------------------
+@dataclass
+class FinanceiroProposta:
+    """
+    Os números de dinheiro de **uma** proposta, todos do mesmo fluxo.
+
+    É a única fonte do que a tela, o dossiê e os slides dizem sobre retorno.
+    Antes, cada um calculava o seu: a tela dividia investimento por economia,
+    o slide principal lia o payback do cenário (com a resiliência dentro e o
+    investimento da topologia mais barata), os slides de valor mostravam o
+    preço da própria topologia ao lado da TIR de outra. O mesmo sistema saía
+    com três paybacks.
+
+    * ``payback_simples_anos`` = ``capex / economia_ano1`` — a conta que o
+      cliente faz de cabeça, e a que o rótulo "payback simples" promete;
+    * ``payback_anos`` = quando o caixa acumulado cruza o zero, com reajuste
+      tarifário, degradação do módulo, Fio B crescente, operação e troca do
+      banco;
+    * ``tir`` e ``vpl_brl`` saem desse mesmo caixa, com **este** capex.
+    """
+
+    nome: str
+    cenario: str
+    capex_brl: float
+    economia_ano1_brl: float
+    opex_ano1_brl: float
+    payback_simples_anos: float | None
+    payback_anos: float | None
+    tir: float | None
+    vpl_brl: float
+    vpl_com_resiliencia_brl: float
+    valor_resiliencia_ano1_brl: float
+    autonomia_h: float
+    horizonte_anos: int
+    fluxo: pd.DataFrame
+    topologia: str | None = None
+
+    @property
+    def economia_mensal_brl(self) -> float:
+        return self.economia_ano1_brl / 12.0
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "nome": self.nome,
+            "topologia": self.topologia,
+            "cenario": self.cenario,
+            "capex_brl": self.capex_brl,
+            "economia_ano1_brl": self.economia_ano1_brl,
+            "opex_ano1_brl": self.opex_ano1_brl,
+            "payback_simples_anos": self.payback_simples_anos,
+            "payback_anos": self.payback_anos,
+            "tir": self.tir,
+            "vpl_brl": self.vpl_brl,
+            "vpl_com_resiliencia_brl": self.vpl_com_resiliencia_brl,
+            "valor_resiliencia_ano1_brl": self.valor_resiliencia_ano1_brl,
+            "autonomia_h": self.autonomia_h,
+            "horizonte_anos": self.horizonte_anos,
+        }
+
+
+def financeiro_da_proposta(
+    comparacao: "ComparacaoFontes",
+    cenario: ResultadoCenario,
+    capex_brl: float | None = None,
+    nome: str | None = None,
+    topologia: str | None = None,
+) -> FinanceiroProposta:
+    """
+    O fluxo de caixa de um cenário refeito com o investimento de uma proposta.
+
+    Duas propostas podem apontar para o mesmo cenário — microinversor e
+    split-phase sem banco produzem a mesma energia —, e o que muda entre elas
+    é só o preço. A economia é a do cenário; a operação (percentual do
+    investimento), o payback, a TIR e o valor presente são refeitos com o
+    ``capex_brl`` desta proposta. Sem ``capex_brl``, vale o do cenário.
+    """
+    premissas = comparacao.premissas
+    capex = float(cenario.capex_brl if capex_brl is None else capex_brl)
+    opex = capex * premissas.opex_percent_do_capex_ano + cenario.opex_fixo_brl_ano
+    degradacao = (
+        ModeloDegradacao.do_conjunto(comparacao.conjunto)
+        if cenario.composicao.bateria and comparacao.conjunto is not None else None
+    )
+    economias = [a["economia_brl"] for a in cenario.economias_por_ano] or [cenario.economia_anual_brl]
+    fluxo, vpl, tir, payback, vpl_resiliencia = _fluxo_do_cenario(
+        capex, economias, cenario.valor_resiliencia_brl_ano,
+        opex + cenario.custo_grupo_paralelo_brl_ano,
+        cenario.combustivel_em_apagao_brl_ano,
+        premissas, comparacao.fatura, degradacao, cenario.ciclos_ano,
+        cenario.capex_baterias_brl,
+    )
+    economia = float(cenario.economia_anual_brl)
+    return FinanceiroProposta(
+        nome=nome or cenario.nome,
+        topologia=topologia,
+        cenario=cenario.composicao.chave,
+        capex_brl=capex,
+        economia_ano1_brl=economia,
+        opex_ano1_brl=opex,
+        payback_simples_anos=(capex / economia) if capex > 0 and economia > 0 else None,
+        payback_anos=payback,
+        tir=tir,
+        vpl_brl=vpl,
+        vpl_com_resiliencia_brl=vpl_resiliencia,
+        valor_resiliencia_ano1_brl=float(cenario.valor_resiliencia_brl_ano),
+        autonomia_h=float(cenario.autonomia_garantida_h),
+        horizonte_anos=int(premissas.anos_analise),
+        fluxo=fluxo,
+    )
 
 
 # ----------------------------------------------------------------------------
@@ -664,7 +1004,7 @@ def comparar_fontes(
     mao_de_obra_brl_kwp: float | None = None,
     material_ca_brl_kwp: float | None = None,
     composicoes: Sequence[Composicao] | None = None,
-    dias_por_estacao: int = 45,
+    dias_por_estacao: int | None = None,
     semente: int = 20260902,
     fv_no_hibrido: bool = True,
     capex_fv_por_cenario: Mapping[str, float] | None = None,
@@ -708,7 +1048,8 @@ def comparar_fontes(
         ensemble_total, serie, 0.0, None, None, fatura,
         premissas.reserva_backup_frac, dias_por_estacao, semente,
     )
-    fator, aviso_fatura = _fator_de_fatura(base_balanco["consumo"], fatura)
+    consumo_simulado = float(base_balanco["consumo"])
+    fator, aviso_fatura = _fator_de_fatura(consumo_simulado, fatura)
     if aviso_fatura:
         avisos.append(aviso_fatura)
     if fator != 1.0:
@@ -834,9 +1175,17 @@ def comparar_fontes(
 
         economia = (base.conta_anual_brl - conta) if base is not None else 0.0
         ciclos_ano = _ciclos_estimados(balanco, limites_conjunto) if composicao.bateria else 0.0
-        fluxo, vpl, tir, payback = _fluxo_do_cenario(
+        anuais = (
+            economias_por_ano(
+                balanco, base.balanco, fatura, premissas.anos_analise,
+                degradacao_fv_ano=premissas.degradacao_fv_ano,
+                tem_solar=composicao.solar,
+            )
+            if base is not None else []
+        )
+        fluxo, vpl, tir, payback, vpl_resiliencia = _fluxo_do_cenario(
             capex,
-            economia,
+            [a["economia_brl"] for a in anuais] or [0.0],
             valor_resiliencia,
             opex + custo_grupo_paralelo,
             combustivel_apagao,
@@ -885,6 +1234,15 @@ def comparar_fontes(
             payback_anos=payback,
             resiliencia=resiliencia,
             avisos=avisos_cenario,
+            vpl_com_resiliencia_brl=vpl_resiliencia,
+            balanco=dict(balanco),
+            economias_por_ano=anuais,
+            ciclos_ano=ciclos_ano,
+            capex_baterias_brl=capex_baterias if composicao.bateria else 0.0,
+            custo_grupo_paralelo_brl_ano=custo_grupo_paralelo,
+            opex_fixo_brl_ano=(
+                float(gerador.opex_fixo_brl_ano) if composicao.gerador and gerador else 0.0
+            ),
         )
         resultados.append(cenario)
         if composicao.n_fontes == 0:
@@ -916,6 +1274,8 @@ def comparar_fontes(
         conjunto=conjunto,
         potencia_fv_kwp=potencia_fv_kwp,
         avisos=avisos,
+        consumo_simulado_kwh=consumo_simulado,
+        fator_consumo=float(fator),
     )
 
 

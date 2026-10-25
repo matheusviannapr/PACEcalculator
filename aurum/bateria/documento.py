@@ -211,7 +211,7 @@ def _resumo_dos_cenarios(estudo: ResultadoEstudo) -> str:
             # na seção própria: as duas custavam a largura que fazia a tabela
             # estourar a página, e nenhuma trazia informação nova.
             ["Nível de uso", "Consumo", "Solar", "Investimento",
-             "Economia/ano", "Retorno"],
+             "Economia/ano", "Payback simples"],
             linhas,
             alinhamento="p{4.0cm}rrrrr",
             tamanho_fonte="scriptsize",
@@ -280,28 +280,33 @@ def _sumario_executivo(estudo: ResultadoEstudo) -> str:
              f"{_n(conjunto.inversor.duracao_pico_s, 0, 's')}"),
         ]
 
-        # O investimento do **arranjo completo**, e não só o do banco.
-        # `economia[conjunto]` precifica o armazenamento; quem lê "investimento
-        # estimado" entende o sistema inteiro, e a diferença entre os dois é o
-        # gerador fotovoltaico — que costuma ser a maior parte.
-        completo = None
-        if estudo.cenarios is not None:
-            completo = next(
-                (c for c in estudo.cenarios.cenarios
-                 if c.composicao.solar and c.composicao.bateria),
-                None,
-            )
-        if completo is not None:
-            linhas.append(("Investimento — solar e bateria", _brl(completo.capex_brl)))
-            linhas.append(("  do qual, o armazenamento", _brl(economico.capex_brl)))
+        # O dinheiro da proposta principal, do mesmo financeiro que os slides
+        # e a tela leem. Antes o resumo lia o capex e o payback do cenário —
+        # este com a resiliência dentro e reajuste —, enquanto a seção das
+        # propostas dividia investimento por economia: dois retornos para o
+        # mesmo sistema, uma página de distância.
+        principal = estudo.financeiro_do_cenario()
+        if principal is not None:
+            linhas.append(("Proposta principal", principal.nome))
+            linhas.append(("Investimento", _brl(principal.capex_brl)))
+            banco = _custo_do_banco(estudo)
+            if banco is not None and principal.cenario.endswith("bateria"):
+                linhas.append(("  do qual, o banco de baterias", _brl(banco)))
+            linhas.append(("Economia na conta de luz, 1º ano", _brl(principal.economia_ano1_brl)))
+            if principal.payback_simples_anos:
+                linhas.append(("Payback simples (investimento ÷ economia)",
+                               _n(principal.payback_simples_anos, 1, "anos")))
+            linhas.append((
+                f"Retorno pelo fluxo de caixa ({principal.horizonte_anos} anos)",
+                _n(principal.payback_anos, 1, "anos") if principal.payback_anos
+                else "não se paga no horizonte",
+            ))
+            if principal.tir is not None:
+                linhas.append(("Taxa interna de retorno", _pct(principal.tir, 1)))
         else:
             linhas.append(("Investimento no armazenamento", _brl(economico.capex_brl)))
         linhas.append(("Vida útil estimada do banco",
                        _n(economico.vida_util_anos, 1, "anos")))
-
-        retorno = completo.payback_anos if completo is not None else economico.payback_anos
-        if retorno:
-            linhas.append(("Retorno do investimento", _n(retorno, 1, "anos")))
         partes.append(tabela(
             ["Item", "Valor"], linhas,
             alinhamento="p{6.6cm}p{8.2cm}",
@@ -1263,8 +1268,10 @@ def _paragrafo_da_compensacao(estudo: ResultadoEstudo) -> str:
     frase = (
         f"O sistema de {_n(dados['potencia_kwp'], 1, 'kWp')} gera "
         f"{_n(dados['geracao_kwh'], 0, 'kWh')} por ano, contra o "
-        f"{esc(dados['origem'])} de {_n(alvo, 0, 'kWh')}: cobre "
-        f"{esc(_pct(cobertura, 0))} dele."
+        f"{esc(dados['origem'])} de {_n(alvo, 0, 'kWh')} menos "
+        f"{_n(dados.get('piso_kwh', 0.0), 0, 'kWh')} de custo de disponibilidade, "
+        "que a conta cobra de qualquer jeito: cobre "
+        f"{esc(_pct(cobertura, 0))} do que a compensação consegue abater."
     )
     if dados["definida_por"] == "consumo a compensar":
         alvo_pedido = esc(_pct(pedida, 0))
@@ -2226,19 +2233,24 @@ def _secao_cenarios(estudo: ResultadoEstudo, figuras: dict[str, Path]) -> str:
             "O referencial",
             f"Todos os números desta seção são medidos contra a conta de hoje: "
             f"{_brl(comparacao.base.conta_anual_brl)} por ano, a "
-            f"{_brl(fatura.tarifa_brl_kwh, 2)}/kWh, com custo de disponibilidade de "
-            f"{_n(fatura.custo_disponibilidade_kwh, 0, 'kWh')} por mês. Tarifa simples: "
-            "posto tarifário e demanda contratada não entram nesta comparação.",
+            f"{_brl(fatura.tarifa_efetiva_brl_kwh, 2)}/kWh"
+            + (f" (tarifa {_brl(fatura.tarifa_brl_kwh, 2)} mais bandeira "
+               f"{_brl(fatura.bandeira_brl_kwh, 3)})" if fatura.bandeira_brl_kwh > 0 else "")
+            + f", com custo de disponibilidade de "
+            f"{_n(fatura.custo_disponibilidade_kwh, 0, 'kWh')} por mês. A energia injetada "
+            f"abate a conta a {_brl(fatura.valor_injecao_brl_kwh, 3)}/kWh no primeiro ano "
+            f"— a tarifa menos o Fio B de {fatura.ano_conexao} (Lei 14.300), que sobe a "
+            "cada ano até 2029 e é recalculado ano a ano no fluxo de caixa. Tarifa "
+            "simples: posto tarifário e demanda contratada não entram nesta comparação.",
         ),
         tabela_longa(
-            # "Resiliência" no lugar de "Sem energia": o payback é calculado
-            # sobre economia mais resiliência, e sem a segunda na página quem
-            # dividisse investimento por economia chegava a 5,0 anos e lia 3,4
-            # ao lado. A energia que falta num evento médio, que saiu daqui, é
-            # 0,0 kWh em todo arranjo com bateria — o caso em que alguém a
-            # leria — e o que ela diz já está na coluna de autonomia.
+            # Payback e valor presente são de caixa: economia de conta menos
+            # operação e troca do banco. A resiliência tem coluna própria e um
+            # valor presente à parte, porque não aparece na fatura — somá-la ao
+            # payback fazia "investimento ÷ economia" não bater com o payback
+            # impresso ao lado, que é o erro que esta tabela já teve.
             ["Arranjo", "Investimento", "Economia", "Resiliência", "Autonomia",
-             "VPL", "Payback"],
+             "VPL", "VPL c/ resil.", "Payback simples"],
             [
                 (
                     cenario.nome.replace("Rede + ", "").capitalize(),
@@ -2251,19 +2263,23 @@ def _secao_cenarios(estudo: ResultadoEstudo, figuras: dict[str, Path]) -> str:
                         if cenario.autonomia_garantida_h > 0
                         else "0 h"
                     ),
-                    _brl(cenario.vpl_brl),
-                    _n(cenario.payback_anos, 1, "anos") if cenario.payback_anos else "—",
+                    _brl(cenario.vpl_brl) if cenario.capex_brl > 0 else "—",
+                    _brl(cenario.vpl_com_resiliencia_brl) if cenario.capex_brl > 0 else "—",
+                    (_n(cenario.payback_simples_anos, 1, "anos")
+                     if cenario.payback_simples_anos else "—"),
                 )
                 for cenario in comparacao.cenarios
             ],
-            alinhamento="p{3.9cm}rrrrrr", tamanho_fonte="scriptsize",
+            alinhamento="p{3.4cm}rrrrrrr", tamanho_fonte="scriptsize",
             legenda=(
-                "Cada arranjo de fontes contra a conta de hoje. 'Economia' e "
-            "'Resiliência' são por ano e somam no payback — a primeira aparece na "
-            "conta de luz, a segunda não. 'Economia' é por ano; "
-                "'Autonomia', a maior falta atravessada em 95% dos casos no pior par de "
-                "estação e hora; 'Sem energia', o que falta à carga essencial numa "
-                "interrupção média"
+                "Cada arranjo de fontes contra a conta de hoje. 'Economia' é a "
+                "redução da conta no primeiro ano; 'Resiliência', o valor anual da "
+                "energia que deixa de faltar, que não aparece na conta. 'VPL' é o "
+                "valor presente do caixa (economia menos operação e troca do banco); "
+                "'VPL c/ resil.' soma a resiliência. 'Payback simples' é "
+                "investimento dividido pela economia do primeiro ano. 'Autonomia' é "
+                "a maior falta atravessada em 95% dos casos no pior par de estação e "
+                "hora"
             ),
         ),
     ]
@@ -2274,8 +2290,9 @@ def _secao_cenarios(estudo: ResultadoEstudo, figuras: dict[str, Path]) -> str:
         "Autonomia zero não quer dizer que o arranjo não sirva para nada. Ela exige "
         "atravessar a falta inteira em 95% dos casos, no pior par de estação e hora; "
         "um grupo gerador que cobre 95% da energia mas afunda na partida de um motor "
-        "aparece com autonomia zero e com 'sem energia' perto de zero. A primeira "
-        "coluna mede a promessa que se pode assinar, a segunda mede o estrago real."
+        "aparece com autonomia zero e, ainda assim, evita quase toda a energia que "
+        "faltaria — é o que a coluna de resiliência mede. A autonomia é a promessa que "
+        "se pode assinar; a resiliência, o estrago evitado."
     ))
 
     if "cenarios" in figuras:
@@ -2290,7 +2307,7 @@ def _secao_cenarios(estudo: ResultadoEstudo, figuras: dict[str, Path]) -> str:
     melhor_res = comparacao.melhor_resiliencia
     if melhor_vpl is not None:
         frase = (
-            "Pelo valor presente, o arranjo de maior retorno é "
+            "Pelo valor presente do caixa, o arranjo de maior retorno é "
             + rf"\textbf{{{esc(melhor_vpl.nome)}}}: "
             + esc(
                 f"{_brl(melhor_vpl.capex_brl)} de investimento, "
@@ -2345,10 +2362,11 @@ def _secao_cenarios(estudo: ResultadoEstudo, figuras: dict[str, Path]) -> str:
     else:
         partes.append(caixa(
             "A resiliência não foi precificada",
-            "O custo da interrupção ficou em zero, então nenhum payback desta seção "
-            "inclui o valor de não ficar sem energia. Na tarifa simples é justamente "
-            "esse valor que paga a bateria: o quadro acima compara apenas economia de "
-            "conta, e por isso subestima os arranjos com armazenamento.",
+            "O custo da interrupção ficou em zero, então a coluna de resiliência "
+            "está vazia e o valor presente com resiliência é igual ao de caixa. Na "
+            "tarifa simples é justamente esse valor que justifica a bateria: sem ele, "
+            "o quadro acima compara apenas economia de conta, e por isso subestima os "
+            "arranjos com armazenamento.",
             cor="vermelhoaviso",
         ))
 
@@ -2639,6 +2657,21 @@ def _subsecao_gerador(comparacao, figuras: dict[str, Path]) -> list[str]:
     return partes
 
 
+def _custo_do_banco(estudo: ResultadoEstudo) -> float | None:
+    """
+    O que o banco acrescenta ao investimento: o mesmo kit com e sem ele.
+
+    É a diferença que o cliente compra, e a que a tela e os slides mostram.
+    Sem as duas topologias na proposta, não há diferença a medir.
+    """
+    financeiro = getattr(estudo, "financeiro", None) or {}
+    com = financeiro.get("splitphase_bateria")
+    sem = financeiro.get("splitphase") or financeiro.get("microinversor")
+    if com is None or sem is None:
+        return None
+    return float(com.capex_brl) - float(sem.capex_brl)
+
+
 def _secao_propostas(estudo: ResultadoEstudo) -> str:
     """
     O que cada kit custa, e o que cada um entrega.
@@ -2648,33 +2681,31 @@ def _secao_propostas(estudo: ResultadoEstudo) -> str:
     Apresentar um investimento só, sem dizer de qual dos dois se fala,
     é o que fazia a mesma proposta ter dois preços conforme quem a lia.
 
-    Os valores vêm da tabela interna de kit, coluna por coluna. Nenhum deles
-    sai de curva de R$/kWp.
+    Os valores vêm da tabela interna de kit, coluna por coluna, e o retorno
+    do financeiro de cada proposta (:class:`aurum.bateria.fontes.FinanceiroProposta`)
+    — o mesmo objeto que a tela e os slides leem.
     """
-    precos = getattr(estudo, "precos_por_topologia", None)
-    if not precos or estudo.cenarios is None:
+    precos = getattr(estudo, "precos_por_topologia", None) or {}
+    financeiro = getattr(estudo, "financeiro", None) or {}
+    if not financeiro or estudo.cenarios is None:
         return ""
     linhas = []
     avisos: list[str] = []
-    for dados in precos.values():
-        capex = dados["capex_brl"]
-        cenario = estudo.cenarios.por_chave(str(dados["cenario"]))
-        if capex is None or cenario is None:
-            continue
-        economia = float(cenario.economia_anual_brl)
+    for topologia, f in financeiro.items():
         linhas.append((
-            esc(str(dados["nome"])),
-            _brl(capex),
-            _brl(economia),
-            f"{_n(capex / economia, 1)} anos" if economia > 0 else "--",
-            (_n(cenario.autonomia_garantida_h, 1, "h")
-             if cenario.autonomia_garantida_h > 0 else "nenhuma"),
+            str(f.nome),
+            _brl(f.capex_brl),
+            _brl(f.economia_ano1_brl),
+            _n(f.payback_simples_anos, 1, "anos") if f.payback_simples_anos else "--",
+            _n(f.payback_anos, 1, "anos") if f.payback_anos else "não se paga",
+            _pct(f.tir, 1) if f.tir is not None else "--",
+            _n(f.autonomia_h, 1, "h") if f.autonomia_h > 0 else "nenhuma",
         ))
-        if dados["aviso"]:
-            avisos.append(f"{dados['nome']}: {dados['aviso']}")
-    if not linhas:
-        return ""
+        aviso = (precos.get(topologia) or {}).get("aviso")
+        if aviso:
+            avisos.append(f"{f.nome}: {aviso}")
 
+    premissas = estudo.cenarios.premissas
     partes = [
         secao("As propostas: o que cada kit custa"),
         "O mesmo gerador fotovoltaico pode ser montado com topologias diferentes, e "
@@ -2683,17 +2714,24 @@ def _secao_propostas(estudo: ResultadoEstudo) -> str:
         "equipamento. O split-phase é híbrido: com o banco dimensionado neste "
         "estudo, segue alimentando o quadro de backup durante a falta.",
         tabela(
-            ["Proposta", "Investimento", "Economia no 1º ano", "Payback simples",
-             "Autonomia"],
-            linhas, alinhamento="lrrrr", largura_primeira_coluna="4.4cm",
+            ["Proposta", "Investimento", "Economia 1º ano", "Payback simples",
+             "Retorno (fluxo)", "TIR", "Autonomia"],
+            linhas, alinhamento="lrrrrrr", largura_primeira_coluna="3.6cm",
+            tamanho_fonte="small",
             legenda="Investimento e retorno de cada topologia de kit",
         ),
         nota(
             "Os investimentos vêm da tabela de kit vigente, coluna por coluna, e não "
             "de curva de R$/kWp: é o preço do material que o distribuidor pratica, "
             "acrescido da mão de obra e do material CA informados no estudo. A "
-            "economia e o payback saem do balanço horário de cada arranjo, com esse "
-            "investimento."
+            "economia sai do balanço horário de cada arranjo. O payback simples é o "
+            "investimento dividido pela economia do primeiro ano; o retorno pelo "
+            "fluxo e a TIR saem do fluxo de caixa de "
+            f"{premissas.anos_analise} anos com esse mesmo investimento — reajuste "
+            "tarifário, Fio B crescente (Lei 14.300), perda de rendimento do módulo, "
+            "operação e troca do banco. Nenhum dos três inclui o valor da "
+            "resiliência, que não aparece na conta de luz. A memória de cálculo que "
+            "acompanha este estudo refaz cada número."
         ),
     ]
     if avisos:
@@ -2742,6 +2780,11 @@ def _secao_economia(estudo: ResultadoEstudo) -> str:
                 # números diferem por serem de coisas diferentes.
                 ("Valor presente líquido do banco, isolado do solar",
                  _brl(economico.vpl_brl)),
+                # O caixa acima não leva a resiliência; esta linha leva. Os
+                # dois lado a lado dizem quanto do valor do banco é conta de
+                # luz e quanto é continuidade.
+                ("Valor presente somando a resiliência",
+                 _brl(getattr(economico, "vpl_com_resiliencia_brl", economico.vpl_brl))),
                 ("Taxa interna de retorno",
                  _pct(economico.tir, 1) if economico.tir is not None else "não converge"),
                 # O rótulo diz **do banco**, e não "do investimento". Os dois
@@ -3217,6 +3260,19 @@ def escrever_dossie(
     caminho_tex.write_text(montar_documento(estudo, figuras, capa), encoding="utf-8")
     resultado: dict[str, Path] = {"tex": caminho_tex, **escritos}
 
+    # A memória de cálculo vai junto, e não como seção do dossiê: é o
+    # documento de conferência, com cada premissa e cada conta refeita, e
+    # quem o lê é quem assina — não o cliente.
+    from .memoria_calculo import montar_memoria
+
+    caminho_memoria = pasta / "memoria-de-calculo.md"
+    caminho_memoria.write_text(montar_memoria(estudo, comercial), encoding="utf-8")
+    resultado["memoria"] = caminho_memoria
+    for topologia, financeiro in (getattr(estudo, "financeiro", None) or {}).items():
+        destino_csv = tabelas_dir / f"fluxo_proposta_{topologia}.csv"
+        financeiro.fluxo.to_csv(destino_csv, sep=";", decimal=",", index=False)
+        resultado[f"csv_fluxo_{topologia}"] = destino_csv
+
     if compilar and encontrar_compilador():
         pdf = compilar_pdf(caminho_tex)
         if pdf is not None:
@@ -3271,6 +3327,8 @@ def _leia_me(estudo: ResultadoEstudo) -> str:
         "estudo/estudo.tex     documento completo em LaTeX",
         "estudo/estudo.pdf     o mesmo documento compilado (quando havia LaTeX na máquina)",
         "estudo/resumo.md      resumo em Markdown, para colar em e-mail",
+        "estudo/memoria-de-calculo.md  cada premissa e cada conta refeita, com as",
+        "                      conferências automáticas de coerência no topo",
         "estudo/figuras/       todas as figuras em PNG",
         "estudo/tabelas/       todas as tabelas em CSV (separador ';', decimal ',')",
         "estudo/apresentacao/  a proposta comercial em slides (apresentacao.pdf), quando gerada",

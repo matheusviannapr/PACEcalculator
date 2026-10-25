@@ -556,9 +556,14 @@ def test_a_meta_pergunta_as_fontes_menos_solar():
         "solar não pode ser perguntada de novo no fim do fluxo"
     )
     # E a conta de luz, que é o referencial de toda a comparação.
-    _por_rotulo(at.number_input, "Tarifa (R$/kWh)")
+    _por_rotulo(at.number_input, "Tarifa média (R$/kWh)")
     _por_rotulo(at.number_input, "Consumo médio na fatura")
     _por_rotulo(at.selectbox, "Custo de disponibilidade")
+    # Uma tarifa só: a de ponta e fora de ponta não aparecem para quem não tem
+    # tarifa horária. Com os dois campos à vista e preenchidos por padrão, o
+    # estudo tinha duas tarifas — R$ 0,98 na conta e R$ 0,78 no banco.
+    rotulos_numero = [w.label for w in at.number_input]
+    assert not any("fora de ponta" in r.lower() for r in rotulos_numero), rotulos_numero
 
 
 def test_gerador_so_pede_os_dados_dele_quando_e_marcado():

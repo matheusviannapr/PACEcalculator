@@ -113,7 +113,8 @@ def executar(pacote: dict, destino: str | Path, opcoes: Opcoes, progresso=None) 
         # A apresentação sai com as condições comerciais padrão: o pacote de
         # coleta não as traz, e elas são premissa de venda, não de cálculo.
         escritos = escrever_dossie(estudo, destino / 'estudo',
-                                  capa=DadosCapa(referencia='Estudo residencial'),
+                                  capa=DadosCapa(referencia='Estudo residencial' if dados.cenario.segmento == 'residencia'
+                                                 else f"Estudo de energia — {pacote['vistoria'].get('imovel') or 'negócio'}"),
                                   compilar=opcoes.compilar_pdf,
                                   comercial=OpcoesComerciais(cliente=dados.cliente))
         shutil.make_archive(str(destino / 'estudo-pace'), 'zip', destino / 'estudo')

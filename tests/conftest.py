@@ -11,6 +11,15 @@ RAIZ = Path(__file__).resolve().parent.parent
 if str(RAIZ) not in sys.path:
     sys.path.insert(0, str(RAIZ))
 
+#: Testes que rodam o site do estudo e o CRM (vistoria/cliente). Essa pasta não
+#: vai para o repositório público: fora da máquina da PACE, eles saem da coleta
+#: em vez de falhar por falta dos arquivos.
+SITE = RAIZ / "vistoria" / "cliente" / "cliente.js"
+collect_ignore = [] if SITE.exists() else [
+    "test_crm_comercial.py", "test_crm_google.py", "test_questionario_cliente.py",
+    "test_score_pace.py", "test_pre_relatorio.py",
+]
+
 from aurum.geo.roofs import RoofFilterConfig, build_leads  # noqa: E402
 from aurum.pv.equipment import carregar_base  # noqa: E402
 from aurum.pv.solar import PerfilGeracao  # noqa: E402

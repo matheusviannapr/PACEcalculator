@@ -1,0 +1,347 @@
+{
+  "_leia": "Parâmetros do Score PACE. Fonte única: o Python (aurum.pre_relatorio.score/eficiencia) lê este arquivo, e o build do app (vistoria/cliente/build_cliente.py) o copia para score-parametros.js. Tudo aqui é palpite inicial, a recalibrar com casos reais.",
+  "pesos": {
+    "economico": 5,
+    "autonomia": 20,
+    "eficiencia": 30,
+    "uso_no_sol": 15,
+    "area": 30
+  },
+  "nomes": {
+    "economico": "Aproveitamento econômico",
+    "autonomia": "Autonomia sem rede",
+    "eficiencia": "Eficiência dos equipamentos",
+    "uso_no_sol": "Uso na hora do sol",
+    "area": "Aproveitamento de área"
+  },
+  "economico": {
+    "_leia": "kWh por pessoa por mês -> pontos (até o corte). null = sem limite.",
+    "faixasKwhPessoa": [
+      [
+        80,
+        5
+      ],
+      [
+        120,
+        4
+      ],
+      [
+        180,
+        3
+      ],
+      [
+        250,
+        2
+      ],
+      [
+        null,
+        1
+      ]
+    ],
+    "critNegocio": 4
+  },
+  "tarifaBranca": {
+    "ativa": false,
+    "_leia": "Múltiplos da tarifa convencional nos dias úteis; fim de semana é todo fora-ponta.",
+    "foraPonta": 0.82,
+    "intermediario": 1.2,
+    "ponta": 1.9,
+    "horasPonta": [
+      18,
+      19,
+      20
+    ],
+    "horasIntermediario": [
+      17,
+      21
+    ]
+  },
+  "autonomia": {
+    "_leia": "Horas que o sistema segura sem rede -> pontos (a partir do corte).",
+    "faixasHoras": [
+      [
+        12,
+        20
+      ],
+      [
+        6,
+        15
+      ],
+      [
+        3,
+        10
+      ],
+      [
+        1,
+        5
+      ]
+    ],
+    "horasGerador": 6,
+    "horasNobreak": 1
+  },
+  "usoNoSol": {
+    "encaixeReferencia": 0.75,
+    "correcaoSemGeracao": 0.5
+  },
+  "area": {
+    "m2": {
+      "p": 30,
+      "m": 60,
+      "g": 115,
+      "gg": 200
+    },
+    "fracaoUtil": 0.6,
+    "kwpPorM2": 0.2,
+    "sombra": {
+      "nao": 1.0,
+      "parte": 0.8,
+      "muita": 0.55,
+      "nao_sei": 0.9
+    },
+    "kwpPorPlaca": 0.55,
+    "produtividadePadrao": 1350
+  },
+  "classes": {
+    "cartoes": {
+      "ar": "ar",
+      "n_ar": "ar",
+      "n_ar_quartos": "ar",
+      "n_ar_salas": "ar",
+      "geladeira": "refrigeracao",
+      "freezer": "refrigeracao",
+      "n_refrigerador": "refrigeracao",
+      "n_freezer": "refrigeracao",
+      "n_bebidas": "refrigeracao",
+      "n_frigobar": "refrigeracao",
+      "n_vacinas": "refrigeracao",
+      "n_expositor": "expositor",
+      "n_sorvete_exp": "expositor",
+      "chuveiro": "chuveiro",
+      "n_chuveiro": "chuveiro",
+      "boiler": "boiler",
+      "n_lavatorio": "boiler",
+      "piscina": "piscina",
+      "aqpiscina": "aqpiscina",
+      "lavar": "lavar",
+      "loucas": "lavar",
+      "secadora": "lavar",
+      "carro": "carro",
+      "luz": "luz",
+      "n_luz": "luz"
+    },
+    "equipamentos": {
+      "EQ0001": "luz",
+      "NG25": "luz"
+    }
+  },
+  "trocas": {
+    "_leia": "fator = fração do consumo atual que sobra depois da troca, por resposta do app; unidades = fração das unidades que trocam; custo em R$ por unidade (ou do sistema, se porUnidade é false). acao/acaoVarias: o texto da sugestão no card ({n} = unidades).",
+    "ar": {
+      "acao": "Substituição do ar-condicionado por um inverter",
+      "fator": {
+        "nenhum": 0.65,
+        "alguns": 0.82,
+        "nao_sei": 0.82,
+        "todos": 1.0
+      },
+      "unidades": {
+        "nenhum": 1.0,
+        "alguns": 0.5,
+        "nao_sei": 0.5,
+        "todos": 0.0
+      },
+      "custo": 3500,
+      "porUnidade": true,
+      "acaoVarias": "Substituição de {n} ares-condicionados por inverter"
+    },
+    "refrigeracao": {
+      "acao": "Substituição da geladeira antiga por uma Procel A",
+      "fator": {
+        "velho": 0.55,
+        "medio": 0.8,
+        "nao_sei": 0.8,
+        "novo": 1.0
+      },
+      "unidades": {
+        "velho": 1.0,
+        "medio": 1.0,
+        "nao_sei": 0.5,
+        "novo": 0.0
+      },
+      "custo": 3500,
+      "porUnidade": true,
+      "acaoVarias": "Substituição de {n} geladeiras e freezers antigos por Procel A"
+    },
+    "expositor": {
+      "acao": "Instalação de portas no balcão refrigerado",
+      "fator": {
+        "aberto": 0.6,
+        "nao_sei": 0.8,
+        "porta": 1.0
+      },
+      "unidades": {
+        "aberto": 1.0,
+        "nao_sei": 0.5,
+        "porta": 0.0
+      },
+      "custo": 3000,
+      "porUnidade": true,
+      "acaoVarias": "Instalação de portas em {n} balcões refrigerados"
+    },
+    "chuveiro": {
+      "acao": "Instalação de aquecedor solar para o banho",
+      "fator": {
+        "verao": 0.3,
+        "inverno": 0.3,
+        "varia": 0.3,
+        "nao_sei": 0.3
+      },
+      "custo": 5000,
+      "porUnidade": false
+    },
+    "boiler": {
+      "acao": "Substituição da resistência do boiler por bomba de calor",
+      "fator": {
+        "direto": 0.33,
+        "timer": 0.36,
+        "nao_sei": 0.35
+      },
+      "custo": 9000,
+      "porUnidade": false
+    },
+    "piscina": {
+      "acao": "Instalação de timer na bomba da piscina",
+      "fator": {
+        "mais8": 0.6,
+        "4a8": 0.85,
+        "nao_sei": 0.85,
+        "ate4": 1.0
+      },
+      "custo": 400,
+      "porUnidade": false
+    },
+    "aqpiscina": {
+      "acao": "Substituição do aquecedor da piscina por bomba de calor",
+      "fator": {
+        "resistencia": 0.3,
+        "nao_sei": 0.6,
+        "bomba_calor": 1.0,
+        "solar": 1.0
+      },
+      "custo": 15000,
+      "porUnidade": false
+    },
+    "luz": {
+      "acao": "Substituição das lâmpadas por LED",
+      "fator": {
+        "poucas": 0.45,
+        "nao_sei": 0.7,
+        "maioria": 0.85,
+        "todas": 1.0
+      },
+      "unidades": {
+        "poucas": 0.9,
+        "nao_sei": 0.5,
+        "maioria": 0.2,
+        "todas": 0.0
+      },
+      "custo": 20,
+      "porUnidade": true,
+      "acaoVarias": "Substituição de {n} lâmpadas por LED"
+    }
+  },
+  "deslocaveis": {
+    "_leia": "Classes cujo horário dá para levar para o sol; a lista são as respostas que permitem (null = qualquer).",
+    "lavar": [
+      "ja",
+      "daria"
+    ],
+    "piscina": null,
+    "aqpiscina": null,
+    "boiler": null,
+    "carro": [
+      "dia",
+      "varia"
+    ]
+  },
+  "estimativa": {
+    "_leia": "Só o score do app usa: no navegador não há o motor, a conta nem o PVGIS.",
+    "tarifaPadrao": 1.0,
+    "custoKwp": 3800,
+    "custoBateriaKwh": 3500,
+    "profundidadeBateria": 0.9,
+    "passoBateriaKwh": 5,
+    "coberturaBateria": 0.95,
+    "disponibilidadeKwh": 50,
+    "paybackMaximoTroca": 8,
+    "horasDaFalta": {
+      "minutos": 1,
+      "horas": 3,
+      "meio_dia": 6,
+      "dia": 12
+    },
+    "fdRefrigeracao": [
+      [
+        "frigobar",
+        0.3
+      ],
+      [
+        "bebedouro",
+        0.3
+      ],
+      [
+        "geladeira",
+        0.35
+      ],
+      [
+        "freezer",
+        0.4
+      ],
+      [
+        "expositor",
+        0.5
+      ]
+    ],
+    "formaCasa": [
+      0.45,
+      0.4,
+      0.38,
+      0.37,
+      0.38,
+      0.45,
+      0.7,
+      0.85,
+      0.75,
+      0.65,
+      0.62,
+      0.65,
+      0.72,
+      0.68,
+      0.62,
+      0.62,
+      0.7,
+      0.9,
+      1.15,
+      1.3,
+      1.3,
+      1.2,
+      0.95,
+      0.65
+    ]
+  },
+  "sugestoes": {
+    "_leia": "Textos das sugestões que não são troca de aparelho.",
+    "solar": "Instalação de placas solares no telhado",
+    "solarAmpliar": "Ampliação das placas solares no telhado",
+    "bateria": "Instalação de bateria para a falta de luz",
+    "horario": "Uso {lista} entre 9h e 15h, com o sol",
+    "branca": "Mudança para a tarifa branca",
+    "deslocaveis": {
+      "lavar": "das máquinas de lavar",
+      "piscina": "da bomba da piscina",
+      "aqpiscina": "do aquecimento da piscina",
+      "boiler": "do aquecedor de água",
+      "carro": "do carregador do carro"
+    }
+  }
+}

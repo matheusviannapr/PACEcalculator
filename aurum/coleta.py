@@ -207,10 +207,12 @@ def ler_pacote(caminho: str | Path | dict) -> DadosColeta:
     if not conta.get("dataUrl"):
         avisos.append("A coleta não traz a conta de luz; a tarifa terá de ser informada.")
 
-    # O nome do cenário vem do cliente, e o segmento é residência: o aplicativo
-    # de coleta só existe para esse segmento, e assumir outro faria a curva de
-    # referência da conferência ser a errada.
-    cenario.segmento = "residencia"
+    # O segmento decide a curva de referência da conferência. A coleta de campo
+    # e o questionário da casa são residência; o questionário de negócio traz
+    # o segmento do motor (escola, restaurante, varejo) escolhido pelo setor.
+    q = pacote.get("questionario") or {}
+    cenario.segmento = (str(q.get("segmentoMotor") or "residencia")
+                        if q.get("tipo") == "negocio" else "residencia")
 
     return DadosColeta(
         cenario=cenario,

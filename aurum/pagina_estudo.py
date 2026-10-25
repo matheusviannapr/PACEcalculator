@@ -22,6 +22,7 @@ A barra lateral carrega um resumo do que já foi decidido, que vai crescendo.
 """
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any, Callable
 
@@ -52,6 +53,8 @@ from .demanda.biblioteca import (
 from .demanda.cenario import MODOS_FIXOS, TIPOS_INTERVALO, Cenario
 from .demanda.ajuste import ContaDeLuz, ajustar, ajustar_melhor_perfil
 from .proposal.render import encontrar_compilador
+
+_LOG = logging.getLogger(__name__)
 
 # O fluxo tem duas fases, e a fronteira entre elas é real, não decorativa: a
 # primeira dimensiona o sistema fotovoltaico e termina num projeto fechado, com
@@ -86,6 +89,18 @@ PASSOS: tuple[tuple[int, str, str, str], ...] = (
 
 #: Índice (1-based) do primeiro passo da segunda fase.
 PRIMEIRO_PASSO_ANALISE = next(i for i, p in enumerate(PASSOS, start=1) if p[0] == 1)
+
+
+def _passo_chamado(titulo: str) -> int:
+    """
+    O índice do passo pelo nome.
+
+    Botões que levavam a um passo por número quebravam em silêncio a cada
+    passo novo: "Mudar a meta" levava ao passo 5, que tinha virado o do
+    equipamento, e as mensagens mandavam o usuário ao "passo 3" que já era
+    outro.
+    """
+    return next(i for i, p in enumerate(PASSOS, start=1) if p[1] == titulo)
 
 _PADROES: dict[str, Any] = {
     "e_passo": 1,
@@ -209,6 +224,22 @@ _PADROES: dict[str, Any] = {
     #: As duas parcelas que a obra soma ao kit, em R$/kWp.
     "e_mao_de_obra": None,
     "e_material_ca": None,
+    #: A conta de luz do passo da Meta. ``None`` nas três primeiras quer dizer
+    #: "ainda não semeado": o valor sai da vistoria, da conta ajustada ou da
+    #: tensão da rede quando o passo abre (ver `_semear_conta`).
+    "e_tarifa": None,
+    "e_consumo_fatura": None,
+    "e_disponibilidade": None,
+    "e_bandeira": 0.0,
+    "e_fio_b": 28,
+    "e_ano_conexao": None,
+    "e_reajuste": 5.0,
+    "e_degradacao_fv": 0.5,
+    "e_tarifa_horaria": False,
+    #: O consumo que semeou `e_consumo_fatura` da última vez. Enquanto o campo
+    #: continuar igual a ele, o operador não mexeu, e uma conta nova pode
+    #: atualizá-lo; depois de mexer, o número digitado manda.
+    "e_consumo_semeado": None,
 }
 
 
@@ -225,7 +256,9 @@ _CHAVES_PERSISTENTES = tuple(
     chave for chave in _PADROES
     if chave.startswith("e_conta_")
     or chave in ("e_fracao_backup", "e_nome", "e_modo_solar", "e_consumo_compensar",
-                 "e_compensar_frac")
+                 "e_compensar_frac", "e_tarifa", "e_consumo_fatura", "e_disponibilidade",
+                 "e_bandeira", "e_fio_b", "e_ano_conexao", "e_reajuste",
+                 "e_degradacao_fv", "e_tarifa_horaria")
 )
 
 
@@ -492,6 +525,14 @@ def _vistoria_na_primeira_tela() -> None:
             "Os campos abaixo já vieram dela."
         )
         return
+
+    with st.expander("Buscar a primeira reunião no CRM (ID do lead)", expanded=True):
+        st.caption(
+            "A primeira reunião, feita no CRM, já traz o cliente, o telhado "
+            "marcado no satélite, a conta e os equipamentos com o que não pode "
+            "parar quando a rede cai. Digite o ID do lead (ex.: L0024)."
+        )
+        _coleta_do_crm()
 
     with st.expander("Tenho a coleta residencial do cliente (.json)"):
         st.caption(
@@ -863,10 +904,15 @@ def _calcular_da_coleta(tarifa, consumo_mes, autonomia, corte, com_solar) -> Non
     inclinacao = float(st.session_state.get("e_inclinacao_coleta") or 20.0)
     st.session_state["e_inclinacao"] = inclinacao
 
+    # O piso da conta segue a ligação: 220/380 V é trifásica (100 kWh); a rede
+    # 127/220 de uma casa é quase sempre bifásica (50 kWh). Fixar 100 para
+    # todas punha na casa bifásica um piso que ela não paga, e comia
+    # economia que ela tem.
+    trifasica = float(st.session_state.get("e_tensao_rede") or 380.0) >= 300.0
     fatura = Fatura(
         tarifa_brl_kwh=float(tarifa),
         consumo_mensal_kwh=float(consumo_mes),
-        custo_disponibilidade_kwh=100.0,
+        custo_disponibilidade_kwh=100.0 if trifasica else 50.0,
     )
     cfg = _montar_configuracao(
         autonomia=float(autonomia), confiabilidade=0.95,
@@ -884,6 +930,7 @@ def _calcular_da_coleta(tarifa, consumo_mes, autonomia, corte, com_solar) -> Non
         st.session_state["e_estudo"] = executar_estudo(
             cfg, progresso=lambda m, f: barra.progress(min(1.0, f), text=m))
     except Exception as exc:  # noqa: BLE001 — a tela mostra a mensagem, não o traceback
+        _LOG.exception("estudo da coleta falhou")
         barra.empty()
         st.error(f"O estudo não pôde ser concluído: {exc}")
         return
@@ -1146,8 +1193,78 @@ def _cargas_da_coleta() -> None:
         return
 
     try:
-        dados = ler_pacote(json.loads(arquivo.getvalue().decode("utf-8-sig")))
-    except (ValueError, KeyError, json.JSONDecodeError) as erro:
+        pacote = json.loads(arquivo.getvalue().decode("utf-8-sig"))
+    except (ValueError, json.JSONDecodeError) as erro:
+        st.error(f"Não consegui ler este pacote: {erro}")
+        return
+    _importar_pacote(pacote, chave="coleta")
+
+
+#: O CRM comercial publicado (Cloudflare Pages). Sobrescrito por CRM_URL nos
+#: secrets do Streamlit ou no ambiente.
+CRM_URL_PADRAO = "https://pace-estudo.pages.dev"
+
+
+def _segredo(nome: str) -> str:
+    """Secrets do Streamlit primeiro, ambiente depois; vazio se não houver."""
+    import os
+
+    try:
+        valor = st.secrets.get(nome)  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 - sem secrets.toml o Streamlit levanta
+        valor = None
+    return str(valor or os.environ.get(nome) or "").strip()
+
+
+def _coleta_do_crm() -> None:
+    """
+    Busca no CRM o pacote da primeira reunião, pelo ID do lead.
+
+    A chave (CRM_CALCULADORA_CHAVE) é a mesma CALCULADORA_CHAVE do CRM; fica
+    nos secrets do Streamlit, nunca no código nem no repositório.
+    """
+    import requests
+
+    chave = _segredo("CRM_CALCULADORA_CHAVE")
+    if not chave:
+        st.info(
+            "Para buscar no CRM, configure **CRM_CALCULADORA_CHAVE** nos secrets "
+            "do Streamlit (a mesma chave CALCULADORA_CHAVE do CRM)."
+        )
+        return
+    base = (_segredo("CRM_URL") or CRM_URL_PADRAO).rstrip("/")
+    c1, c2 = st.columns([3, 1], vertical_alignment="bottom")
+    lead = c1.text_input("ID do lead", placeholder="L0024", key="e_lead_crm").strip().upper()
+    if c2.button("Buscar no CRM", width="stretch", disabled=not lead):
+        try:
+            r = requests.get(f"{base}/api/calculadora/lead/{lead}",
+                             headers={"Authorization": f"Bearer {chave}"}, timeout=30)
+            j = r.json()
+        except (requests.RequestException, ValueError) as erro:
+            st.error(f"O CRM não respondeu: {erro}")
+            return
+        if not r.ok or not j.get("ok"):
+            st.error(j.get("erro") or f"O CRM recusou a busca ({r.status_code}).")
+            return
+        st.session_state["e_pacote_crm"] = j
+    achado = st.session_state.get("e_pacote_crm")
+    if not achado:
+        return
+    if not achado.get("completa"):
+        st.warning(
+            "A reunião deste lead ainda tem pendências no CRM (endereço, aceite, "
+            "telhado ou equipamentos). Dá para importar, mas confira o que faltou."
+        )
+    _importar_pacote(achado["pacote"], chave="crm")
+
+
+def _importar_pacote(pacote: dict, chave: str) -> None:
+    """O mesmo caminho para o arquivo da coleta e para o pacote do CRM."""
+    from .coleta import ler_pacote
+
+    try:
+        dados = ler_pacote(pacote)
+    except (ValueError, KeyError, TypeError) as erro:
         st.error(f"Não consegui ler este pacote: {erro}")
         return
 
@@ -1160,7 +1277,7 @@ def _cargas_da_coleta() -> None:
     for aviso in dados.avisos:
         st.caption(aviso)
 
-    if not st.button("Importar esta coleta", type="primary", width="stretch"):
+    if not st.button("Importar esta coleta", type="primary", width="stretch", key=f"importar_{chave}"):
         return
 
     cenario = dados.cenario
@@ -1180,6 +1297,15 @@ def _cargas_da_coleta() -> None:
         })
     if dados.telhado_geojson:
         _telhado_da_coleta(dados)
+    # A primeira reunião já decidiu o que fica na bateria (MC e C; NC é "pode
+    # desligar") e por quantas horas: a tela curta nasce com isso, não com o
+    # padrão de quem não perguntou.
+    q = pacote.get("questionario") or {}
+    if pacote.get("origem") == "primeira-reuniao":
+        presentes = _niveis_presentes(cenario)
+        st.session_state["e_corte_coleta"] = [n for n in ("MC", "C") if n in presentes] or presentes[:1]
+        if q.get("autonomiaSugeridaH"):
+            st.session_state["e_autonomia_coleta"] = int(q["autonomiaSugeridaH"])
     # A coleta respondeu quase tudo: o que falta cabe numa tela só.
     st.session_state["e_via_rapida"] = True
     st.rerun()
@@ -1211,14 +1337,14 @@ def _telhado_da_coleta(dados) -> None:
     except (ValueError, EquipmentError) as erro:
         st.warning(
             f"O contorno veio na coleta, mas não consegui medi-lo: {erro}. "
-            "O estudo segue sem telhado — marque-o no passo 4 se quiser a "
+            "O estudo segue sem telhado — marque-o no passo Telhado se quiser a "
             "verificação de área."
         )
         return
     if layout is None or layout.quantidade == 0:
         st.warning(
             "O contorno da coleta é pequeno demais para caber um módulo com os "
-            "recuos de borda. Confira o desenho no passo 4."
+            "recuos de borda. Confira o desenho no passo Telhado."
         )
         return
 
@@ -1302,7 +1428,14 @@ def _cargas_da_vistoria() -> None:
         "e_tensao_rede": vistoria.tensao_rede_v,
         "e_ensemble_backup": None,
         "e_assinatura_carga": None,
+        # A conta que o vistoriador anotou chega à Meta já preenchida; o
+        # custo de disponibilidade é refeito com a tensão desta rede.
+        "e_consumo_fatura": None,
+        "e_consumo_semeado": None,
+        "e_disponibilidade": None,
     })
+    if vistoria.tarifa_brl_kwh:
+        st.session_state["e_tarifa"] = float(vistoria.tarifa_brl_kwh)
     # A cidade da vistoria vira coordenada, e não só rótulo. Escrever o texto
     # e deixar a coordenada no padrão de Curitiba fazia a tela dizer "Rio de
     # Janeiro / RJ" com o mapa aberto no Paraná — e toda a geração solar do
@@ -1348,6 +1481,16 @@ def _painel_da_vistoria() -> None:
         f"{vistoria.vistoriador or 'não informado'} · rede "
         f"{vistoria.tensao_rede_v:.0f} V · {vistoria.local or 'local não informado'}"
     )
+    if vistoria.tarifa_brl_kwh or vistoria.consumo_mensal_kwh:
+        partes = []
+        if vistoria.tarifa_brl_kwh:
+            partes.append(f"tarifa R&#36; {vistoria.tarifa_brl_kwh:.2f}/kWh".replace(".", ","))
+        if vistoria.consumo_mensal_kwh:
+            partes.append(f"consumo {_milhar(vistoria.consumo_mensal_kwh)} kWh/mês")
+        st.caption(
+            "A conta de luz anotada na vistoria — " + " e ".join(partes)
+            + " — já vem preenchida no passo da Meta."
+        )
 
     tabela = cenario.por_criticidade()
     if tabela.empty:
@@ -2705,8 +2848,11 @@ def _mostrar_carga_de_backup() -> None:
 # Passo 4 — solar
 # ============================================================================
 def _passo_solar() -> None:
-    consumo_anual = float(np.mean(st.session_state["e_ensemble_total"].energia_diaria_kwh())) * 365
-    st.caption(f"Consumo anual estimado da instalação: **{_milhar(consumo_anual)} kWh**.")
+    consumo_anual, origem = _consumo_anual_de_referencia(incluir_compensar=False)
+    st.caption(
+        f"Consumo anual de referência da instalação: **{_milhar(consumo_anual)} kWh** "
+        f"({origem})."
+    )
 
     rotulos = {
         "telhado": "Marcar o telhado no mapa (recomendado)",
@@ -2797,13 +2943,23 @@ def _solar_pelo_consumo(consumo_simulado_kwh: float) -> None:
             "levantamento — ela é medida."
         )
 
-    pedido_kwh = alvo * fracao / 100.0
+    # O custo de disponibilidade é cobrado de qualquer jeito: a conta nunca cai
+    # abaixo dele, e o crédito que passasse disso não teria onde ser usado.
+    # "Compensar 100%" é, portanto, gerar o consumo menos esse piso — gerar o
+    # consumo inteiro deixava ~1.200 kWh/ano de crédito sem uso numa ligação
+    # trifásica, e o sistema maior do que a conta consegue abater.
+    _semear_conta()
+    piso = float(estado.get("e_disponibilidade") or 0.0) * 12.0
+    compensavel = max(0.0, alvo - piso)
+    pedido_kwh = compensavel * fracao / 100.0
     produtividade = _produtividade_estimada(estado["e_lat"], estado["e_lon"])
     kwp_alvo = pedido_kwh / produtividade if produtividade > 0 else 0.0
     estado["e_kwp_alvo"] = kwp_alvo
     st.info(
-        f"O sistema será dimensionado para gerar **{_milhar(pedido_kwh)} kWh/ano** "
-        f"({fracao}% de {_milhar(alvo)} kWh). A esta latitude isso pede cerca de "
+        f"O sistema será dimensionado para gerar **{_milhar(pedido_kwh)} kWh/ano**: "
+        f"{fracao}% de {_milhar(alvo)} kWh menos o custo de disponibilidade "
+        f"({_milhar(piso)} kWh/ano, que a conta cobra de qualquer jeito — ajuste o tipo "
+        "de ligação no passo da Meta). A esta latitude isso pede cerca de "
         f"**{kwp_alvo:.1f} kWp** ({_milhar(produtividade)} kWh/kWp ao ano); o passo "
         "seguinte fecha o arranjo em módulos inteiros e a tela de resultado confere "
         "quanto ele de fato cobre. O estudo não verifica se cabe no telhado."
@@ -3447,8 +3603,74 @@ def _orientacao(azimute: float) -> str:
 
 
 # ============================================================================
-# Passo 5 — meta e execução
+# Passo 7 — meta e execução
 # ============================================================================
+def _consumo_anual_de_referencia(incluir_compensar: bool = True) -> tuple[float, str]:
+    """
+    O consumo anual que o estudo usa como o do cliente, e de onde ele veio.
+
+    Uma regra só para a tela inteira, na mesma ordem que o motor usa
+    (`_montar_configuracao`): o alvo digitado para compensar a conta, a
+    média ponderada dos perfis de ocupação (o ano médio, e não o dia que
+    dimensiona), a conta de luz que deu tamanho à curva, e por último a
+    curva simulada. Antes, o passo do solar mostrava o consumo do perfil de
+    maior pico — numa residência, a casa cheia — e o sistema proposto para
+    "compensar a conta" saía maior que a conta.
+
+    ``incluir_compensar=False`` é para o próprio passo do solar, que é onde o
+    alvo é digitado e precisa da referência sem ele.
+    """
+    estado = st.session_state
+    if (incluir_compensar and estado.get("e_modo_solar") == "compensar"
+            and estado.get("e_consumo_compensar")):
+        return float(estado["e_consumo_compensar"]), "consumo digitado como alvo de compensação"
+    ocupacao = estado.get("e_ocupacao") or {}
+    if ocupacao.get("diaria_ponderada_kwh"):
+        return float(ocupacao["diaria_ponderada_kwh"]) * 365.0, \
+            "média ponderada dos perfis de ocupação"
+    ajuste = estado.get("e_ajuste_conta") if estado.get("e_cenario") is None else None
+    if ajuste is not None:
+        return float(ajuste.consumo_anual_kwh), "conta de luz que deu tamanho à curva"
+    ensemble = estado.get("e_ensemble_total")
+    if ensemble is not None:
+        return float(np.mean(ensemble.energia_diaria_kwh())) * 365.0, \
+            "levantamento de cargas simulado"
+    return 0.0, "sem consumo ainda"
+
+
+def _semear_conta() -> None:
+    """
+    Preenche a conta de luz com o que o estudo já sabe, antes dos campos.
+
+    A tarifa e o consumo que a vistoria anotou, o consumo da conta que deu
+    forma à curva, o custo de disponibilidade que a tensão da rede sugere.
+    Pedir de novo o que já está no arquivo é convite a digitar diferente.
+    """
+    from datetime import date
+
+    estado = st.session_state
+    vistoria = estado.get("e_vistoria")
+    if estado.get("e_tarifa") is None:
+        estado["e_tarifa"] = float(
+            getattr(vistoria, "tarifa_brl_kwh", None)
+            or estado.get("e_tarifa_coleta") or 0.98)
+    ajuste = estado.get("e_ajuste_conta") if estado.get("e_cenario") is None else None
+    sugerido = 0.0
+    if ajuste is not None:
+        sugerido = round(float(ajuste.conta.consumo_mensal_kwh), 0)
+    elif getattr(vistoria, "consumo_mensal_kwh", None):
+        sugerido = round(float(vistoria.consumo_mensal_kwh), 0)
+    atual = estado.get("e_consumo_fatura")
+    if atual is None or (atual == estado.get("e_consumo_semeado") and atual != sugerido):
+        estado["e_consumo_fatura"] = sugerido
+        estado["e_consumo_semeado"] = sugerido
+    if estado.get("e_disponibilidade") is None:
+        trifasica = float(estado.get("e_tensao_rede") or 380.0) >= 300.0
+        estado["e_disponibilidade"] = 100 if trifasica else 50
+    if estado.get("e_ano_conexao") is None:
+        estado["e_ano_conexao"] = date.today().year
+
+
 def _passo_meta() -> None:
     colunas = st.columns(2)
     with colunas[0]:
@@ -3530,33 +3752,77 @@ def _passo_meta() -> None:
     st.markdown("##### A conta de luz do cliente")
     st.caption(
         "Tarifa simples (convencional, Grupo B). É contra essa conta que a economia "
-        "de cada cenário é medida."
+        "de cada cenário é medida — e é **uma tarifa só** para o estudo inteiro: "
+        "solar, bateria, dossiê e apresentação."
     )
+    _semear_conta()
     colunas = st.columns(3)
     tarifa_simples = colunas[0].number_input(
-        "Tarifa (R$/kWh)", 0.10, 5.0, 0.98, 0.01,
-        help="A tarifa cheia da fatura, com impostos.")
-    # Quem veio pela conta de luz já a informou: o campo nasce preenchido, e
-    # a economia é medida contra a mesma fatura que deu forma à carga.
-    ajuste_conta = st.session_state.get("e_ajuste_conta")         if st.session_state.get("e_cenario") is None else None
-    consumo_padrao = (
-        round(float(ajuste_conta.conta.consumo_mensal_kwh), 0) if ajuste_conta else 0.0
-    )
+        "Tarifa média (R$/kWh)", 0.10, 5.0, step=0.01, format="%.4f", key="e_tarifa",
+        help="O valor total da fatura dividido pelos kWh faturados, com tributos e a "
+             "bandeira do mês. Não é a tarifa de tabela da distribuidora.")
     consumo_fatura = colunas[1].number_input(
-        "Consumo médio na fatura (kWh/mês)", 0.0, 500_000.0, consumo_padrao, 50.0,
-        help="Zero usa o consumo que a simulação de cargas produziu. Preenchido, a "
-             "simulação é escalada para bater com a fatura — ela é medida, o "
-             "levantamento é estimativa.")
+        "Consumo médio na fatura (kWh/mês)", 0.0, 500_000.0, step=50.0,
+        key="e_consumo_fatura",
+        help="A média dos últimos 12 meses. Preenchido, a curva de carga é escalada "
+             "para este consumo — a fatura é medida, o levantamento é estimativa. Zero "
+             "usa o consumo que dimensionou o solar.")
     disponibilidade = colunas[2].selectbox(
-        "Custo de disponibilidade", [30, 50, 100], index=2,
-        format_func=lambda k: {30: "30 kWh (monofásico)", 50: "50 kWh (bifásico)",
-                               100: "100 kWh (trifásico)"}[k],
-        help="É o piso da conta: nenhum sistema leva a fatura a zero.")
+        "Tipo de ligação (custo de disponibilidade)", [30, 50, 100],
+        key="e_disponibilidade",
+        format_func=lambda k: {30: "Monofásica — 30 kWh", 50: "Bifásica — 50 kWh",
+                               100: "Trifásica — 100 kWh"}[k],
+        help="É o piso da conta: nenhum sistema leva a fatura abaixo disso.")
+    if not consumo_fatura:
+        referencia, origem = _consumo_anual_de_referencia()
+        st.caption(
+            f"Sem consumo da fatura, a conta de hoje sai de **{_milhar(referencia / 12)} "
+            f"kWh/mês** ({origem}). Com a conta em mãos, prefira o número dela."
+        )
+
+    with st.expander("Compensação da energia injetada (Lei 14.300)"):
+        st.caption(
+            "O kWh consumido na hora da geração evita a tarifa cheia. O kWh injetado "
+            "vira crédito e abate a conta, mas paga uma parte do Fio B que sobe a cada "
+            "ano — 60% em 2026, 75% em 2027, 90% em 2028 e 100% daí em diante. O "
+            "estudo refaz a conta ano a ano com esse degrau."
+        )
+        colunas = st.columns(3)
+        bandeira = colunas[0].number_input(
+            "Adicional de bandeira (R$/kWh)", 0.0, 1.0, step=0.005, format="%.3f",
+            key="e_bandeira",
+            help="Deixe em zero se a tarifa média acima já veio de uma fatura com a "
+                 "bandeira dentro. Preencha para simular uma bandeira sobre a tarifa "
+                 "sem bandeira. A energia compensada também evita a bandeira.")
+        participacao = colunas[1].slider(
+            "Participação do Fio B na tarifa (%)", 10, 45, step=1, key="e_fio_b",
+            help="A TUSD de distribuição sobre a tarifa total. Varia por "
+                 "distribuidora; 28% é a ordem de grandeza da baixa tensão.")
+        ano_conexao = colunas[2].number_input(
+            "Ano de ligação do sistema", 2023, 2040, step=1, key="e_ano_conexao",
+            help="Define o degrau do Fio B no primeiro ano do fluxo de caixa.")
+        colunas = st.columns(2)
+        reajuste = colunas[0].slider(
+            "Reajuste tarifário (% a.a.)", 0.0, 12.0, step=0.5, key="e_reajuste")
+        degradacao_fv = colunas[1].slider(
+            "Perda de rendimento do módulo (% a.a.)", 0.0, 1.5, step=0.05,
+            key="e_degradacao_fv",
+            help="A garantia linear típica de módulo monocristalino é ~0,5% a.a.")
 
     fatura = Fatura(
         tarifa_brl_kwh=float(tarifa_simples),
         consumo_mensal_kwh=float(consumo_fatura) or None,
         custo_disponibilidade_kwh=float(disponibilidade),
+        bandeira_brl_kwh=float(bandeira),
+        participacao_fio_b=float(participacao) / 100.0,
+        ano_conexao=int(ano_conexao),
+        escalada_tarifaria_ano=float(reajuste) / 100.0,
+    )
+    st.caption(
+        f"Com estes números, o kWh injetado e compensado vale "
+        f"**R&#36; {fatura.valor_injecao_brl_kwh:.3f}** no primeiro ano "
+        f"(tarifa R&#36; {fatura.tarifa_efetiva_brl_kwh:.3f} menos Fio B "
+        f"R&#36; {fatura.fio_b_brl_kwh():.3f})".replace(".", ",") + "."
     )
 
     colunas = st.columns([1.2, 1])
@@ -3589,14 +3855,24 @@ def _passo_meta() -> None:
     if referencia:
         colunas[0].caption(referencia)
 
-    with st.expander("Para calcular o retorno financeiro (opcional)"):
+    with st.expander("Resiliência, tarifa horária e horizonte"):
         st.caption(
-            "Sem preencher, o estudo entrega a engenharia e deixa o dinheiro de fora. "
-            "O campo que mais muda a conta é o último."
+            "A economia de conta já sai da tarifa acima. Aqui ficam o valor de não "
+            "ficar sem energia — que não aparece na conta e por isso vai numa coluna "
+            "à parte, fora do payback — e a tarifa horária, só para quem tem."
         )
+        horaria = st.checkbox(
+            "O cliente tem tarifa horária (branca ou Grupo A)", key="e_tarifa_horaria",
+            help="Desmarcado, a bateria é avaliada com a tarifa simples acima, sem "
+                 "arbitragem entre horários — o caso do Grupo B convencional.")
         colunas = st.columns(3)
-        tarifa = colunas[0].number_input("Tarifa fora de ponta (R$/kWh)", 0.10, 5.0, 0.78, 0.01)
-        tarifa_ponta = colunas[1].number_input("Tarifa de ponta (R$/kWh)", 0.10, 8.0, 1.35, 0.01)
+        if horaria:
+            tarifa = colunas[0].number_input(
+                "Tarifa fora de ponta (R$/kWh)", 0.10, 5.0, 0.78, 0.01)
+            tarifa_ponta = colunas[1].number_input(
+                "Tarifa de ponta (R$/kWh)", 0.10, 8.0, 1.35, 0.01)
+        else:
+            tarifa = tarifa_ponta = fatura.tarifa_efetiva_brl_kwh
         tarifa_demanda = colunas[2].number_input(
             "Demanda contratada (R$/kW/mês)", 0.0, 200.0, 0.0, 1.0,
             help="Zero para clientes do Grupo B (baixa tensão).")
@@ -3624,7 +3900,7 @@ def _passo_meta() -> None:
         elif abs(custo_interrupcao - sugerido) < 0.01:
             st.caption(
                 f"Sugestão para **{MODELOS[st.session_state['e_segmento']].nome}**: "
-                f"R$ {sugerido:.0f}/kWh. É ordem de grandeza, não cotação — o número "
+                f"R&#36; {sugerido:.0f}/kWh. É ordem de grandeza, não cotação — o número "
                 "que vale é o que o cliente disser."
             )
         colunas = st.columns(2)
@@ -3670,12 +3946,17 @@ def _passo_meta() -> None:
             mao_de_obra_brl_kwp=mao_de_obra,
             material_ca_brl_kwp=material_ca,
             capex_fv_brl=float(capex_informado) or None,
+            degradacao_fv_ano=float(degradacao_fv) / 100.0,
         )
         barra = st.progress(0.0, text="Preparando…")
         try:
             st.session_state["e_estudo"] = executar_estudo(
                 cfg, progresso=lambda m, f: barra.progress(min(1.0, f), text=m))
         except Exception as exc:  # noqa: BLE001 — a interface mostra a mensagem, não o traceback
+            # O traceback vai para o log do servidor: a mensagem sozinha na
+            # tela ("janela_fim deve ser maior que janela_inicio") não diz em
+            # que etapa do estudo o erro nasceu.
+            _LOG.exception("estudo falhou")
             barra.empty()
             st.error(f"O estudo não pôde ser concluído: {exc}")
             return False
@@ -3707,7 +3988,7 @@ def _aba_cenarios(estudo) -> None:
     _cartao(colunas[0], "Conta de hoje", f"{_reais(base.conta_anual_brl)}/ano")
     melhor = comparacao.melhor_vpl
     if melhor is not None:
-        _cartao(colunas[1], "Maior valor presente", melhor.nome.replace("Rede + ", ""))
+        _cartao(colunas[1], "Maior valor presente (caixa)", melhor.nome.replace("Rede + ", ""))
         _cartao(colunas[2], "VPL desse arranjo", _reais(melhor.vpl_brl))
 
     quadro = pd.DataFrame([
@@ -3719,8 +4000,10 @@ def _aba_cenarios(estudo) -> None:
             "resiliência (R$/ano)": round(c.valor_resiliencia_brl_ano),
             "autonomia (h)": c.autonomia_garantida_h,
             "sem energia (kWh)": round(c.ens_por_evento_kwh, 1),
-            "VPL (R$)": round(c.vpl_brl),
-            "payback (anos)": round(c.payback_anos, 1) if c.payback_anos else None,
+            "VPL caixa (R$)": round(c.vpl_brl),
+            "VPL c/ resiliência (R$)": round(c.vpl_com_resiliencia_brl),
+            "payback simples (anos)": (
+                round(c.payback_simples_anos, 1) if c.payback_simples_anos else None),
         }
         for c in comparacao.cenarios
     ])
@@ -3729,7 +4012,9 @@ def _aba_cenarios(estudo) -> None:
         "`autonomia` é a maior falta atravessada em 95% dos casos no pior par de "
         "estação e hora — ela empata em zero sempre que nenhum arranjo cumpre isso. "
         "`sem energia` é o que falta à carga essencial numa interrupção média, e "
-        "separa os arranjos mesmo quando a autonomia empata."
+        "separa os arranjos mesmo quando a autonomia empata. `VPL caixa` e o "
+        "payback são só da conta de luz; a resiliência entra à parte, no `VPL c/ "
+        "resiliência`."
     )
 
     st.markdown("##### O que cada fonte resolve")
@@ -3747,26 +4032,30 @@ def _aba_cenarios(estudo) -> None:
         st.warning(aviso)
 
 
-def _energia_do_banco() -> float:
+def _energia_do_banco() -> tuple[float, float]:
     """
-    Quanta bateria o preço do kit split-phase precisa incluir.
+    Quanta bateria o preço do kit split-phase precisa incluir: (útil, nominal).
 
     Em ordem: o banco que o estudo recomendou, quando já rodou; os blocos que
     o operador fixou, quando fixou; zero, quando ainda não há nem um nem
     outro — e aí a tela diz que o banco ainda não entrou na conta, em vez de
     mostrar um split-phase suspeito de barato.
+
+    O preço sai da **nominal** (é como o bloco se vende, e como o estudo
+    conta); a útil é o que se mostra ao cliente.
     """
     estudo = st.session_state.get("e_estudo")
     recomendado = getattr(estudo, "recomendado", None) if estudo is not None else None
     if recomendado is not None:
-        return float(recomendado.conjunto.energia_util_kwh)
+        return (float(recomendado.conjunto.energia_util_kwh),
+                float(recomendado.conjunto.capacidade_nominal_kwh))
     blocos = int(st.session_state.get("e_blocos_bateria") or 0)
     if blocos > 0:
         nominal = blocos * float(st.session_state.get("e_bateria_bloco_kwh") or 5.0)
         # 95% de profundidade de descarga e 95% de rendimento, como o bloco
         # padrão do catálogo declara: é o que vira energia útil.
-        return nominal * 0.95 * 0.95
-    return 0.0
+        return nominal * 0.95 * 0.95, nominal
+    return 0.0, 0.0
 
 
 def _escolher_as_propostas(mao_de_obra: float, material_ca: float) -> None:
@@ -3810,11 +4099,11 @@ def _escolher_as_propostas(mao_de_obra: float, material_ca: float) -> None:
         )
         return
 
-    banco_kwh = _energia_do_banco()
+    banco_kwh, banco_nominal = _energia_do_banco()
     precos = capex_por_topologia(
         kwp, escolhidas,
         mao_de_obra_brl_kwp=mao_de_obra, material_ca_brl_kwp=material_ca,
-        bateria_kwh=banco_kwh,
+        bateria_kwh=banco_nominal,
         bloco_kwh=float(estado.get("e_bateria_bloco_kwh") or 5.0),
         bloco_brl=float(estado.get("e_bateria_bloco_brl") or 0.0),
     )
@@ -3882,6 +4171,11 @@ def _controles_do_kit() -> tuple[str | None, float, float]:
 
     kwp = float(st.session_state.get("e_kwp") or 0.0)
     sugerida = topologia_para_rede(float(st.session_state.get("e_tensao_rede") or 380.0))
+    # O kit trifásico só existe a partir de 20 kWp. Sugeri-lo para uma casa de
+    # 4 kWp numa rede 220/380 deixava a coluna sem preço e o investimento caía
+    # na curva de obra — um número que nenhuma proposta usa.
+    if sugerida == "trifasico" and 0 < kwp < 20.0:
+        sugerida = "splitphase"
     chaves = ["", *TOPOLOGIAS]
 
     # Com `key=`, o Streamlit lê o estado e ignora o `value=` do widget. Como
@@ -3931,6 +4225,12 @@ def _controles_do_kit() -> tuple[str | None, float, float]:
         )
         if topologia:
             st.caption(DESCRICAO_TOPOLOGIA.get(topologia, ""))
+        if topologia == "trifasico" and 0 < kwp < 20.0:
+            st.warning(
+                f"O kit trifásico começa em 20 kWp. Para {kwp:.1f} kWp a tabela cobra o "
+                "kit de 20 kWp inteiro — o preço por kWp sai duas a quatro vezes maior. "
+                "Para este tamanho, use split-phase ou mono/bifásico."
+            )
 
         # A bateria entra em bloco, e não em R$/kWh contínuo: é assim que se
         # compra, e é o que a própria tabela mostra — a coluna "Split + 5kWh"
@@ -3982,9 +4282,9 @@ def _mostrar_composicao_do_kit(
         return
     partes = composicao_de_kit(
         kwp, topologia, mao_de_obra, material_ca,
-        bateria_kwh=_energia_do_banco(),
+        bateria_kwh=_energia_do_banco()[1],
         bloco_kwh=float(st.session_state.get("e_bateria_bloco_kwh") or 5.0),
-        bloco_brl=float(st.session_state.get("e_bateria_bloco_brl") or 10_000.0),
+        bloco_brl=float(st.session_state.get("e_bateria_bloco_brl") or 12_000.0),
     )
     if partes is None:
         st.caption(
@@ -4032,9 +4332,22 @@ def _referencia_capex(
     o usuário mexa no seletor de padrão e não veja número nenhum mudar.
     """
     from .pv.financials import estimar_capex
+    from .pv.kits import capex_por_topologia
 
     if kwp <= 0:
         return ""
+    # Com as propostas precificadas pela tabela, é ela que vai para a tela, o
+    # dossiê e os slides; o padrão de obra só vale onde a tabela não cobre.
+    # Mostrar aqui o total da curva era mostrar um investimento que nenhuma
+    # proposta usa.
+    pedidas = st.session_state.get("e_topologias_proposta") or ()
+    if pedidas and all(
+        d["capex_brl"] is not None for d in capex_por_topologia(kwp, pedidas).values()
+    ):
+        return (
+            f"As propostas desta potência ({kwp:.1f} kWp) saem da **tabela de kit**; "
+            "o padrão da obra não entra no preço delas."
+        )
     total = estimar_capex(
         kwp, padrao=padrao, topologia=topologia,
         mao_de_obra_brl_kwp=mao_de_obra, material_ca_brl_kwp=material_ca,
@@ -4067,6 +4380,7 @@ def _montar_configuracao(
     mao_de_obra_brl_kwp: float | None = None,
     material_ca_brl_kwp: float | None = None,
     capex_fv_brl: float | None = None,
+    degradacao_fv_ano: float = 0.005,
 ) -> ConfiguracaoEstudo:
     estado = st.session_state
     levantado: Cenario | None = estado["e_cenario"]
@@ -4197,6 +4511,9 @@ def _montar_configuracao(
             interrupcoes_por_ano=interrupcoes,
             reserva_backup_frac=reserva,
             anos_analise=int(anos),
+            degradacao_fv_ano=float(degradacao_fv_ano),
+            escalada_tarifaria_ano=(
+                fatura.escalada_tarifaria_ano if fatura is not None else 0.05),
         ),
     )
 
@@ -4210,15 +4527,16 @@ def _passo_resultado() -> None:
         st.warning("O estudo ainda não foi rodado.")
         st.info("Volte à etapa Meta e execute o cálculo para ver a recomendação.")
         if st.button("Ir para Meta", type="primary"):
-            _ir(7)
+            _ir(_passo_chamado("Meta"))
         return
 
     cfg = estudo.configuracao
+    _selo_de_coerencia(estudo)
     _resposta_em_uma_frase(estudo)
 
     abas = st.tabs([
-        "Cenários", "Durante a falta de luz", "Alternativas", "Limites de potência", "Custos e economia",
-        "Vida útil", "Baixar relatório",
+        "Cenários", "Durante a falta de luz", "Alternativas", "Limites de potência",
+        "Banco isolado", "Vida útil", "Memória de cálculo", "Baixar relatório",
     ])
 
     # As mesmas figuras do dossiê, e não uma segunda versão desenhada de
@@ -4301,15 +4619,21 @@ def _passo_resultado() -> None:
         )
 
     with abas[4]:
+        st.caption(
+            "O banco de baterias sozinho, isolado do solar: o que ele custa e o que "
+            "acrescenta. O retorno das propostas completas está no topo da página."
+        )
         nomes = list(estudo.economia)
         escolha = st.selectbox("Conjunto ", nomes, key="eco")
         economico = estudo.economia[escolha]
         colunas = st.columns(4)
-        _cartao(colunas[0], "CAPEX", _reais(economico.capex_brl))
-        _cartao(colunas[1], "Economia no ano 1", _reais(economico.economia_ano1_brl))
-        _cartao(colunas[2], "Valor da resiliência", _reais(economico.valor_resiliencia_ano1_brl))
-        _cartao(colunas[3], "Payback",
-                f"{economico.payback_anos:.1f} anos" if economico.payback_anos else "não paga")
+        _cartao(colunas[0], "Investimento no banco", _reais(economico.capex_brl))
+        _cartao(colunas[1], "Economia de conta, ano 1", _reais(economico.economia_ano1_brl))
+        _cartao(colunas[2], "Resiliência, ano 1 (fora do caixa)",
+                _reais(economico.valor_resiliencia_ano1_brl))
+        _cartao(colunas[3], "Retorno pelo caixa",
+                f"{economico.payback_anos:.1f} anos" if economico.payback_anos
+                else "não se paga pela conta")
         st.dataframe(economico.fluxo.round(2), width="stretch", hide_index=True)
         if economico.premissas and economico.premissas.custo_interrupcao_brl_kwh == 0:
             st.info(
@@ -4335,8 +4659,11 @@ def _passo_resultado() -> None:
             )
 
     with abas[6]:
+        _aba_memoria(estudo)
+
+    with abas[7]:
         st.markdown(
-            "O pacote traz o **dossiê completo em LaTeX** — capa, sumário, a foto aérea "
+            "O pacote traz a **memória de cálculo**, o **dossiê completo em LaTeX** — capa, sumário, a foto aérea "
             "do telhado com os módulos, croqui cotado, recurso solar, demanda, "
             "excedência de pico, resiliência a apagões, degradação, análise econômica e "
             "a procedência de cada dado — mais o PDF compilado, um resumo em Markdown, "
@@ -4414,11 +4741,11 @@ def _passo_resultado() -> None:
     st.divider()
     colunas = st.columns(2)
     if colunas[0].button("← Mudar a meta e rodar de novo", width="stretch"):
-        _ir(5)
-    if colunas[1].button("Novo estudo", width="stretch"):
-        for chave, valor in _PADROES.items():
-            st.session_state[chave] = valor
-        _ir(1)
+        _ir(_passo_chamado("Meta"))
+    colunas[1].caption(
+        "Para começar outro estudo, use **Novo estudo** na barra lateral — ele pede "
+        "confirmação, porque apaga este."
+    )
 
 
 def _resposta_em_uma_frase(estudo) -> None:
@@ -4442,7 +4769,14 @@ def _resposta_em_uma_frase(estudo) -> None:
         _cartao(colunas[1], "Inversor",
                 f"{conjunto.potencia_descarga_kw:.0f} / {conjunto.potencia_pico_kw:.0f} kW")
         _cartao(colunas[2], "Solar", f"{estudo.potencia_fv_kwp:.1f} kWp")
-        _cartao(colunas[3], "Investimento", _reais(economico.capex_brl))
+        # O investimento da proposta principal — o mesmo número do slide e do
+        # resumo do dossiê. O cartão mostrava o custo só do banco com o rótulo
+        # "Investimento", ao lado da potência do solar.
+        principal = estudo.financeiro_do_cenario()
+        if principal is not None:
+            _cartao(colunas[3], f"Investimento · {principal.nome}", _reais(principal.capex_brl))
+        else:
+            _cartao(colunas[3], "Investimento no banco", _reais(economico.capex_brl))
     else:
         _diagnostico_da_falha(estudo)
 
@@ -4457,52 +4791,46 @@ def _resposta_em_uma_frase(estudo) -> None:
 
 def _mostrar_as_propostas(estudo) -> None:
     """
-    As duas propostas, lado a lado, com o que muda entre elas.
+    As propostas, lado a lado, com o que muda entre elas.
 
     É a tela que responde à pergunta do balcão — "e com bateria, quanto
-    fica?" — sem esperar o PDF. Os números são os mesmos que vão para o
-    dossiê e para os slides: preço da coluna da tabela, economia e payback do
-    cenário correspondente.
+    fica?" — sem esperar o PDF. Os números vêm do financeiro de cada proposta
+    (:class:`aurum.bateria.fontes.FinanceiroProposta`), o mesmo objeto que o
+    dossiê e os slides leem: não há conta refeita aqui.
     """
-    precos = getattr(estudo, "precos_por_topologia", None)
-    if not precos or estudo.cenarios is None:
+    financeiro = getattr(estudo, "financeiro", None) or {}
+    if not financeiro:
         return
-    linhas = []
-    for topologia, dados in precos.items():
-        capex = dados["capex_brl"]
-        cenario = estudo.cenarios.por_chave(str(dados["cenario"]))
-        if capex is None or cenario is None:
-            continue
-        economia = float(cenario.economia_anual_brl)
-        linhas.append({
-            "proposta": dados["nome"],
-            "investimento": _reais(capex),
-            "economia no 1º ano": _reais(economia),
-            "payback": f"{capex / economia:.1f} anos" if economia > 0 else "—",
-            "autonomia": (
-                f"{cenario.autonomia_garantida_h:.1f} h"
-                if cenario.autonomia_garantida_h > 0 else "nenhuma"
-            ),
-        })
-    if not linhas:
-        return
-
+    linhas = [
+        {
+            "proposta": f.nome,
+            "investimento": _reais_tabela(f.capex_brl),
+            "economia no 1º ano": _reais_tabela(f.economia_ano1_brl),
+            "payback simples": (f"{f.payback_simples_anos:.1f} anos"
+                                if f.payback_simples_anos else "—"),
+            "retorno pelo fluxo": (f"{f.payback_anos:.1f} anos"
+                                   if f.payback_anos else "não se paga"),
+            "TIR": f"{f.tir:.1%}" if f.tir is not None else "—",
+            "autonomia": f"{f.autonomia_h:.1f} h" if f.autonomia_h > 0 else "nenhuma",
+        }
+        for f in financeiro.values()
+    ]
     st.markdown("##### As propostas, lado a lado")
     st.dataframe(pd.DataFrame(linhas), width="stretch", hide_index=True)
-    seco = precos.get("splitphase") or precos.get("microinversor")
-    com_banco = precos.get("splitphase_bateria")
-    if seco and com_banco and seco["capex_brl"] and com_banco["capex_brl"]:
-        diferenca = float(com_banco["capex_brl"]) - float(seco["capex_brl"])
-        cenario = estudo.cenarios.por_chave(str(com_banco["cenario"]))
-        horas = float(cenario.autonomia_garantida_h) if cenario else 0.0
+    com_banco = financeiro.get("splitphase_bateria")
+    seco = financeiro.get("splitphase") or financeiro.get("microinversor")
+    if seco and com_banco:
+        diferenca = com_banco.capex_brl - seco.capex_brl
         st.caption(
-            f"Do **{seco['nome']}** para o **{com_banco['nome']}** são "
-            f"**{_reais(diferenca)}**"
-            + (f", e é o que compra as {horas:.1f} h de autonomia." if horas > 0 else ".")
+            f"Do **{seco.nome}** para o **{com_banco.nome}** são **{_reais(diferenca)}**"
+            + (f", e é o que compra as {com_banco.autonomia_h:.1f} h de autonomia."
+               if com_banco.autonomia_h > 0 else ".")
         )
     st.caption(
-        "Preços da tabela interna de kit. Cada proposta vira um slide da apresentação; "
-        "quais entram se escolhe no passo da Meta."
+        "Payback simples = investimento ÷ economia do 1º ano. Retorno pelo fluxo e "
+        "TIR: 15 anos de fluxo de caixa com reajuste, Fio B crescente, perda do "
+        "módulo, operação e troca do banco. Nenhum inclui o valor da resiliência. "
+        "A aba *Memória de cálculo* refaz cada número."
     )
 
 
@@ -4524,7 +4852,9 @@ def _confirmar_compensacao(estudo) -> None:
     texto = (
         f"O sistema de **{dados['potencia_kwp']:.1f} kWp** gera "
         f"**{_milhar(dados['geracao_kwh'])} kWh/ano** e cobre **{cobertura:.0%}** do "
-        f"{dados['origem']} ({_milhar(alvo)} kWh/ano)."
+        f"consumo compensável: o {dados['origem']} ({_milhar(alvo)} kWh/ano) menos "
+        f"{_milhar(dados.get('piso_kwh', 0.0))} kWh/ano de custo de disponibilidade, que "
+        "a conta cobra de qualquer jeito."
     )
     if dados["definida_por"] == "consumo a compensar":
         alcancou = abs(cobertura - pedida) <= 0.02
@@ -4535,6 +4865,80 @@ def _confirmar_compensacao(estudo) -> None:
             f"{texto} A potência veio do **{dados['definida_por']}** — a cobertura é "
             "a consequência, não a meta."
         )
+
+
+def _conferencias_do_estudo(estudo) -> list:
+    """As conferências automáticas, calculadas uma vez por estudo."""
+    from .bateria.memoria_calculo import conferencias
+
+    marca = id(estudo)
+    if st.session_state.get("e_conferencias_de") != marca:
+        try:
+            itens = conferencias(estudo)
+        except Exception as exc:  # noqa: BLE001 — a tela não cai por uma conferência
+            itens = []
+            st.warning(f"Não consegui rodar as conferências de coerência: {exc}")
+        st.session_state["e_conferencias"] = itens
+        st.session_state["e_conferencias_de"] = marca
+    return st.session_state.get("e_conferencias") or []
+
+
+def _selo_de_coerencia(estudo) -> None:
+    """
+    Uma linha no topo do resultado: as partes do estudo conversam entre si?
+
+    Vem antes de qualquer número porque responde à pergunta que decide se os
+    números podem ir para o cliente. Uma falha aqui é defeito de conta, e a
+    tela diz qual.
+    """
+    itens = _conferencias_do_estudo(estudo)
+    if not itens:
+        return
+    falhas = [c for c in itens if not c.ok and c.grave]
+    atencao = [c for c in itens if not c.ok and not c.grave]
+    if falhas:
+        st.error(
+            f"**{len(falhas)} conferência(s) de coerência falharam** — há números que "
+            "não conversam entre si. Não apresente antes de corrigir: "
+            + "; ".join(c.nome for c in falhas[:4])
+        )
+    else:
+        st.caption(
+            f"✅ {len(itens) - len(atencao)} conferências de coerência fecharam — tela, "
+            "dossiê e apresentação saem dos mesmos números. Detalhes na aba "
+            "*Memória de cálculo*."
+        )
+    for c in atencao[:4]:
+        st.markdown(
+            f'<div class="aviso-suave">⚠️ <b>{c.nome}.</b> {c.explicacao or c.obtido}</div>',
+            unsafe_allow_html=True,
+        )
+
+
+def _aba_memoria(estudo) -> None:
+    """A memória de cálculo inteira, na tela e para baixar."""
+    from .bateria.memoria_calculo import montar_memoria
+
+    marca = id(estudo)
+    if st.session_state.get("e_memoria_calculo_de") != marca:
+        try:
+            st.session_state["e_memoria_calculo"] = montar_memoria(estudo)
+        except Exception as exc:  # noqa: BLE001 — a tela não cai pela memória
+            st.error(f"Não consegui montar a memória de cálculo: {exc}")
+            return
+        st.session_state["e_memoria_calculo_de"] = marca
+    texto = st.session_state["e_memoria_calculo"]
+    st.caption(
+        "Cada premissa escrita e cada conta refeita — consumo, geração, balanço de "
+        "energia, conta de luz com a compensação, investimento e fluxo de caixa de "
+        "cada proposta. Vai também dentro do pacote do dossiê."
+    )
+    st.download_button(
+        "⬇️ Baixar a memória de cálculo (.md)", data=texto.encode("utf-8"),
+        file_name=f"memoria-de-calculo-{_slug(estudo.configuracao.nome)}.md",
+        mime="text/markdown", width="stretch",
+    )
+    st.markdown(texto)
 
 
 def _diagnostico_da_falha(estudo) -> None:
@@ -4575,8 +4979,8 @@ def _diagnostico_da_falha(estudo) -> None:
             f"{maior_inversor:.0f} kW. **Comprar mais kWh não muda esse número.**"
         )
         caminhos = (
-            "**(1)** tirar carga do quadro de backup até o pico caber — volte ao passo 3 "
-            "e veja a aba *Que inversor aguenta*; **(2)** cadastrar um inversor de pelo "
+            "**(1)** tirar carga do quadro de backup até o pico caber — volte ao passo "
+            "*Backup* e veja a aba *Que inversor aguenta*; **(2)** cadastrar um inversor de pelo "
             f"menos {kw_necessario:.0f} kW em `BDBaterias.xlsx`; **(3)** prever corte "
             "seletivo, desligando cargas não críticas durante a falta."
         )
@@ -4590,7 +4994,8 @@ def _diagnostico_da_falha(estudo) -> None:
         caminhos = (
             "**(1)** aumentar o banco — cadastre mais módulos ou baterias maiores em "
             "`BDBaterias.xlsx`; **(2)** aumentar o sistema solar, que recarrega durante a "
-            "falta (passo 4); **(3)** reduzir a meta ou a confiabilidade, no passo 5."
+            "falta (passo *Telhado*); **(3)** reduzir a meta ou a confiabilidade, no passo "
+            "*Meta*."
         )
 
     st.error(
@@ -4608,6 +5013,19 @@ def _diagnostico_da_falha(estudo) -> None:
 # Utilidades
 # ============================================================================
 def _reais(valor: float) -> str:
+    """
+    Reais para o texto da tela (markdown, legenda, cartão).
+
+    O cifrão sai como entidade HTML. Dois "R$" na mesma linha viravam uma
+    fórmula LaTeX no markdown do Streamlit, e o que o usuário lia era
+    "R 4.640/kWp, R 20.880 no total" — os cifrões engolidos e o trecho entre
+    eles em itálico matemático.
+    """
+    return f"R&#36; {_milhar(valor)}"
+
+
+def _reais_tabela(valor: float) -> str:
+    """Reais para célula de tabela, que não passa por markdown."""
     return f"R$ {_milhar(valor)}"
 
 
